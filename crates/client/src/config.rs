@@ -10,8 +10,12 @@ use crate::stream::Preset;
 /// Адрес сервера по умолчанию (переопределяется при сборке: `AMADEUS_SERVER=https://… cargo build`).
 pub const DEFAULT_SERVER: &str = match option_env!("AMADEUS_SERVER") {
     Some(s) => s,
-    None => "https://api.steins-gate.ru",
+    None => "https://api.murmurchat.ru",
 };
+
+/// Прежние адреса сервера по умолчанию: сохранённый в settings.json такой адрес при загрузке меняется на [`DEFAULT_SERVER`]
+/// (переезд на murmurchat.ru, 2026-11-22).
+const OLD_DEFAULT_SERVERS: &[&str] = &["https://api.steins-gate.ru"];
 
 /// Клавиша рации по умолчанию — V (виртуальный код Windows).
 pub const DEFAULT_PTT_KEY: u32 = 0x56;
@@ -204,12 +208,29 @@ impl Settings {
     pub fn load() -> Self {
         let Some(p) = path() else { return Self::default() };
         match std::fs::read(&p) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                log::warn!("settings.json повреждён ({e}), беру настройки по умолчанию");
-                Self::default()
-            }),
+            Ok(bytes) => {
+                let mut s: Self = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                    log::warn!("settings.json повреждён ({e}), беру настройки по умолчанию");
+                    Self::default()
+                });
+                if s.migrate_server() {
+                    log::info!("адрес сервера заменён на {}", s.server_url);
+                    s.save();
+                }
+                s
+            }
             Err(_) => Self::default(),
         }
+    }
+
+    /// Старый адрес сервера по умолчанию → новый. true — если поменяли.
+    fn migrate_server(&mut self) -> bool {
+        let cur = self.server_url.trim().trim_end_matches('/');
+        if OLD_DEFAULT_SERVERS.iter().any(|o| o.eq_ignore_ascii_case(cur)) && cur != DEFAULT_SERVER {
+            self.server_url = DEFAULT_SERVER.to_string();
+            return true;
+        }
+        false
     }
 
     pub fn save(&self) {
@@ -267,5 +288,15 @@ mod tests {
         assert_eq!(s.animations, None);
         assert!(s.pause_anim_in_background && s.live_cat && !s.compact_tiles);
         assert_eq!((s.speech_indicator, s.ping_display, s.sounds_volume), (SpeechIndicator::Wave, PingDisplay::WaveAndMs, 60));
+    }
+
+    #[test]
+    fn old_server_migrates() {
+        let mut s: Settings = serde_json::from_str(r#"{"server_url":"https://api.steins-gate.ru/"}"#).unwrap();
+        assert!(s.migrate_server());
+        assert_eq!(s.server_url, DEFAULT_SERVER);
+        let mut own: Settings = serde_json::from_str(r#"{"server_url":"https://chat.example.com"}"#).unwrap();
+        assert!(!own.migrate_server());
+        assert_eq!(own.server_url, "https://chat.example.com");
     }
 }

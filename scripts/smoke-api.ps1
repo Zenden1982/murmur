@@ -5,7 +5,7 @@
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Name,
-    [string]$Api = 'https://api.steins-gate.ru',
+    [string]$Api = 'https://api.murmurchat.ru',
     [string]$Channel = 'General',
     [switch]$Invite
 )

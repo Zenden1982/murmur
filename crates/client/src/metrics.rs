@@ -256,7 +256,7 @@ mod tests {
         let mut local = json!({"type":"local-candidate","id":"L1","timestamp":0,"address":"10.0.0.2","port":5000,"protocol":"udp","candidateType":cand_type});
         if let Some(r) = relay {
             local["relayProtocol"] = json!(r);
-            local["url"] = json!("turns:turn.steins-gate.ru:443?transport=tcp");
+            local["url"] = json!("turns:turn.murmurchat.ru:443?transport=tcp");
         }
         vec![
             stat(json!({"type":"transport","id":"T1","timestamp":0,"selectedCandidatePairId":"P1"})),
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(m.conn.remote, "77.222.35.128:443");
         assert!((m.conn.rtt_ms.unwrap() - 42.0).abs() < 1e-9);
         assert_eq!(m.conn.out_kbps_avail, Some(3000.0));
-        assert_eq!(m.conn.turn, "turns:turn.steins-gate.ru:443?transport=tcp");
+        assert_eq!(m.conn.turn, "turns:turn.murmurchat.ru:443?transport=tcp");
     }
 
     #[test]
