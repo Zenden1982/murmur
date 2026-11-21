@@ -1,0 +1,10 @@
+[package]
+name = "netprobe"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "murmur-netprobe"
+path = "src/main.rs"
