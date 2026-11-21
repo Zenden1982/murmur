@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "backend"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "argon2",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "capture-win"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "libwebrtc",
  "log",
@@ -1063,7 +1063,7 @@ checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
 name = "client"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3983,7 +3983,7 @@ dependencies = [
 
 [[package]]
 name = "msvc-shim"
-version = "0.3.6"
+version = "0.3.7"
 
 [[package]]
 name = "muda"
@@ -4119,7 +4119,7 @@ dependencies = [
 
 [[package]]
 name = "netprobe"
-version = "0.3.6"
+version = "0.3.7"
 
 [[package]]
 name = "nix"
@@ -5318,7 +5318,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "serde",
  "serde_json",

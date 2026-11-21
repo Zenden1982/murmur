@@ -332,9 +332,10 @@ impl ServersUi {
             ui.add_space(12.0);
             for s in &model.servers {
                 let active = model.active == Some(s.id) && !dm_open;
-                let mark = match s.icon.as_deref().and_then(|k| people.texture(k)) {
-                    Some(tex) => kit::ServerMark::Image(tex.id()),
-                    None => kit::ServerMark::Letter(initials(&s.name)),
+                let mark = match (s.icon.as_deref().and_then(|k| people.texture(k)), crate::banner::server_color(s)) {
+                    (Some(tex), _) => kit::ServerMark::Image(tex.id()),
+                    (None, Some(c)) => kit::ServerMark::Colored(initials(&s.name), c),
+                    (None, None) => kit::ServerMark::Letter(initials(&s.name)),
                 };
                 let resp = kit::server_icon(ui, &mark, active, &s.name);
                 if active || resp.hovered() || unread.server_has(s.id) {
@@ -360,25 +361,29 @@ impl ServersUi {
 
     // ------------------------------------------------------------ шапка сайдбара
 
-    /// Название активного сервера ▾ и его меню.
-    pub fn header(&mut self, ui: &mut Ui, model: &Model) -> Option<Action> {
-        let Some(s) = model.active_server() else {
-            ui.label(RichText::new("Murmur").font(t::xbold(18.0)).color(t::p().text));
+    /// Шапка боковой панели: баннер сервера (узор или картинка) с полосой затемнения — иконка, название,
+    /// «N участников · M в сети», ▾ меню; под баннером — описание. Без сервера — просто «Murmur».
+    pub fn header(&mut self, ui: &mut Ui, model: &Model, people: &People) -> Option<Action> {
+        let Some(s) = model.active_server().cloned() else {
+            egui::Frame::new().inner_margin(egui::Margin { left: 18, right: 18, top: 16, bottom: 12 }).show(ui, |ui| {
+                ui.label(RichText::new("Murmur").font(t::xbold(18.0)).color(t::p().text));
+            });
             return None;
         };
-        let (id, name) = (s.id, s.name.clone());
+        let id = s.id;
         let mut act = None;
-        let resp = ui
-            .horizontal(|ui| {
-                ui.set_width(ui.available_width());
-                ui.add(egui::Label::new(RichText::new(&name).font(t::xbold(18.0)).color(t::p().text)).truncate().selectable(false));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(ph::CARET_DOWN).size(16.0).color(t::p().text_muted));
-                });
-            })
-            .response
-            .interact(Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let w = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, crate::banner::HEIGHT), Sense::click());
+        let painter = ui.painter_at(rect);
+        crate::banner::paint_background(&painter, rect, &s, people, CornerRadius::ZERO);
+        let list = model.members.get(&id);
+        let members = list.map(|l| l.len()).unwrap_or(0);
+        let online = list.map(|l| l.iter().filter(|m| m.online || Some(m.user.id) == model.me).count()).unwrap_or(0);
+        crate::banner::paint_strip(&painter, rect, &s, people, members, online, true);
+        if resp.hovered() {
+            painter.rect_filled(rect, CornerRadius::ZERO, egui::Color32::from_white_alpha(8));
+        }
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         let perms = model.my_perms(id);
         egui::Popup::menu(&resp).width(230.0).show(|ui| {
             if perm::has(perms, perm::INVITE) && kit::menu_item(ui, egui_phosphor::fill::USER_PLUS, "Пригласить", false).clicked() {
@@ -390,9 +395,14 @@ impl ServersUi {
                 act = Some(Action::OpenSettings(id));
             }
             if !model.is_owner(id) && kit::menu_item(ui, egui_phosphor::fill::SIGN_OUT, "Выйти с сервера", true).clicked() {
-                self.leave = Some(LeaveDialog { server: id, name: name.clone(), busy: false, error: None });
+                self.leave = Some(LeaveDialog { server: id, name: s.name.clone(), busy: false, error: None });
             }
         });
+        if let Some(d) = s.description.as_deref().filter(|d| !d.is_empty()) {
+            egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 14, top: 8, bottom: 2 }).show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(d).size(12.0).color(t::p().text_muted)).wrap());
+            });
+        }
         act
     }
 

@@ -115,6 +115,28 @@ impl People {
         None
     }
 
+    /// Прямоугольная картинка (баннер сервера) по ключу, без скругления; первый запрос — загрузка в фоне.
+    pub fn picture(&self, key: &str) -> Option<TextureHandle> {
+        let id = format!("rect:{key}");
+        let mut map = self.tex.borrow_mut();
+        match map.get(&id) {
+            Some(Tex::Ready(t)) => return Some(t.clone()),
+            Some(_) => return None,
+            None => {}
+        }
+        map.insert(id.clone(), Tex::Loading);
+        let (api, tx, ctx, key) = (self.api.clone(), self.tx.clone(), self.ctx.clone(), key.to_string());
+        self.rt.spawn(async move {
+            let res = match api.image(&key).await {
+                Ok(bytes) => tokio::task::spawn_blocking(move || rect_image(&bytes, 960)).await.unwrap_or_else(|e| Err(e.to_string())),
+                Err(e) => Err(e.message),
+            };
+            let _ = tx.send(Ev::Image { key: id, res });
+            ctx.request_repaint();
+        });
+        None
+    }
+
     /// Текстура аватара человека, если уже загружена.
     pub fn texture_of(&self, u: &PublicUser) -> Option<egui::TextureId> {
         u.avatar.as_deref().and_then(|k| self.texture(k)).map(|t| t.id())
@@ -135,6 +157,14 @@ pub fn avatar_name(u: &PublicUser) -> &str {
 pub fn paint_avatar(painter: &egui::Painter, center: Pos2, r: f32, name: &str, tex: Option<&TextureHandle>, glow: f32, dim: bool) {
     let who = crate::kit::AvatarInput { name, texture: tex.map(|t| t.id()) };
     crate::kit::avatar(painter, center, r, &who, glow, crate::kit::PeerBadge::None, dim);
+}
+
+/// Картинка как есть, не шире `max_w`.
+pub fn rect_image(bytes: &[u8], max_w: u32) -> Result<ColorImage, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("не картинка: {e}"))?;
+    let img = if img.width() > max_w { img.resize(max_w, u32::MAX, image::imageops::FilterType::Lanczos3) } else { img };
+    let rgba = img.to_rgba8();
+    Ok(ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()))
 }
 
 /// Квадрат из середины картинки.

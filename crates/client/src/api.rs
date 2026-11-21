@@ -227,14 +227,35 @@ impl Api {
 
     /// Отображаемое имя (пустая строка — сбросить на логин).
     pub async fn update_me(&self, display_name: &str) -> ApiResult<User> {
-        let body = proto::UpdateMeRequest { display_name: Some(display_name.to_string()), dm_from_servers: None };
+        let body = proto::UpdateMeRequest { display_name: Some(display_name.to_string()), dm_from_servers: None, ..Default::default() };
         self.call(Method::PATCH, "/me", Some(&body)).await
     }
 
     /// Кто может писать мне в ЛС: true — и люди с общих серверов.
     pub async fn set_dm_from_servers(&self, open: bool) -> ApiResult<User> {
-        let body = proto::UpdateMeRequest { display_name: None, dm_from_servers: Some(open) };
+        let body = proto::UpdateMeRequest { display_name: None, dm_from_servers: Some(open), ..Default::default() };
         self.call(Method::PATCH, "/me", Some(&body)).await
+    }
+
+    /// «О себе» и свой статус (None — не менять, пустая строка — убрать).
+    pub async fn update_profile(&self, about: Option<String>, status: Option<String>) -> ApiResult<User> {
+        let body = proto::UpdateMeRequest { about, status, ..Default::default() };
+        self.call(Method::PATCH, "/me", Some(&body)).await
+    }
+
+    /// Во что играю (None — ни во что).
+    pub async fn set_activity(&self, game: Option<String>, since: Option<i64>) -> ApiResult<()> {
+        self.call(Method::PUT, "/me/activity", Some(&proto::SetActivityRequest { game, since })).await
+    }
+
+    /// Карточка профиля.
+    pub async fn user_profile(&self, id: i64) -> ApiResult<proto::UserProfile> {
+        self.call::<(), _>(Method::GET, &format!("/users/{id}"), None).await
+    }
+
+    /// Позвать человека в голосовой канал.
+    pub async fn summon(&self, channel_id: i64, user_id: i64) -> ApiResult<()> {
+        self.call(Method::POST, &format!("/channels/{channel_id}/summon"), Some(&proto::SummonRequest { user_id })).await
     }
 
     /// Мои диалоги (ЛС), свежие сверху.
@@ -342,9 +363,17 @@ impl Api {
         self.call(Method::POST, "/servers", Some(&proto::CreateServerRequest { name: name.to_string() })).await
     }
 
-    pub async fn update_server(&self, id: i64, name: &str) -> ApiResult<Server> {
-        let body = proto::UpdateServerRequest { name: Some(name.to_string()) };
+    /// Профиль сервера: описание, узор баннера, цвет (None — не менять, пустая строка — по умолчанию).
+    pub async fn update_server_profile(&self, id: i64, body: proto::UpdateServerRequest) -> ApiResult<Server> {
         self.call(Method::PATCH, &format!("/servers/{id}"), Some(&body)).await
+    }
+
+    pub async fn put_server_banner(&self, id: i64, bytes: Vec<u8>) -> ApiResult<Server> {
+        self.put_image(&format!("/servers/{id}/banner"), bytes).await
+    }
+
+    pub async fn delete_server_banner(&self, id: i64) -> ApiResult<Server> {
+        self.call::<(), _>(Method::DELETE, &format!("/servers/{id}/banner"), None).await
     }
 
     pub async fn put_server_icon(&self, id: i64, bytes: Vec<u8>) -> ApiResult<Server> {

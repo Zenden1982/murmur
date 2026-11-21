@@ -67,6 +67,8 @@ enum View {
     Text(i64),
     /// Личный диалог (id канала ЛС).
     Dm(i64),
+    /// Экран «Друзья».
+    Friends,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -153,6 +155,20 @@ pub struct App {
     /// Имена и аватары.
     people: People,
     friends: crate::friends::Friends,
+    /// Список участников справа и карточка профиля.
+    members: crate::members_ui::Members,
+    /// Меня позвали в голосовой канал: (кто, канал, когда).
+    summon: Option<(proto::PublicUser, i64, Instant)>,
+    /// Во что я играю (фоновая проверка), что сейчас и что последним ушло на сервер.
+    activity: Option<crate::activity::Detector>,
+    my_game: crate::activity::Game,
+    game_sent: Option<crate::activity::Game>,
+    /// Поиск на экране друзей.
+    friend_filter: String,
+    /// Окошко «Задать статус» (текст).
+    status_edit: Option<String>,
+    /// Настройки → Профиль: «о себе».
+    profile_about: String,
     /// ЛС и звонки другу.
     dms: crate::dms::Dms,
     unread: crate::unread::Unread,
@@ -232,6 +248,7 @@ impl App {
         let chat = Chat::new(rt.handle().clone(), ctx.clone(), api.clone());
         let people = People::new(rt.handle().clone(), ctx.clone(), api.clone());
         let friends = crate::friends::Friends::new(rt.handle().clone(), ctx.clone(), api.clone());
+        let members = crate::members_ui::Members::new(rt.handle().clone(), ctx.clone(), api.clone());
         let dms = crate::dms::Dms::new(rt.handle().clone(), ctx.clone(), api.clone());
         let servers = ServersUi::new(rt.handle().clone(), ctx.clone(), api.clone());
         let channel_list = ChannelsUi::new(rt.handle().clone(), ctx.clone(), api.clone());
@@ -306,6 +323,14 @@ impl App {
             watch_pending: None,
             chat,
             people,
+            members,
+            summon: None,
+            activity: None,
+            my_game: None,
+            game_sent: None,
+            friend_filter: String::new(),
+            status_edit: None,
+            profile_about: String::new(),
             friends,
             dms,
             unread: Default::default(),
@@ -361,7 +386,7 @@ impl App {
     #[cfg(debug_assertions)]
     fn start_demo(&mut self) {
         self.demo = true;
-        self.set_me(User { id: 1, name: "tester".into(), is_admin: false, display_name: Some("Тестер".into()), avatar: None, dm_from_servers: false });
+        self.set_me(User { id: 1, name: "tester".into(), is_admin: false, display_name: Some("Тестер".into()), avatar: None, dm_from_servers: false, ..Default::default() });
         let ch = |id: i64, name: &str, kind: ChannelKind, position: i32| proto::Channel {
             id,
             name: name.into(),
@@ -378,6 +403,7 @@ impl App {
             owner_id: 1,
             roles: vec![proto::Role { id: 1, name: "Владелец".into(), position: 3, permissions: proto::perm::ALL }],
             my_role_id: 1,
+            ..Default::default()
         }]);
         self.channels = vec![
             ch(3, "общий", ChannelKind::Text, 0),
@@ -456,6 +482,17 @@ impl App {
         if let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
             self.view = View::Text(id);
         }
+        // Отладка (скриншоты): AMADEUS_OPEN_SERVER_SETTINGS=1 — настройки активного сервера;
+        // AMADEUS_OPEN_PROFILE=<id> — карточка профиля человека с активного сервера.
+        #[cfg(debug_assertions)]
+        if let Some(sid) = self.model.active {
+            if std::env::var_os("AMADEUS_OPEN_SERVER_SETTINGS").is_some() {
+                self.server_settings.open(&self.model, sid);
+            }
+            if let Some(uid) = std::env::var("AMADEUS_OPEN_PROFILE").ok().and_then(|v| v.parse::<i64>().ok()) {
+                self.members.open_card(uid, pos2(560.0, 120.0), Some(sid));
+            }
+        }
     }
 
     /// Каналы активного сервера — из модели; открытый текстовый канал пропал — к сцене.
@@ -493,8 +530,8 @@ impl App {
 
     fn select_server(&mut self, id: i64) {
         self.model.set_active(id);
-        // из личного диалога — к серверу
-        if matches!(self.view, View::Dm(_)) {
+        // из личного диалога или друзей — к серверу
+        if matches!(self.view, View::Dm(_) | View::Friends) {
             self.view = View::Voice;
         }
         if self.settings.last_server != Some(id) {
@@ -507,6 +544,7 @@ impl App {
     fn set_me(&mut self, user: User) {
         self.people.learn(people::public(&user));
         self.profile_name = user.display_name.clone().unwrap_or_default();
+        self.profile_about = user.about.clone().unwrap_or_default();
         self.model.me = Some(user.id);
         self.me = Some(user);
     }
@@ -516,6 +554,9 @@ impl App {
         self.chat.set_api(api.clone());
         self.people.set_api(api.clone());
         self.friends.set_api(api.clone());
+        self.members.set_api(api.clone());
+        self.game_sent = None;
+        self.summon = None;
         self.dms.set_api(api.clone());
         self.unread = Default::default();
         self.servers.set_api(api.clone());
@@ -638,7 +679,7 @@ impl App {
     fn sync_read(&mut self, focused: bool) {
         let open = match self.view {
             View::Text(id) | View::Dm(id) => Some(id),
-            View::Voice => None,
+            View::Voice | View::Friends => None,
         };
         if focused
             && let Some(id) = open
@@ -1010,8 +1051,15 @@ impl App {
         if self.channels_at.elapsed() > CHANNELS_REFRESH && !self.demo {
             self.fetch_channels();
         }
-        #[allow(unused_mut)]
         let mut vs = self.voice.snapshot();
+        // Своя волна — по уровню микрофона прямо из захвата (как в проверке микрофона), а не по «говорящим» от
+        // сервера: те приходят с задержкой в доли секунды.
+        crate::denoise::set_repaint(ui.ctx().clone());
+        if let Some(me) = vs.peers.iter_mut().find(|p| p.is_local) {
+            let (level, speaking) = crate::denoise::local_voice();
+            me.level = level;
+            me.speaking = speaking && !me.mic_muted;
+        }
         // Стримим окно — своё окно «почти непрозрачное», чтобы браузер под ним не считал себя перекрытым и не замирал.
         crate::frame::keep_layered(vs.stream.as_ref().is_some_and(|s| s.source.is_window()));
         #[cfg(debug_assertions)]
@@ -1040,11 +1088,37 @@ impl App {
         let text_channel = match self.view {
             View::Text(id) => self.channels.iter().find(|c| c.id == id).cloned(),
             View::Dm(id) => self.dms.get(id).map(crate::dms::chat_channel),
-            View::Voice => None,
+            View::Voice | View::Friends => None,
         };
+        // список участников справа — на сервере (голос или текстовый канал), если включён
+        let members_server = match self.view {
+            View::Text(_) => self.model.active,
+            View::Voice if vs.channel.as_ref().is_none_or(|c| !crate::dms::is_dm(c)) => self.model.active,
+            _ => None,
+        };
+        if let Some(sid) = members_server.filter(|_| self.settings.members_open && !self.demo) {
+            let speaking: Vec<i64> = vs.peers.iter().filter(|p| p.speaking).filter_map(|p| p.identity.parse().ok()).collect();
+            egui::Panel::right("members")
+                .exact_size(crate::members_ui::WIDTH)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(Frame::new().fill(t::p().surface).inner_margin(Margin::symmetric(6, 0)))
+                .show(ui, |ui| {
+                    let r = ui.max_rect();
+                    ui.painter().vline(r.left() - 6.0, r.y_range(), Stroke::new(1.0, t::p().border));
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        self.members.panel(ui, &self.model, &self.people, sid, &speaking);
+                    });
+                });
+        }
+        if self.view == View::Friends {
+            egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::symmetric(28, 20))).show(ui, |ui| {
+                self.ui_friends_screen(ui, &vs);
+            });
+        } else {
         match text_channel {
             Some(ch) => {
-                let modal = self.friends.open || self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open();
+                let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open();
                 egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
                     self.chat.ui(ui, &ch, modal, &self.people);
                 });
@@ -1055,10 +1129,13 @@ impl App {
                 });
             }
         }
+        }
         self.ui_banner(ui, &vs);
         self.ui_volume_popup(ui, &vs);
         self.servers.dialogs(ui.ctx());
-        self.friends.ui(ui.ctx(), &self.people);
+        self.ui_profile_card(ui.ctx(), &vs);
+        self.ui_summon(ui, &vs);
+        self.ui_status_edit(ui.ctx());
         self.ui_calls(ui, &vs);
         self.channel_list.dialogs(ui.ctx());
         self.server_settings.ui(ui.ctx(), &self.model, &self.people);
@@ -1256,8 +1333,8 @@ impl App {
                     ui.vertical_centered(|ui| {
                         ui.add_space(12.0);
                         let badge = self.friends.incoming() + self.unread.dm_total() as usize;
-                        if crate::friends::rail_button(ui, badge, self.friends.open) {
-                            self.friends.open = true;
+                        if crate::friends::rail_button(ui, badge, self.view == View::Friends) {
+                            self.view = View::Friends;
                         }
                         let open_dm = match self.view {
                             View::Dm(id) => Some(id),
@@ -1270,7 +1347,7 @@ impl App {
                         let (r, _) = ui.allocate_exact_size(vec2(32.0, 2.0), Sense::hover());
                         ui.painter().hline(r.x_range(), r.center().y, Stroke::new(2.0, t::p().border));
                     });
-                    if let Some(id) = self.servers.column(ui, &self.model, &self.people, &self.unread, matches!(self.view, View::Dm(_))) {
+                    if let Some(id) = self.servers.column(ui, &self.model, &self.people, &self.unread, matches!(self.view, View::Dm(_) | View::Friends)) {
                         self.select_server(id);
                     }
                 });
@@ -1284,16 +1361,32 @@ impl App {
                 let full = ui.max_rect();
                 ui.painter().vline(full.right(), full.y_range(), Stroke::new(1.0, t::p().border));
 
+                if self.view == View::Friends {
+                    egui::Panel::bottom("side-me")
+                        .show_separator_line(false)
+                        .frame(Frame::new().inner_margin(Margin::same(8)))
+                        .show(ui, |ui| {
+                            Frame::new()
+                                .fill(t::p().surface_2)
+                                .stroke(Stroke::new(1.0, t::p().border))
+                                .corner_radius(CornerRadius::same(kit::R_CARD))
+                                .inner_margin(Margin::symmetric(10, 8))
+                                .show(ui, |ui| self.ui_me(ui, vs));
+                        });
+                    egui::CentralPanel::no_frame().frame(Frame::new().inner_margin(Margin::symmetric(10, 12))).show(ui, |ui| self.ui_friends_side(ui));
+                    return;
+                }
                 egui::Panel::top("side-top")
                     .show_separator_line(false)
-                    .frame(Frame::new().inner_margin(Margin { left: 18, right: 18, top: 16, bottom: 12 }))
+                    .frame(Frame::new().inner_margin(Margin { left: 0, right: 1, top: 0, bottom: 8 }))
                     .show(ui, |ui| {
-                        match self.servers.header(ui, &self.model) {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        match self.servers.header(ui, &self.model, &self.people) {
                             Some(servers_ui::Action::OpenSettings(id)) => self.server_settings.open(&self.model, id),
                             None => {}
                         }
-                        let r = ui.max_rect();
-                        ui.painter().hline(full.x_range(), r.bottom() + 12.0, Stroke::new(1.0, t::p().border));
+                        let r = ui.min_rect();
+                        ui.painter().hline(full.x_range(), r.bottom() + 8.0, Stroke::new(1.0, t::p().border));
                     });
                 egui::Panel::bottom("side-me")
                     .show_separator_line(false)
@@ -1324,7 +1417,7 @@ impl App {
         let before = self.settings.collapsed_categories.clone();
         let open_text = match self.view {
             View::Text(id) => Some(id),
-            View::Voice | View::Dm(_) => None,
+            View::Voice | View::Dm(_) | View::Friends => None,
         };
         let cx = channels_ui::ListCtx {
             model: &self.model,
@@ -1417,13 +1510,17 @@ impl App {
             }
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new(&name).font(t::semibold(14.0)));
+                let status = self.me.as_ref().and_then(|m| m.status.clone());
+                let r = ui.add(egui::Label::new(RichText::new(&name).font(t::semibold(14.0))).sense(Sense::click()).selectable(false));
+                if r.on_hover_text("Задать статус").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.status_edit = Some(status.clone().unwrap_or_default());
+                }
                 let sub = match (&vs.conn, &vs.channel) {
                     (Conn::Connected, Some(c)) if crate::dms::is_dm(c) => format!("звонок: {}", c.name),
                     (Conn::Connected, Some(c)) => format!("в {}", c.name),
                     (Conn::Connecting, Some(_)) => "подключение…".into(),
                     (Conn::Reconnecting | Conn::Rejoining { .. }, _) => "нет связи…".into(),
-                    _ => "не в канале".into(),
+                    _ => status.unwrap_or_else(|| "не в канале".into()),
                 };
                 ui.label(RichText::new(sub).size(12.0).color(t::p().text_muted));
             });
@@ -1445,6 +1542,263 @@ impl App {
         });
     }
 
+    /// Левая колонка экрана «Друзья»: поиск, пункт «Друзья», личные сообщения (или друзья в сети, пока ЛС нет).
+    fn ui_friends_side(&mut self, ui: &mut Ui) {
+        let p = t::p();
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.add(kit::text_field(&mut self.friend_filter, ui.available_width()).hint_text("Найти друга или беседу"));
+        ui.add_space(10.0);
+        let badge = self.friends.incoming();
+        let trailing = (badge > 0).then(|| badge.to_string());
+        kit::row(ui, ph::USERS, "Друзья", true, trailing.as_deref(), true);
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            ui.label(RichText::new("ЛИЧНЫЕ СООБЩЕНИЯ").font(t::bold(12.0)).color(p.text_muted));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let r = kit::icon_button(ui, ph::PLUS, kit::IconState::Normal, "Написать другу");
+                egui::Popup::menu(&r).width(240.0).show(|ui| {
+                    if self.friends.list().is_empty() {
+                        ui.label(RichText::new("Сначала добавьте друзей").size(13.0).color(p.text_muted));
+                    }
+                    for f in self.friends.list().to_vec() {
+                        let u = self.people.resolve(f.user.clone());
+                        if kit::menu_item(ui, egui_phosphor::fill::CHAT_CIRCLE, u.shown_name(), false).clicked() {
+                            self.dms.open_with(u.id);
+                        }
+                    }
+                });
+            });
+        });
+        let filter = self.friend_filter.trim().to_lowercase();
+        let hit = |u: &proto::PublicUser| filter.is_empty() || u.shown_name().to_lowercase().contains(&filter) || u.name.to_lowercase().contains(&filter);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let dms: Vec<proto::DmChannel> = self.dms.list().iter().filter(|d| hit(&d.user)).cloned().collect();
+            let rows: Vec<(proto::PublicUser, Option<i64>)> = if self.dms.list().is_empty() {
+                // ЛС пока нет — друзья в сети
+                self.friends.list().iter().filter(|f| f.online && hit(&f.user)).map(|f| (f.user.clone(), None)).collect()
+            } else {
+                dms.iter().map(|d| (d.user.clone(), Some(d.id))).collect()
+            };
+            if rows.is_empty() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(if filter.is_empty() { "Пока пусто" } else { "Никого не нашли" }).size(13.0).color(p.text_muted));
+                });
+            }
+            for (u, dm) in rows {
+                let u = self.people.resolve(u);
+                let online = self.friends.online(u.id).unwrap_or(false);
+                let activity = self.friends.list().iter().find(|f| f.user.id == u.id).and_then(|f| f.activity.clone());
+                let voice = if online { self.model.voice_of(u.id).map(|(_, c)| c.clone()) } else { None };
+                let unread = dm.map(|id| self.unread.count(id)).unwrap_or(0);
+                let active = dm.is_some_and(|id| self.view == View::Dm(id));
+                let w = ui.available_width();
+                let (rect, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
+                let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), kit::HOVER_S);
+                let bg = if active { p.row_active } else { Color32::TRANSPARENT.lerp_to_gamma(p.row_hover, hover) };
+                ui.painter().rect_filled(rect, CornerRadius::same(kit::R_ROW), bg);
+                let av = pos2(rect.left() + 22.0, rect.center().y);
+                self.people.paint(ui.painter(), av, 15.0, &u, 0.0, !online);
+                crate::friends::status_dot(ui.painter(), av + vec2(11.0, 11.0), online, p.surface);
+                let x = rect.left() + 44.0;
+                let right = if unread > 0 { 34.0 } else { 6.0 };
+                let sub = crate::members_ui::sub_line(voice.as_ref(), activity.as_ref(), online);
+                let name_c = if unread > 0 || active { p.text } else { p.text_muted };
+                let name = crate::banner::truncate_galley(ui.painter(), u.shown_name(), if unread > 0 { t::bold(14.0) } else { t::semibold(14.0) }, name_c, rect.right() - x - right);
+                let top = if sub.is_some() { rect.center().y - 16.0 } else { rect.center().y - name.size().y / 2.0 };
+                ui.painter().galley(pos2(x, top), name, name_c);
+                if let Some((kind, text)) = sub {
+                    let y = rect.center().y + 9.0;
+                    let tx = if kind == crate::members_ui::Sub::Voice {
+                        kit::wave(ui.painter(), pos2(x, y), 14.0, 1.4, ui.input(|i| i.time) as f32 * 14.0, p.speaking, kit::WaveStyle::Solid);
+                        x + 18.0
+                    } else {
+                        x
+                    };
+                    let g = crate::banner::truncate_galley(ui.painter(), &text, t::font(11.5), p.text_muted, rect.right() - tx - right);
+                    ui.painter().galley(pos2(tx, y - g.size().y / 2.0), g, p.text_muted);
+                }
+                if unread > 0 {
+                    kit::count_badge(ui.painter(), pos2(rect.right() - 18.0, rect.center().y), &crate::unread::badge_text(unread), bg);
+                }
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    match dm {
+                        Some(id) => self.view = View::Dm(id),
+                        None => self.dms.open_with(u.id),
+                    }
+                }
+            }
+        });
+    }
+
+    /// Центр экрана «Друзья».
+    fn ui_friends_screen(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        let my_voice = vs.channel.as_ref().filter(|c| !crate::dms::is_dm(c) && vs.conn == Conn::Connected);
+        let speaking: Vec<i64> = vs.peers.iter().filter(|p| p.speaking).filter_map(|p| p.identity.parse().ok()).collect();
+        let mut offline_open = self.settings.friends_offline_open;
+        let cx = crate::friends::ScreenCx {
+            model: &self.model,
+            people: &self.people,
+            my_voice,
+            speaking: &speaking,
+            filter: &self.friend_filter,
+            offline_open: &mut offline_open,
+        };
+        for a in self.friends.screen(ui, cx) {
+            match a {
+                crate::friends::Act::Join(ch) => self.join_server_channel(ch, vs),
+                crate::friends::Act::Summon { channel_id, user_id } => self.send_summon(channel_id, user_id),
+                crate::friends::Act::Message(uid) => self.dms.open_with(uid),
+                crate::friends::Act::Profile(uid, pos) => self.members.open_card(uid, pos, None),
+            }
+        }
+    }
+
+    /// Войти в голосовой канал сервера (из друзей, карточки, приглашения «позвать»).
+    fn join_server_channel(&mut self, ch: Channel, vs: &VoiceState) {
+        if self.model.server(ch.server_id).is_some() {
+            self.select_server(ch.server_id);
+        }
+        let here = vs.channel.as_ref().is_some_and(|c| c.id == ch.id) && vs.conn == Conn::Connected;
+        if !here {
+            self.voice.send(Cmd::Join(ch));
+        }
+        self.view = View::Voice;
+    }
+
+    fn send_summon(&mut self, channel_id: i64, user_id: i64) {
+        let api = self.api.clone();
+        self.rt.spawn(async move {
+            if let Err(e) = api.summon(channel_id, user_id).await {
+                log::warn!("позвать {user_id} в канал {channel_id}: {e}");
+            }
+        });
+    }
+
+    /// Карточка профиля (поповер).
+    fn ui_profile_card(&mut self, ctx: &egui::Context, vs: &VoiceState) {
+        let my_voice = vs.channel.as_ref().filter(|_| vs.conn == Conn::Connected).map(|c| c.id);
+        let me = self.me.as_ref().map(|u| u.id).unwrap_or(0);
+        let friends = &self.friends;
+        let act = self.members.card_ui(ctx, &self.model, &self.people, my_voice, me, &|id| friends.is_friend(id));
+        match act {
+            Some(crate::members_ui::Act::Join(ch)) => self.join_server_channel(ch, vs),
+            Some(crate::members_ui::Act::Message(uid)) => self.dms.open_with(uid),
+            Some(crate::members_ui::Act::AddFriend(login)) => {
+                self.friends.add_by_login(&login);
+                self.view = View::Friends;
+            }
+            None => {}
+        }
+    }
+
+    /// «X зовёт в канал»: плашка сверху с «Присоединиться» (сама прячется через минуту).
+    fn ui_summon(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        let Some((from, ch_id, at)) = self.summon.clone() else { return };
+        let here = vs.channel.as_ref().is_some_and(|c| c.id == ch_id);
+        let place = self.model.channel_place(ch_id).map(|(s, c)| (s.name.clone(), c.clone()));
+        if at.elapsed() > Duration::from_secs(60) || here || place.is_none() {
+            self.summon = None;
+            return;
+        }
+        let Some((server, ch)) = place else { return };
+        let p = t::p();
+        let screen = ui.ctx().content_rect();
+        let mut close = false;
+        let mut join = false;
+        egui::Area::new(Id::new("summon")).order(egui::Order::Foreground).anchor(Align2::CENTER_TOP, vec2(0.0, 54.0)).show(ui.ctx(), |ui| {
+            Frame::new()
+                .fill(p.surface)
+                .stroke(Stroke::new(1.0, p.border))
+                .corner_radius(CornerRadius::same(kit::R_CARD))
+                .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(60) })
+                .inner_margin(Margin::symmetric(14, 10))
+                .show(ui, |ui| {
+                    ui.set_max_width((screen.width() - 40.0).min(560.0));
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::hover());
+                        self.people.paint(ui.painter(), r.center(), 17.0, &self.people.resolve(from.clone()), 0.0, false);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.label(RichText::new(format!("{} зовёт в «{}»", from.shown_name(), ch.name)).font(t::semibold(14.5)));
+                            ui.label(RichText::new(server).size(12.5).color(p.text_muted));
+                        });
+                        ui.add_space(12.0);
+                        join = kit::button(ui, kit::ButtonKind::Primary, "Присоединиться", None).clicked();
+                        close = kit::icon_button(ui, ph::X, kit::IconState::Normal, "Скрыть").clicked();
+                    });
+                });
+        });
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        if join {
+            self.summon = None;
+            self.join_server_channel(ch, vs);
+        } else if close {
+            self.summon = None;
+        }
+    }
+
+    /// Окошко «Задать статус».
+    fn ui_status_edit(&mut self, ctx: &egui::Context) {
+        let Some(mut text) = self.status_edit.take() else { return };
+        let mut save: Option<String> = None;
+        let res = kit::modal(ctx, "status-edit", "Задать статус", 400.0, |ui| {
+            ui.label(RichText::new("Его видят друзья и соседи по серверам вместо «играет в …».").size(13.0).color(t::p().text_muted));
+            ui.add_space(8.0);
+            let r = ui.add(kit::text_field(&mut text, ui.available_width()).hint_text("например, чиню сервер").char_limit(proto::limits::STATUS_MAX));
+            r.request_focus();
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if kit::button(ui, kit::ButtonKind::Primary, "Сохранить", None).clicked() || enter {
+                    save = Some(text.trim().to_string());
+                }
+                let has = self.me.as_ref().is_some_and(|m| m.status.is_some());
+                if has && kit::button(ui, kit::ButtonKind::Ghost, "Убрать статус", None).clicked() {
+                    save = Some(String::new());
+                }
+            });
+        });
+        if let Some(s) = save {
+            let api = self.api.clone();
+            self.spawn(async move { api.update_profile(None, Some(s)).await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+            return;
+        }
+        if res != kit::ModalResult::Closed {
+            self.status_edit = Some(text);
+        }
+    }
+
+    /// Активность: фоновая проверка игр (если разрешено) и отправка изменений на сервер.
+    fn sync_activity(&mut self) {
+        if self.screen != Screen::Main || self.demo {
+            return;
+        }
+        if self.settings.share_activity {
+            if self.activity.is_none() {
+                self.activity = Some(crate::activity::start(self.ctx.clone()));
+            }
+        } else if self.activity.take().is_some() {
+            self.my_game = None;
+        }
+        if let Some(g) = self.activity.as_ref().and_then(|d| d.poll()) {
+            self.my_game = g;
+        }
+        let want = if self.settings.share_activity { self.my_game.clone() } else { None };
+        if self.game_sent.as_ref() == Some(&want) {
+            return;
+        }
+        self.game_sent = Some(want.clone());
+        let api = self.api.clone();
+        self.rt.spawn(async move {
+            if let Err(e) = api.set_activity(want.as_ref().map(|g| g.0.clone()), want.map(|g| g.1)).await {
+                log::warn!("активность не отправлена: {e}");
+            }
+        });
+    }
+
     fn ui_header(&mut self, ui: &mut Ui, vs: &VoiceState) {
         egui::Panel::top("head")
             .exact_size(64.0)
@@ -1456,8 +1810,19 @@ impl App {
                 ui.painter().hline(r.x_range().expand(24.0), r.bottom(), Stroke::new(1.0, t::p().border));
                 let text_ch = match self.view {
                     View::Text(id) => self.channels.iter().find(|c| c.id == id).map(|c| c.name.clone()),
-                    View::Voice | View::Dm(_) => None,
+                    View::Voice | View::Dm(_) | View::Friends => None,
                 };
+                if self.view == View::Friends {
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        ui.label(RichText::new(egui_phosphor::fill::USERS).size(20.0).color(t::p().text_muted));
+                        ui.label(RichText::new("Друзья").font(t::xbold(18.0)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.allocate_ui(vec2(320.0, 40.0), |ui| self.friends.header_tabs(ui));
+                        });
+                    });
+                    return;
+                }
                 if let View::Dm(id) = self.view
                     && let Some(dm) = self.dms.get(id).cloned()
                 {
@@ -1494,6 +1859,14 @@ impl App {
                     }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.model.active.is_some() && !self.demo {
+                            let on = self.settings.members_open;
+                            let state = if on { kit::IconState::Active } else { kit::IconState::Normal };
+                            if kit::icon_button(ui, ph::USERS, state, if on { "Скрыть участников" } else { "Участники" }).clicked() {
+                                self.settings.members_open = !on;
+                                self.settings.save();
+                            }
+                        }
                         if let Some(rtt) = vs.rtt {
                             ping_box(ui, rtt, vs.jitter, vs.loss, vs.link);
                         }
@@ -1509,6 +1882,10 @@ impl App {
     /// Нижняя панель управления — плавающая капсула по центру: круглые кнопки-значки (микрофон, звук, экран),
     /// разделитель и «Отключиться» (единственная красная кнопка).
     fn ui_dock(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        // капсула — только в голосовом канале; вне канала управление — в панели пользователя слева
+        if vs.channel.is_none() {
+            return;
+        }
         egui::Panel::bottom("dock")
             .exact_size(84.0)
             .resizable(false)
@@ -2660,6 +3037,28 @@ impl App {
             }
         });
         ui.add_space(14.0);
+        label(ui, "О себе");
+        ui.add_enabled(!busy, kit::text_area(&mut self.profile_about, w).hint_text("пару слов — видно в карточке профиля").char_limit(proto::limits::ABOUT_MAX).desired_rows(2));
+        let about_changed = self.profile_about.trim() != me.about.as_deref().unwrap_or("");
+        if about_changed && kit::button_ex(ui, kit::ButtonKind::Primary, "Сохранить «о себе»", None, !busy).clicked() {
+            self.profile_busy = true;
+            self.profile_error = None;
+            let (api, about) = (self.api.clone(), self.profile_about.trim().to_string());
+            self.spawn(async move { api.update_profile(Some(about), None).await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+        }
+        ui.add_space(14.0);
+        label(ui, "Активность");
+        let mut share = self.settings.share_activity;
+        toggle_row(ui, w, |ui| {
+            ui.label("Показывать, во что я играю").on_hover_text("Steam и известные игры по списку процессов, раз в 20 с. На сервер уходит только название игры и время начала. Выключено — друзья видят только «в сети».");
+        }, |ui| {
+            kit::switch(ui, &mut share);
+        });
+        if share != self.settings.share_activity {
+            self.settings.share_activity = share;
+            self.settings.save();
+        }
+        ui.add_space(14.0);
         label(ui, "Личные сообщения");
         let mut open = me.dm_from_servers;
         let mut toggled = false;
@@ -2978,6 +3377,18 @@ impl eframe::App for App {
             self.friends.on_event(&e);
             self.dms.on_event(&e);
             match &e {
+                proto::ServerEvent::Summon { from, channel_id, .. } => {
+                    self.people.learn(from.clone());
+                    self.summon = Some((from.clone(), *channel_id, Instant::now()));
+                    crate::sounds::play(crate::sounds::Sound::DirectMessage);
+                    continue;
+                }
+                proto::ServerEvent::Hello => self.game_sent = None, // поток (пере)открылся — сервер забыл игру
+                proto::ServerEvent::UserUpdated { user } => self.members.forget(user.id),
+                proto::ServerEvent::Activity { user_id, .. } => self.members.forget(*user_id),
+                _ => {}
+            }
+            match &e {
                 proto::ServerEvent::MessageCreated { message } => {
                     self.on_message(message);
                     continue;
@@ -3009,11 +3420,20 @@ impl eframe::App for App {
         if let Some(uid) = self.friends.take_message() {
             self.dms.open_with(uid);
         }
+        if self.friends.take_toggle_offline() {
+            self.settings.friends_offline_open = !self.settings.friends_offline_open;
+            self.settings.save();
+        }
+        self.members.poll();
+        self.sync_activity();
         if let Some(id) = self.dms.poll(&mut self.unread, &mut self.people) {
             self.view = View::Dm(id);
         }
         if let Some(e) = self.dms.error.take() {
             self.friends.show_error(e);
+        }
+        if std::mem::take(&mut self.friends.open) {
+            self.view = View::Friends;
         }
         if self.screen == Screen::Main {
             self.sync_read(ui.input(|i| i.focused));

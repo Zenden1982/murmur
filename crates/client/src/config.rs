@@ -154,6 +154,12 @@ pub struct Settings {
     pub last_server: Option<i64>,
     /// Свёрнутые категории каналов (id).
     pub collapsed_categories: Vec<i64>,
+    /// Показывать друзьям и соседям по серверам, во что я играю.
+    pub share_activity: bool,
+    /// Свернуть «Не в сети» в списке друзей.
+    pub friends_offline_open: bool,
+    /// Показан список участников справа (на сервере).
+    pub members_open: bool,
 }
 
 impl Default for Settings {
@@ -187,6 +193,9 @@ impl Default for Settings {
             live_cat: true,
             last_server: None,
             collapsed_categories: Vec::new(),
+            share_activity: true,
+            friends_offline_open: false,
+            members_open: true,
         }
     }
 }

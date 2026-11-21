@@ -38,6 +38,18 @@ pub mod limits {
     /// Аватар / иконка сервера: размер файла и сторона квадрата.
     pub const IMAGE_PROFILE_MAX_BYTES: usize = 1024 * 1024;
     pub const IMAGE_PROFILE_MAX_SIDE: u32 = 512;
+    /// Своя картинка баннера сервера: ровно 960×480, до 2 МБ.
+    pub const BANNER_W: u32 = 960;
+    pub const BANNER_H: u32 = 480;
+    pub const IMAGE_BANNER_MAX_BYTES: usize = 2 * 1024 * 1024;
+    /// Описание сервера.
+    pub const SERVER_DESCRIPTION_MAX: usize = 120;
+    /// «О себе» в профиле.
+    pub const ABOUT_MAX: usize = 190;
+    /// Свой статус («чиню сервер»).
+    pub const STATUS_MAX: usize = 60;
+    /// Название игры в активности.
+    pub const GAME_NAME_MAX: usize = 100;
     /// Неотвеченных исходящих заявок в друзья.
     pub const FRIEND_REQUESTS_PENDING_MAX: usize = 50;
     /// Друзей у одного человека.
@@ -139,7 +151,7 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct User {
     pub id: i64,
     pub name: String,
@@ -153,6 +165,12 @@ pub struct User {
     /// Писать в ЛС могут и люди с общих серверов (по умолчанию — только друзья).
     #[serde(default)]
     pub dm_from_servers: bool,
+    /// «О себе» (видно в карточке профиля).
+    #[serde(default)]
+    pub about: Option<String>,
+    /// Свой статус — перекрывает автоматическую активность.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// Человек, каким его видят другие.
@@ -186,7 +204,7 @@ pub struct Role {
     pub permissions: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Server {
     pub id: i64,
     pub name: String,
@@ -196,12 +214,86 @@ pub struct Server {
     pub roles: Vec<Role>,
     /// Моя роль на этом сервере.
     pub my_role_id: i64,
+    /// Описание (под баннером и в приглашении).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Готовый узор баннера ([`banner`]); None — «Волны».
+    #[serde(default)]
+    pub banner: Option<String>,
+    /// Своя картинка баннера (ключ `/images/{key}`), важнее узора.
+    #[serde(default)]
+    pub banner_image: Option<String>,
+    /// Цвет сервера (один из [`SERVER_COLORS`]); None — фирменный.
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+/// Готовые узоры баннера сервера (рисует клиент).
+pub mod banner {
+    pub const WAVES: &str = "waves";
+    pub const NIGHT: &str = "night";
+    pub const SUNSET: &str = "sunset";
+    pub const ALL: [&str; 3] = [WAVES, NIGHT, SUNSET];
+}
+
+/// Цвета сервера (фон иконки, полоска выбранного канала).
+pub const SERVER_COLORS: [&str; 6] = ["#14B8A6", "#0EA5E9", "#8B5CF6", "#EC4899", "#F59E0B", "#22C55E"];
+
+/// Чем человек занят: игра (автоматически, клиент) и/или свой статус. Голос — отдельно (составы каналов).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Activity {
+    /// «Играет в …».
+    #[serde(default)]
+    pub game: Option<String>,
+    /// С какого времени играет (unix-секунды).
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Свой статус.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+impl Activity {
+    pub fn is_empty(&self) -> bool {
+        self.game.is_none() && self.status.is_none()
+    }
+}
+
+/// `PUT /me/activity` — во что играю (None — ни во что). Хранится только пока клиент в сети.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetActivityRequest {
+    #[serde(default)]
+    pub game: Option<String>,
+    #[serde(default)]
+    pub since: Option<i64>,
+}
+
+/// `GET /users/{id}` — карточка профиля (только тем, кто видит человека: общий сервер, друг, ЛС).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserProfile {
+    pub user: PublicUser,
+    #[serde(default)]
+    pub about: Option<String>,
+    pub online: bool,
+    #[serde(default)]
+    pub activity: Option<Activity>,
+    pub is_friend: bool,
+}
+
+/// `POST /channels/{id}/summon` — позвать человека в голосовой канал.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummonRequest {
+    pub user_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
     pub user: PublicUser,
     pub role_id: i64,
+    #[serde(default)]
+    pub online: bool,
+    #[serde(default)]
+    pub activity: Option<Activity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +334,15 @@ pub struct CreateServerRequest {
 pub struct UpdateServerRequest {
     #[serde(default)]
     pub name: Option<String>,
+    /// Пустая строка — убрать.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Узор баннера ([`banner`]); пустая строка — по умолчанию. Своя картинка — `PUT /servers/{id}/banner`.
+    #[serde(default)]
+    pub banner: Option<String>,
+    /// Один из [`SERVER_COLORS`]; пустая строка — фирменный.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,6 +398,12 @@ pub struct UpdateMeRequest {
     /// См. `User::dm_from_servers`.
     #[serde(default)]
     pub dm_from_servers: Option<bool>,
+    /// «О себе»; пустая строка — убрать.
+    #[serde(default)]
+    pub about: Option<String>,
+    /// Свой статус; пустая строка — убрать.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// `GET /invites/{code}` без входа: куда зовут.
@@ -305,6 +412,14 @@ pub struct InvitePreview {
     pub server_name: String,
     #[serde(default)]
     pub server_icon: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub member_count: u32,
+    #[serde(default)]
+    pub online_count: u32,
 }
 
 /// Отличает «поле не пришло» от «пришло null» (для снятия лимита).
@@ -490,6 +605,10 @@ pub enum ServerEvent {
     ReadState { channel_id: i64, last_read_id: i64 },
     /// Звонок в ЛС начался, изменился или закончился (`call: None`).
     Call { channel_id: i64, call: Option<CallInfo> },
+    /// Активность друга или соседа по серверу (None — ничем не занят / вышел).
+    Activity { user_id: i64, activity: Option<Activity> },
+    /// Меня зовут в голосовой канал.
+    Summon { from: PublicUser, server_id: i64, channel_id: i64 },
 }
 
 /// Личный диалог (ЛС): канал на двоих. Сообщения — как у текстового канала: `/channels/{id}/messages`.
@@ -553,6 +672,8 @@ pub struct Friend {
     pub user: PublicUser,
     /// В сети: клиент запущен и вошёл.
     pub online: bool,
+    #[serde(default)]
+    pub activity: Option<Activity>,
 }
 
 /// Заявка в друзья (входящая или исходящая).
@@ -681,12 +802,12 @@ mod tests {
     fn event_roundtrip() {
         let user = PublicUser { id: 2, name: "okabe".into(), display_name: Some("Окабэ".into()), avatar: None };
         let role = Role { id: 1, name: "Участник".into(), position: 0, permissions: perm::INVITE };
-        let server = Server { id: 3, name: "Лаборатория".into(), icon: None, owner_id: 2, roles: vec![role.clone()], my_role_id: 1 };
+        let server = Server { id: 3, name: "Лаборатория".into(), icon: None, owner_id: 2, roles: vec![role.clone()], my_role_id: 1, description: None, banner: None, banner_image: None, color: None };
         let ch = Channel { id: 5, name: "General".into(), kind: ChannelKind::Voice, server_id: 3, category_id: Some(4), position: 1, user_limit: Some(5) };
         let layout = ChannelLayout { categories: vec![Category { id: 4, name: "Голос".into(), position: 0 }], channels: vec![ch] };
         roundtrip(ServerEvent::ServerUpserted { server }, "server_upserted");
         roundtrip(ServerEvent::ServerRemoved { server_id: 3 }, "server_removed");
-        roundtrip(ServerEvent::MemberUpserted { server_id: 3, member: Member { user: user.clone(), role_id: 1 } }, "member_upserted");
+        roundtrip(ServerEvent::MemberUpserted { server_id: 3, member: Member { user: user.clone(), role_id: 1, online: false, activity: None } }, "member_upserted");
         roundtrip(ServerEvent::MemberRemoved { server_id: 3, user_id: 2 }, "member_removed");
         roundtrip(ServerEvent::LayoutChanged { server_id: 3, layout }, "layout_changed");
         roundtrip(ServerEvent::Voice { server_id: 3, roster: VoiceRoster { channel_id: 5, user_ids: vec![2] } }, "voice");

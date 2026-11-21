@@ -295,6 +295,29 @@ pub async fn join(State(state): State<AppState>, user: AuthUser, Path(id): Path<
     Ok(Json(JoinResponse { livekit_url: lk.public_url.clone(), livekit_token: token, room }))
 }
 
+/// `POST /channels/{id}/summon` — позвать участника сервера в голосовой канал (ему приходит `summon`).
+pub async fn summon(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i64>,
+    ApiJson(req): ApiJson<proto::SummonRequest>,
+) -> AppResult<StatusCode> {
+    state.inner.chat_limiter.check(user.id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
+    let (m, row) = p::channel_member(&state.inner.db, id, user.id).await?;
+    if row.kind != "voice" {
+        return Err(AppError::BadRequest("позвать можно только в голосовой канал".into()));
+    }
+    if req.user_id == user.id {
+        return Err(AppError::BadRequest("нельзя позвать самого себя".into()));
+    }
+    // цель — тоже участник сервера (иначе 404, не раскрываем)
+    p::member(&state.inner.db, m.server_id, req.user_id).await?;
+    let from = servers::public_user(&state.inner.db, user.id).await?;
+    tracing::info!(from = user.id, to = req.user_id, channel_id = id, "summon");
+    publish(&state, crate::events::Audience::User(req.user_id), ServerEvent::Summon { from, server_id: m.server_id, channel_id: id });
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ---------------------------------------------------------------- совместимость 0.2.x (сервер №1)
 
 /// `GET /channels` (0.2.x): каналы сервера №1, если ты его участник.

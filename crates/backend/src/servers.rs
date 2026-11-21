@@ -51,12 +51,24 @@ async fn roles_of(db: &sqlx::SqlitePool, server_id: i64) -> AppResult<Vec<Role>>
 /// Сервер глазами участника (с его ролью).
 pub(crate) async fn server_for(db: &sqlx::SqlitePool, server_id: i64, user_id: i64) -> AppResult<Server> {
     let m = p::member(db, server_id, user_id).await?;
-    let (name, icon, owner_id): (String, Option<String>, i64) =
-        sqlx::query_as("SELECT name, icon_key, owner_id FROM servers WHERE id = ?")
+    type Row = (String, Option<String>, i64, Option<String>, Option<String>, Option<String>, Option<String>);
+    let (name, icon, owner_id, description, banner, banner_image, color): Row =
+        sqlx::query_as("SELECT name, icon_key, owner_id, description, banner, banner_key, color FROM servers WHERE id = ?")
             .bind(server_id)
             .fetch_one(db)
             .await?;
-    Ok(Server { id: server_id, name, icon, owner_id, roles: roles_of(db, server_id).await?, my_role_id: m.role_id })
+    Ok(Server {
+        id: server_id,
+        name,
+        icon,
+        owner_id,
+        roles: roles_of(db, server_id).await?,
+        my_role_id: m.role_id,
+        description,
+        banner,
+        banner_image,
+        color,
+    })
 }
 
 pub(crate) async fn member_ids(db: &sqlx::SqlitePool, server_id: i64) -> AppResult<Vec<i64>> {
@@ -66,9 +78,17 @@ pub(crate) async fn member_ids(db: &sqlx::SqlitePool, server_id: i64) -> AppResu
         .await?)
 }
 
-pub(crate) async fn member_json(db: &sqlx::SqlitePool, server_id: i64, user_id: i64) -> AppResult<Member> {
+pub(crate) async fn member_json(state: &AppState, server_id: i64, user_id: i64) -> AppResult<Member> {
+    let db = &state.inner.db;
     let m = p::member(db, server_id, user_id).await?;
-    Ok(Member { user: public_user(db, user_id).await?, role_id: m.role_id })
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM users WHERE id = ?").bind(user_id).fetch_one(db).await?;
+    let online = &state.inner.online;
+    Ok(Member {
+        user: public_user(db, user_id).await?,
+        role_id: m.role_id,
+        online: online.is_online(user_id),
+        activity: online.activity(user_id, status),
+    })
 }
 
 /// Разослать каждому участнику сервер с его собственной ролью.
@@ -81,7 +101,7 @@ pub(crate) async fn publish_server(state: &AppState, server_id: i64) -> AppResul
 }
 
 pub(crate) async fn publish_member(state: &AppState, server_id: i64, user_id: i64) -> AppResult<()> {
-    let member = member_json(&state.inner.db, server_id, user_id).await?;
+    let member = member_json(state, server_id, user_id).await?;
     publish(state, Audience::Server(server_id), ServerEvent::MemberUpserted { server_id, member });
     Ok(())
 }
@@ -171,9 +191,30 @@ pub async fn update(
     ApiJson(req): ApiJson<UpdateServerRequest>,
 ) -> AppResult<Json<Server>> {
     me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
+    let db = &state.inner.db;
     if let Some(n) = req.name {
         let name = validate_name(&n, limits::SERVER_NAME_MAX, "название сервера")?;
-        sqlx::query("UPDATE servers SET name = ? WHERE id = ?").bind(name).bind(id).execute(&state.inner.db).await?;
+        sqlx::query("UPDATE servers SET name = ? WHERE id = ?").bind(name).bind(id).execute(db).await?;
+    }
+    if let Some(d) = req.description {
+        let d = d.trim();
+        if d.chars().count() > limits::SERVER_DESCRIPTION_MAX || d.chars().any(|c| c.is_control() && c != '\n') {
+            return Err(AppError::Validation(format!("описание: до {} символов", limits::SERVER_DESCRIPTION_MAX)));
+        }
+        sqlx::query("UPDATE servers SET description = ? WHERE id = ?").bind((!d.is_empty()).then_some(d)).bind(id).execute(db).await?;
+    }
+    if let Some(b) = req.banner {
+        if !b.is_empty() && !proto::banner::ALL.contains(&b.as_str()) {
+            return Err(AppError::Validation("нет такого узора баннера".into()));
+        }
+        sqlx::query("UPDATE servers SET banner = ? WHERE id = ?").bind((!b.is_empty()).then_some(b)).bind(id).execute(db).await?;
+    }
+    if let Some(c) = req.color {
+        let c = c.to_ascii_uppercase();
+        if !c.is_empty() && !proto::SERVER_COLORS.contains(&c.as_str()) {
+            return Err(AppError::Validation("нет такого цвета".into()));
+        }
+        sqlx::query("UPDATE servers SET color = ? WHERE id = ?").bind((!c.is_empty()).then_some(c)).bind(id).execute(db).await?;
     }
     publish_server(&state, id).await?;
     Ok(Json(server_for(&state.inner.db, id, user.id).await?))
@@ -203,6 +244,30 @@ async fn set_icon(state: &AppState, id: i64, key: Option<String>) -> AppResult<(
     publish_server(state, id).await
 }
 
+/// `PUT /servers/{id}/banner` — своя картинка баннера 960×480.
+pub async fn put_banner(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>, body: Bytes) -> AppResult<Json<Server>> {
+    me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
+    let key = images::store_banner_image(&state, &body).await?;
+    set_banner_image(&state, id, Some(key)).await?;
+    Ok(Json(server_for(&state.inner.db, id, user.id).await?))
+}
+
+/// `DELETE /servers/{id}/banner` — убрать свою картинку (останется узор).
+pub async fn delete_banner(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> AppResult<Json<Server>> {
+    me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
+    set_banner_image(&state, id, None).await?;
+    Ok(Json(server_for(&state.inner.db, id, user.id).await?))
+}
+
+async fn set_banner_image(state: &AppState, id: i64, key: Option<String>) -> AppResult<()> {
+    let old: Option<String> = sqlx::query_scalar("SELECT banner_key FROM servers WHERE id = ?").bind(id).fetch_one(&state.inner.db).await?;
+    sqlx::query("UPDATE servers SET banner_key = ? WHERE id = ?").bind(&key).bind(id).execute(&state.inner.db).await?;
+    if let Some(old) = old {
+        images::remove(state, &old).await;
+    }
+    publish_server(state, id).await
+}
+
 /// `DELETE /servers/{id}` — только владелец.
 pub async fn delete(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> AppResult<StatusCode> {
     me_on(&state, id, &user).await?.require_owner()?;
@@ -215,8 +280,10 @@ pub async fn delete(State(state): State<AppState>, user: AuthUser, Path(id): Pat
     .bind(id)
     .fetch_all(db)
     .await?;
-    let icon: Option<String> = sqlx::query_scalar("SELECT icon_key FROM servers WHERE id = ?").bind(id).fetch_one(db).await?;
+    let (icon, banner): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT icon_key, banner_key FROM servers WHERE id = ?").bind(id).fetch_one(db).await?;
     keys.extend(icon);
+    keys.extend(banner);
     for roster in state.inner.presence.of_server(id) {
         voice::clear_room(&state, &voice::room_name(id, roster.channel_id)).await;
     }
@@ -266,17 +333,23 @@ pub async fn transfer(
 /// `GET /servers/{id}/members`
 pub async fn members(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> AppResult<Json<Vec<Member>>> {
     me_on(&state, id, &user).await?;
-    type Row = (i64, String, Option<String>, Option<String>, i64);
+    type Row = (i64, String, Option<String>, Option<String>, i64, Option<String>);
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT u.id, u.name, u.display_name, u.avatar_key, m.role_id
+        "SELECT u.id, u.name, u.display_name, u.avatar_key, m.role_id, u.status
          FROM server_members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? ORDER BY m.joined_at, u.id",
     )
     .bind(id)
     .fetch_all(&state.inner.db)
     .await?;
+    let online = &state.inner.online;
     Ok(Json(
         rows.into_iter()
-            .map(|(uid, name, display_name, avatar, role_id)| Member { user: PublicUser { id: uid, name, display_name, avatar }, role_id })
+            .map(|(uid, name, display_name, avatar, role_id, status)| Member {
+                user: PublicUser { id: uid, name, display_name, avatar },
+                role_id,
+                online: online.is_online(uid),
+                activity: online.activity(uid, status),
+            })
             .collect(),
     ))
 }
@@ -345,7 +418,7 @@ pub async fn set_role(
     // у самого человека меняется my_role_id в сервере
     let server = server_for(&state.inner.db, id, uid).await?;
     publish(&state, Audience::User(uid), ServerEvent::ServerUpserted { server });
-    Ok(Json(member_json(&state.inner.db, id, uid).await?))
+    Ok(Json(member_json(&state, id, uid).await?))
 }
 
 /// `DELETE /servers/{id}/members/{uid}` — кик.

@@ -77,9 +77,11 @@ async fn valid_server(state: &AppState, code: &str) -> AppResult<Option<i64>> {
 pub async fn preview(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(code): Path<String>) -> AppResult<Json<InvitePreview>> {
     state.inner.auth_limiter.check(ip).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
     let sid = valid_server(&state, &security::normalize_invite_code(&code)).await?.ok_or(AppError::NotFound)?;
-    let (server_name, server_icon): (String, Option<String>) =
-        sqlx::query_as("SELECT name, icon_key FROM servers WHERE id = ?").bind(sid).fetch_one(&state.inner.db).await?;
-    Ok(Json(InvitePreview { server_name, server_icon }))
+    let (server_name, server_icon, description, color): (String, Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT name, icon_key, description, color FROM servers WHERE id = ?").bind(sid).fetch_one(&state.inner.db).await?;
+    let members = servers::member_ids(&state.inner.db, sid).await?;
+    let online_count = members.iter().filter(|&&u| state.inner.online.is_online(u)).count() as u32;
+    Ok(Json(InvitePreview { server_name, server_icon, description, color, member_count: members.len() as u32, online_count }))
 }
 
 /// `POST /invites/{code}/join` — вступить на сервер (уже участник — без списания).

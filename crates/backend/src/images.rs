@@ -40,6 +40,26 @@ pub async fn store_profile_image(state: &AppState, body: &[u8]) -> AppResult<Str
     Ok(key)
 }
 
+/// Баннер сервера: PNG/JPEG/WebP ровно 960×480, до 2 МБ. Возвращает ключ.
+pub async fn store_banner_image(state: &AppState, body: &[u8]) -> AppResult<String> {
+    if body.len() > limits::IMAGE_BANNER_MAX_BYTES {
+        return Err(AppError::Validation(format!("картинка больше {} МБ", limits::IMAGE_BANNER_MAX_BYTES / 1024 / 1024)));
+    }
+    match sniff_image(body) {
+        Some("image/png" | "image/jpeg" | "image/webp") => {}
+        _ => return Err(AppError::Validation("поддерживаются PNG, JPEG и WebP".into())),
+    }
+    let dim = imagesize::blob_size(body).map_err(|_| AppError::Validation("картинка повреждена".into()))?;
+    if dim.width != limits::BANNER_W as usize || dim.height != limits::BANNER_H as usize {
+        return Err(AppError::Validation(format!("нужна картинка {}×{}", limits::BANNER_W, limits::BANNER_H)));
+    }
+    let key = security::new_session_token();
+    write_atomic(&storage_path(state, &key), body)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("запись файла: {e}")))?;
+    Ok(key)
+}
+
 pub async fn remove(state: &AppState, key: &str) {
     crate::chat::remove_files(state, &[key.to_string()]).await;
 }
@@ -55,7 +75,7 @@ pub async fn get_image(State(state): State<AppState>, _user: AuthUser, Path(key)
         return Err(AppError::NotFound);
     }
     let known: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM users WHERE avatar_key = ?1) + (SELECT COUNT(*) FROM servers WHERE icon_key = ?1)",
+        "SELECT (SELECT COUNT(*) FROM users WHERE avatar_key = ?1) + (SELECT COUNT(*) FROM servers WHERE icon_key = ?1 OR banner_key = ?1)",
     )
     .bind(&key)
     .fetch_one(&state.inner.db)

@@ -61,6 +61,8 @@ pub fn group_label(ui: &mut Ui, text: &str) {
 /// Что внутри значка сервера.
 pub enum ServerMark {
     Letter(String),
+    /// Буквы на цвете сервера.
+    Colored(String, Color32),
     Image(egui::TextureId),
 }
 
@@ -77,6 +79,10 @@ pub fn server_icon(ui: &mut Ui, mark: &ServerMark, active: bool, tip: &str) -> R
             painter.rect_filled(rect, CornerRadius::same(r), bg);
             let fg = if active { p.on_accent } else { p.text };
             painter.text(rect.center(), Align2::CENTER_CENTER, s, t::xbold(17.0), fg);
+        }
+        ServerMark::Colored(s, c) => {
+            painter.rect_filled(rect, CornerRadius::same(r), *c);
+            painter.text(rect.center(), Align2::CENTER_CENTER, s, t::xbold(17.0), Color32::WHITE);
         }
         ServerMark::Image(tex) => {
             egui::Image::new(egui::load::SizedTexture::new(*tex, rect.size()))

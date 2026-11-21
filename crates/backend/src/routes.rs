@@ -37,6 +37,9 @@ pub fn router(state: AppState) -> Router {
         .route("/channels", get(channels::legacy_list).post(channels::legacy_create))
         .route("/channels/{id}", axum::routing::patch(channels::update).delete(channels::delete))
         .route("/channels/{id}/join", post(channels::join))
+        .route("/channels/{id}/summon", post(channels::summon))
+        .route("/me/activity", axum::routing::put(profile::put_activity))
+        .route("/users/{id}", get(profile::profile))
         .route("/servers/{id}/channels", get(channels::list).post(channels::create))
         .route("/servers/{id}/categories", post(channels::create_category))
         .route("/categories/{id}", axum::routing::patch(channels::rename_category).delete(channels::delete_category))
@@ -70,6 +73,12 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(servers::put_icon)
                 .delete(servers::delete_icon)
                 .layer(DefaultBodyLimit::max(limits::IMAGE_PROFILE_MAX_BYTES + 64 * 1024)),
+        )
+        .route(
+            "/servers/{id}/banner",
+            axum::routing::put(servers::put_banner)
+                .delete(servers::delete_banner)
+                .layer(DefaultBodyLimit::max(limits::IMAGE_BANNER_MAX_BYTES + 64 * 1024)),
         )
         .route("/servers/{id}/transfer", post(servers::transfer))
         .route("/servers/{id}/members", get(servers::members))

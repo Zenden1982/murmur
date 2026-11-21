@@ -181,6 +181,11 @@ impl Dms {
         }
     }
 
+    /// Диалоги, свежие сверху.
+    pub fn list(&self) -> &[DmChannel] {
+        &self.list
+    }
+
     pub fn get(&self, id: i64) -> Option<&DmChannel> {
         self.list.iter().find(|d| d.id == id)
     }

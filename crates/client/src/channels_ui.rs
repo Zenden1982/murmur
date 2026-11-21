@@ -339,6 +339,16 @@ impl ChannelsUi {
         let (icon, active) = if voice { (ph::SPEAKER_HIGH, here) } else { (ph::HASH, cx.open_text == Some(ch.id)) };
         let unread = if voice { 0 } else { cx.unread.count(ch.id) };
         let mut resp = kit::row_ex(ui, icon, &ch.name, active, trailing.as_deref(), !full, unread);
+        // выбранный канал — полоска цвета сервера, непрочитанный — короткая белая
+        let left = resp.rect.left() - 6.0;
+        if active {
+            let c = cx.model.server(ch.server_id).and_then(crate::banner::server_color).unwrap_or(t::p().accent);
+            let r = egui::Rect::from_center_size(egui::pos2(left, resp.rect.center().y), vec2(4.0, 24.0));
+            ui.painter().rect_filled(r, CornerRadius::same(2), c);
+        } else if unread > 0 {
+            let r = egui::Rect::from_center_size(egui::pos2(left, resp.rect.center().y), vec2(4.0, 10.0));
+            ui.painter().rect_filled(r, CornerRadius::same(2), t::p().text);
+        }
         if full {
             resp = resp.on_hover_text("Канал заполнен");
         }

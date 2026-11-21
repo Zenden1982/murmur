@@ -9,7 +9,8 @@
 //! Проверка микрофона (mictest.rs) использует тот же [`Processor`].
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use deep_filter_rt::tract::DfTract;
@@ -28,6 +29,66 @@ static MODE: AtomicU8 = AtomicU8::new(0);
 static CALL: Mutex<Option<CallState>> = Mutex::new(None);
 static SEEN: AtomicBool = AtomicBool::new(false);
 static WRONG_FORMAT: AtomicBool = AtomicBool::new(false);
+
+/// Свой уровень микрофона в звонке — прямо из колбэка захвата (каждые 10 мс), без ожидания «говорящих» от сервера.
+static LEVEL: AtomicU32 = AtomicU32::new(0);
+/// Когда последний раз был блок громче порога (мс от [`epoch`]) и когда вообще был блок.
+static LOUD_AT: AtomicU64 = AtomicU64::new(0);
+static BLOCK_AT: AtomicU64 = AtomicU64::new(0);
+static SPEAKING: AtomicBool = AtomicBool::new(false);
+static REPAINT: OnceLock<eframe::egui::Context> = OnceLock::new();
+/// Порог речи по уровню (шкала как у audio_level LiveKit / проверки микрофона: rms × 4) и «хвост» после речи.
+const SPEAK_LEVEL: f32 = 0.06;
+const SPEAK_HOLD_MS: u64 = 300;
+
+fn epoch() -> &'static Instant {
+    static E: OnceLock<Instant> = OnceLock::new();
+    E.get_or_init(Instant::now)
+}
+
+fn now_ms() -> u64 {
+    epoch().elapsed().as_millis() as u64
+}
+
+/// Контекст UI: колбэк захвата будит отрисовку, когда начинаешь говорить (иначе волна ждала бы следующего кадра).
+pub fn set_repaint(ctx: eframe::egui::Context) {
+    let _ = REPAINT.set(ctx);
+}
+
+/// Свой уровень (0..1) и «говорю» — по последним блокам микрофона. Блоков нет дольше 200 мс (микрофон выключен,
+/// не в звонке) — тишина.
+pub fn local_voice() -> (f32, bool) {
+    let now = now_ms();
+    if now.saturating_sub(BLOCK_AT.load(Ordering::Relaxed)) > 200 {
+        return (0.0, false);
+    }
+    let level = f32::from_bits(LEVEL.load(Ordering::Relaxed));
+    (level, now.saturating_sub(LOUD_AT.load(Ordering::Relaxed)) <= SPEAK_HOLD_MS)
+}
+
+/// Уровень блока (шкала int16) → сглаженный уровень; отмечает речь и будит UI на её начале.
+fn track_level(block: &[f32]) {
+    if block.is_empty() {
+        return;
+    }
+    let rms = (block.iter().map(|s| (s / SCALE).powi(2)).sum::<f32>() / block.len() as f32).sqrt();
+    let lvl = (rms * 4.0).min(1.0);
+    let prev = f32::from_bits(LEVEL.load(Ordering::Relaxed));
+    let smooth = if lvl > prev { lvl } else { prev * 0.85 + lvl * 0.15 };
+    LEVEL.store(smooth.to_bits(), Ordering::Relaxed);
+    let now = now_ms();
+    BLOCK_AT.store(now, Ordering::Relaxed);
+    if lvl >= SPEAK_LEVEL {
+        LOUD_AT.store(now, Ordering::Relaxed);
+        if !SPEAKING.swap(true, Ordering::Relaxed)
+            && let Some(ctx) = REPAINT.get()
+        {
+            ctx.request_repaint();
+        }
+    } else if now.saturating_sub(LOUD_AT.load(Ordering::Relaxed)) > SPEAK_HOLD_MS {
+        SPEAKING.store(false, Ordering::Relaxed);
+    }
+}
 
 fn code(m: NoiseMode) -> u8 {
     match m {
@@ -175,8 +236,21 @@ unsafe extern "C" fn capture_hook(channels: *const *mut f32, num_channels: usize
     if !SEEN.swap(true, Ordering::Relaxed) {
         log::info!("захват микрофона: {rate} Гц, {num_channels} кан., {frames} отсчётов в блоке");
     }
+    if channels.is_null() || num_channels == 0 {
+        return;
+    }
+    unsafe { process_block(channels, num_channels, frames, rate) };
+    // Уровень — по тому, что уйдёт в кодер (после шумодава).
+    let first = unsafe { *channels };
+    if !first.is_null() {
+        // SAFETY: WebRTC передаёт num_channels указателей на буферы по frames float, живых на время вызова.
+        track_level(unsafe { std::slice::from_raw_parts(first, frames) });
+    }
+}
+
+unsafe fn process_block(channels: *const *mut f32, num_channels: usize, frames: usize, rate: i32) {
     let mode = MODE.load(Ordering::Relaxed);
-    if mode < 2 || channels.is_null() || num_channels == 0 {
+    if mode < 2 {
         return;
     }
     if rate != RATE || frames != FRAME {

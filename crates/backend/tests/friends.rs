@@ -145,7 +145,12 @@ async fn events_and_presence() {
     assert!(lb.friends[0].online);
     // a закрыл клиент — b узнаёт
     drop(sa);
-    assert_eq!(sb.next().await, ServerEvent::Presence { user_id: a_id, online: false });
+    // «в сети» рассылается в фоне и может прийти уже после принятия заявки — пропускаем
+    let mut ev = sb.next().await;
+    if ev == (ServerEvent::Presence { user_id: a_id, online: true }) {
+        ev = sb.next().await;
+    }
+    assert_eq!(ev, ServerEvent::Presence { user_id: a_id, online: false });
     assert!(!friends(&t, &b).await.friends[0].online);
     // a вернулся
     let _sa = Stream::open(&t, &a).await;

@@ -1,8 +1,10 @@
-//! Настройки сервера (фаза 9.1): обзор (название, значок, передача, удаление), участники и роли, баны, приглашения.
+//! Настройки сервера: слева меню (Профиль сервера, Участники, Приглашения, Баны, Роли и Модерация — «скоро»),
+//! справа — раздел. «Профиль сервера»: название, значок, баннер (узор или своя картинка 960×480), цвет, описание и живой
+//! предпросмотр (шапка боковой панели + карточка приглашения).
 
 use std::sync::mpsc as std_mpsc;
 
-use eframe::egui::{self, Align, Align2, Layout, RichText, Sense, TextureHandle, TextureOptions, Ui, vec2};
+use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Layout, RichText, Sense, Stroke, TextureHandle, TextureOptions, Ui, vec2};
 use egui_phosphor::regular as ph;
 use proto::{Ban, Invite, Role, limits, perm};
 
@@ -59,6 +61,8 @@ enum Ev {
     Bans(Result<Vec<Ban>, String>),
     Invites(Result<Vec<Invite>, String>),
     Icon(Result<Option<image::DynamicImage>, String>),
+    /// Своя картинка баннера: готовые байты 960×480 (или ошибка).
+    Banner(Result<Option<Vec<u8>>, String>),
 }
 
 pub struct ServerSettings {
@@ -77,6 +81,10 @@ pub struct ServerSettings {
     error: Option<String>,
     icon_preview: Option<TextureHandle>,
     crop: Option<crate::crop::CropDialog>,
+    /// Поля профиля (правка до «Сохранить»).
+    description: String,
+    banner: Option<String>,
+    color: Option<String>,
 }
 
 impl ServerSettings {
@@ -98,6 +106,9 @@ impl ServerSettings {
             error: None,
             icon_preview: None,
             crop: None,
+            description: String::new(),
+            banner: None,
+            color: None,
         }
     }
 
@@ -115,7 +126,11 @@ impl ServerSettings {
 
     pub fn open(&mut self, model: &Model, server: i64) {
         self.server = Some(server);
-        self.name = model.server(server).map(|s| s.name.clone()).unwrap_or_default();
+        let s = model.server(server);
+        self.name = s.map(|s| s.name.clone()).unwrap_or_default();
+        self.description = s.and_then(|s| s.description.clone()).unwrap_or_default();
+        self.banner = s.and_then(|s| s.banner.clone());
+        self.color = s.and_then(|s| s.color.clone());
         self.tab = if model.has_perm(server, perm::MANAGE_SERVER) { Tab::Overview } else { Tab::Members };
         self.bans = None;
         self.invites = None;
@@ -174,6 +189,16 @@ impl ServerSettings {
                 }
                 Ev::Bans(r) => self.bans = Some(r),
                 Ev::Invites(r) => self.invites = Some(r),
+                Ev::Banner(r) => match r {
+                    Ok(Some(bytes)) => {
+                        if let Some(s) = self.server {
+                            let api = self.api.clone();
+                            self.act(false, async move { api.put_server_banner(s, bytes).await.map(|_| ()) });
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => self.error = Some(e),
+                },
                 Ev::Icon(r) => match r {
                     Ok(Some(img)) => self.crop = Some(crate::crop::CropDialog::new(&self.ctx, "Значок сервера", img)),
                     Ok(None) => {}
@@ -191,49 +216,61 @@ impl ServerSettings {
             return;
         };
         let perms = model.my_perms(server);
-        let mut tabs = Vec::new();
-        if perm::has(perms, perm::MANAGE_SERVER) || model.is_owner(server) {
-            tabs.push((Tab::Overview, "Обзор"));
+        let manage = perm::has(perms, perm::MANAGE_SERVER) || model.is_owner(server);
+        let mut tabs: Vec<(Option<Tab>, &str, &str)> = Vec::new();
+        if manage {
+            tabs.push((Some(Tab::Overview), ph::PAINT_BRUSH, "Профиль сервера"));
         }
-        tabs.push((Tab::Members, "Участники"));
+        tabs.push((Some(Tab::Members), ph::USERS, "Участники"));
+        tabs.push((Some(Tab::Invites), ph::USER_PLUS, "Приглашения"));
         if perm::has(perms, perm::BAN) {
-            tabs.push((Tab::Bans, "Баны"));
+            tabs.push((Some(Tab::Bans), ph::PROHIBIT, "Баны"));
         }
-        tabs.push((Tab::Invites, "Приглашения"));
-        if !tabs.iter().any(|(t, _)| *t == self.tab) {
+        tabs.push((None, ph::SHIELD_CHECK, "Роли · скоро"));
+        tabs.push((None, ph::GAVEL, "Модерация · скоро"));
+        if !tabs.iter().any(|(t, _, _)| *t == Some(self.tab)) {
             self.tab = Tab::Members;
         }
-        let res = kit::modal(ctx, "server-settings", &format!("Сервер «{}»", s.name), 560.0, |ui| {
-            ui.horizontal(|ui| {
-                for (tab, label) in &tabs {
-                    let kind = if self.tab == *tab { ButtonKind::Primary } else { ButtonKind::Secondary };
-                    if kit::button(ui, kind, label, None).clicked() && self.tab != *tab {
-                        self.tab = *tab;
-                        self.error = None;
-                        self.confirm = None;
-                        match tab {
-                            Tab::Bans => self.load_bans(server),
-                            Tab::Invites => self.load_invites(server),
-                            _ => {}
+        let width = (ctx.content_rect().width() - 60.0).clamp(640.0, 900.0);
+        let res = kit::modal(ctx, "server-settings", &format!("Сервер «{}»", s.name), width, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(190.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (tab, icon, label) in &tabs {
+                        let active = *tab == Some(self.tab);
+                        if kit::row(ui, icon, label, active, None, tab.is_some()).clicked()
+                            && let Some(tab) = tab
+                            && !active
+                        {
+                            self.tab = *tab;
+                            self.error = None;
+                            self.confirm = None;
+                            match tab {
+                                Tab::Bans => self.load_bans(server),
+                                Tab::Invites => self.load_invites(server),
+                                _ => {}
+                            }
                         }
                     }
-                }
-            });
-            ui.add_space(14.0);
-            match self.tab {
-                Tab::Overview => self.ui_overview(ui, model, people, &s),
-                tab => {
-                    egui::ScrollArea::vertical().max_height(380.0).auto_shrink([false, true]).show(ui, |ui| match tab {
+                });
+                ui.add_space(14.0);
+                let (sep, _) = ui.allocate_exact_size(vec2(1.0, 460.0), Sense::hover());
+                ui.painter().vline(sep.center().x, sep.y_range(), Stroke::new(1.0, t::p().border));
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    egui::ScrollArea::vertical().max_height(460.0).auto_shrink([false, true]).show(ui, |ui| match self.tab {
+                        Tab::Overview => self.ui_overview(ui, model, people, &s),
                         Tab::Members => self.ui_members(ui, model, people, server),
                         Tab::Bans => self.ui_bans(ui, people, server),
-                        _ => self.ui_invites(ui, model, server),
+                        Tab::Invites => self.ui_invites(ui, model, server),
                     });
-                }
-            }
-            if let Some(e) = &self.error {
-                ui.add_space(8.0);
-                ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
-            }
+                    if let Some(e) = &self.error {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
+                    }
+                });
+            });
         });
         self.ui_confirm(ctx, server);
         if let Some(c) = self.crop.as_mut() {
@@ -255,57 +292,219 @@ impl ServerSettings {
         }
     }
 
+    /// Профиль сервера: поля слева, предпросмотр справа.
     fn ui_overview(&mut self, ui: &mut Ui, model: &Model, people: &People, s: &proto::Server) {
-        let w = ui.available_width();
-        let manage = model.has_perm(s.id, perm::MANAGE_SERVER);
-        if manage {
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
-                let tex = self.icon_preview.as_ref().map(|t| t.id()).or_else(|| s.icon.as_deref().and_then(|k| people.texture(k)).map(|t| t.id()));
-                match tex {
-                    Some(id) => {
-                        egui::Image::new(egui::load::SizedTexture::new(id, rect.size())).paint_at(ui, rect);
+        let manage = model.has_perm(s.id, perm::MANAGE_SERVER) || model.is_owner(s.id);
+        let full_w = ui.available_width();
+        let preview_w = 280.0;
+        let side = full_w > 600.0;
+        let w = if side { full_w - preview_w - 24.0 } else { full_w };
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(w);
+                if manage {
+                    self.profile_fields(ui, people, s, w);
+                }
+                if model.is_owner(s.id) {
+                    ui.add_space(22.0);
+                    label(ui, "Опасная зона");
+                    ui.label(RichText::new("Передать владение — в «Участниках»: меню у человека, затем «Сделать владельцем».").size(13.0).color(t::p().text_muted));
+                    ui.add_space(8.0);
+                    if kit::button_ex(ui, ButtonKind::Danger, "Удалить сервер", Some(egui_phosphor::fill::TRASH), !self.busy).clicked() {
+                        self.confirm = Some(Confirm::Delete { typed: String::new() });
                     }
-                    None => {
-                        ui.painter().circle_filled(rect.center(), 32.0, t::p().surface_3);
-                        ui.painter().text(rect.center(), Align2::CENTER_CENTER, crate::servers_ui::initials(&s.name), t::xbold(20.0), t::p().text);
+                }
+            });
+            if side {
+                ui.add_space(24.0);
+                ui.vertical(|ui| {
+                    ui.set_width(preview_w);
+                    self.preview(ui, model, people, s, preview_w);
+                });
+            }
+        });
+    }
+
+    /// Сервер с несохранёнными правками (для предпросмотра).
+    fn edited(&self, s: &proto::Server) -> proto::Server {
+        let mut e = s.clone();
+        if !self.name.trim().is_empty() {
+            e.name = self.name.trim().to_string();
+        }
+        e.description = Some(self.description.trim().to_string()).filter(|d| !d.is_empty());
+        e.banner = self.banner.clone();
+        e.color = self.color.clone();
+        e
+    }
+
+    fn profile_fields(&mut self, ui: &mut Ui, people: &People, s: &proto::Server, w: f32) {
+        let p = t::p();
+        label(ui, "Название");
+        ui.add(kit::text_field(&mut self.name, w).char_limit(limits::SERVER_NAME_MAX));
+        ui.add_space(12.0);
+        label(ui, "Иконка");
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
+            match self.icon_preview.as_ref().map(|t| t.id()) {
+                Some(id) => {
+                    egui::Image::new(egui::load::SizedTexture::new(id, rect.size())).corner_radius(CornerRadius::same(16)).paint_at(ui, rect);
+                }
+                None => crate::banner::paint_icon(ui.painter(), rect, &self.edited(s), people),
+            }
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                if kit::button_ex(ui, ButtonKind::Secondary, "Загрузить…", Some(egui_phosphor::fill::IMAGE), !self.busy).clicked() {
+                    self.spawn(async move {
+                        let r = tokio::task::spawn_blocking(|| crate::servers_ui::pick_image("Значок сервера")).await.map_err(|e| e.to_string());
+                        Ev::Icon(r.and_then(|r| r))
+                    });
+                }
+                if s.icon.is_some() && kit::button_ex(ui, ButtonKind::Ghost, "Убрать", None, !self.busy).clicked() {
+                    self.icon_preview = None;
+                    let (api, id) = (self.api.clone(), s.id);
+                    self.act(false, async move { api.delete_server_icon(id).await.map(|_| ()) });
+                }
+            });
+        });
+        ui.label(RichText::new("квадрат от 256 px").size(12.0).color(p.text_muted));
+        ui.add_space(12.0);
+        label(ui, "Баннер");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let current = self.banner.clone().unwrap_or_else(|| proto::banner::WAVES.to_string());
+            for name in proto::banner::ALL {
+                let (rect, resp) = ui.allocate_exact_size(vec2(92.0, 52.0), Sense::click());
+                crate::banner::paint_pattern(ui.painter(), rect, name, CornerRadius::same(10), 0.4);
+                ui.painter().text(rect.left_bottom() + vec2(8.0, -8.0), Align2::LEFT_BOTTOM, crate::banner::pattern_label(name), t::bold(12.0), Color32::WHITE);
+                let selected = s.banner_image.is_none() && current == name;
+                if selected || resp.hovered() {
+                    let c = if selected { p.accent } else { p.border_strong };
+                    ui.painter().rect_stroke(rect.expand(2.0), CornerRadius::same(12), Stroke::new(2.0, c), egui::StrokeKind::Outside);
+                }
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.banner = (name != proto::banner::WAVES).then(|| name.to_string());
+                    if s.banner_image.is_some() {
+                        let (api, id) = (self.api.clone(), s.id);
+                        self.act(false, async move { api.delete_server_banner(id).await.map(|_| ()) });
                     }
+                }
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if kit::button_ex(ui, ButtonKind::Secondary, "Своё изображение…", Some(egui_phosphor::fill::IMAGE), !self.busy).clicked() {
+                self.spawn(async move {
+                    let r = tokio::task::spawn_blocking(|| {
+                        let img = crate::servers_ui::pick_image("Баннер сервера")?;
+                        img.map(|i| banner_bytes(&i)).transpose()
+                    })
+                    .await
+                    .map_err(|e| e.to_string());
+                    Ev::Banner(r.and_then(|r| r))
+                });
+            }
+            if s.banner_image.is_some() && kit::button_ex(ui, ButtonKind::Ghost, "Убрать картинку", None, !self.busy).clicked() {
+                let (api, id) = (self.api.clone(), s.id);
+                self.act(false, async move { api.delete_server_banner(id).await.map(|_| ()) });
+            }
+        });
+        ui.label(RichText::new("960×480; другая картинка обрежется по центру. Полоса затемнения под названием ложится сама.").size(12.0).color(p.text_muted));
+        ui.add_space(12.0);
+        label(ui, "Цвет сервера");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let mut pick = |ui: &mut Ui, value: Option<&str>, fill: Color32, tip: &str| {
+                let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+                ui.painter().circle_filled(rect.center(), 13.0, fill);
+                let selected = self.color.as_deref() == value;
+                if selected {
+                    ui.painter().circle_stroke(rect.center(), 15.5, Stroke::new(2.0, p.text));
+                }
+                if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.color = value.map(str::to_string);
+                }
+            };
+            pick(ui, None, p.accent_strong, "Фирменный");
+            for c in proto::SERVER_COLORS {
+                pick(ui, Some(c), crate::banner::parse_hex(c).unwrap_or(p.accent), c);
+            }
+        });
+        ui.label(RichText::new("Фон иконки и полоска выбранного канала. Кнопки и волны остаются фирменными.").size(12.0).color(p.text_muted));
+        ui.add_space(12.0);
+        label(ui, "Описание");
+        ui.add(kit::text_area(&mut self.description, w).hint_text("видно под баннером и в приглашении").char_limit(limits::SERVER_DESCRIPTION_MAX).desired_rows(2));
+        ui.label(RichText::new(format!("{} / {}", self.description.chars().count(), limits::SERVER_DESCRIPTION_MAX)).size(11.5).color(p.text_faint));
+        ui.add_space(12.0);
+        let req = proto::UpdateServerRequest {
+            name: Some(self.name.trim().to_string()).filter(|n| !n.is_empty() && *n != s.name),
+            description: Some(self.description.trim().to_string()).filter(|d| d.as_str() != s.description.as_deref().unwrap_or("")),
+            banner: (self.banner != s.banner).then(|| self.banner.clone().unwrap_or_default()),
+            color: (self.color != s.color).then(|| self.color.clone().unwrap_or_default()),
+        };
+        let changed = req.name.is_some() || req.description.is_some() || req.banner.is_some() || req.color.is_some();
+        if kit::button_ex(ui, ButtonKind::Primary, "Сохранить", None, changed && !self.busy).clicked() {
+            let (api, id) = (self.api.clone(), s.id);
+            self.act(false, async move { api.update_server_profile(id, req).await.map(|_| ()) });
+        }
+    }
+
+    /// Живой предпросмотр: шапка боковой панели и карточка приглашения.
+    fn preview(&self, ui: &mut Ui, model: &Model, people: &People, s: &proto::Server, w: f32) {
+        let p = t::p();
+        let e = self.edited(s);
+        let list = model.members.get(&s.id);
+        let members = list.map(|l| l.len()).unwrap_or(0);
+        let online = list.map(|l| l.iter().filter(|m| m.online || Some(m.user.id) == model.me).count()).unwrap_or(0);
+        label(ui, "Предпросмотр");
+        let (rect, _) = ui.allocate_exact_size(vec2(w, crate::banner::HEIGHT), Sense::hover());
+        let round = CornerRadius { nw: 12, ne: 12, sw: 0, se: 0 };
+        crate::banner::paint_background(ui.painter(), rect, &e, people, round);
+        crate::banner::paint_strip(&ui.painter_at(rect), rect, &e, people, members, online, true);
+        egui::Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(CornerRadius { nw: 0, ne: 0, sw: 12, se: 12 })
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_width(w - 24.0);
+                match e.description.as_deref() {
+                    Some(d) => ui.add(egui::Label::new(RichText::new(d).size(12.0).color(p.text_muted)).wrap()),
+                    None => ui.label(RichText::new("описания нет").size(12.0).color(p.text_faint)),
+                };
+                ui.add_space(4.0);
+                for name in ["общий", "General"] {
+                    ui.label(RichText::new(format!("{}  {name}", if name == "общий" { ph::HASH } else { ph::SPEAKER_HIGH })).size(13.0).color(p.text_muted));
+                }
+            });
+        ui.add_space(16.0);
+        label(ui, "Карточка приглашения");
+        egui::Frame::new()
+            .fill(p.surface_2)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(CornerRadius::same(kit::R_CARD))
+            .inner_margin(egui::Margin::same(14))
+            .show(ui, |ui| {
+                ui.set_width(w - 28.0);
+                ui.label(RichText::new("ВАС ПРИГЛАШАЮТ НА СЕРВЕР").font(t::bold(11.0)).color(p.text_muted));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
+                    crate::banner::paint_icon(ui.painter(), r, &e, people);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.label(RichText::new(&e.name).font(t::xbold(15.0)).color(p.text));
+                        ui.label(RichText::new(format!("{online} в сети · {}", t::plural(members, "участник", "участника", "участников"))).size(12.0).color(p.text_muted));
+                    });
+                });
+                if let Some(d) = e.description.as_deref() {
+                    ui.add_space(6.0);
+                    ui.add(egui::Label::new(RichText::new(d).size(12.0).color(p.text_muted)).wrap());
                 }
                 ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    if kit::button_ex(ui, ButtonKind::Secondary, "Сменить значок", Some(egui_phosphor::fill::IMAGE), !self.busy).clicked() {
-                        self.spawn(async move {
-                            let r = tokio::task::spawn_blocking(|| crate::servers_ui::pick_image("Значок сервера")).await.map_err(|e| e.to_string());
-                            Ev::Icon(r.and_then(|r| r))
-                        });
-                    }
-                    if s.icon.is_some() && kit::button_ex(ui, ButtonKind::Ghost, "Убрать значок", None, !self.busy).clicked() {
-                        self.icon_preview = None;
-                        let (api, id) = (self.api.clone(), s.id);
-                        self.act(false, async move { api.delete_server_icon(id).await.map(|_| ()) });
-                    }
-                });
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+                ui.painter().rect_filled(r, CornerRadius::same(kit::R_PILL), p.accent_strong);
+                ui.painter().text(r.center(), Align2::CENTER_CENTER, "Войти", t::bold(14.0), p.on_accent);
             });
-            ui.add_space(14.0);
-            label(ui, "Название");
-            ui.horizontal(|ui| {
-                ui.add(kit::text_field(&mut self.name, w - 130.0).char_limit(limits::SERVER_NAME_MAX));
-                let changed = !self.name.trim().is_empty() && self.name.trim() != s.name;
-                if kit::button_ex(ui, ButtonKind::Primary, "Сохранить", None, changed && !self.busy).clicked() {
-                    let (api, id, name) = (self.api.clone(), s.id, self.name.trim().to_string());
-                    self.act(false, async move { api.update_server(id, &name).await.map(|_| ()) });
-                }
-            });
-        }
-        if model.is_owner(s.id) {
-            ui.add_space(22.0);
-            label(ui, "Опасная зона");
-            ui.label(RichText::new("Передать владение — во вкладке «Участники»: меню у человека, затем «Сделать владельцем».").size(13.0).color(t::p().text_muted));
-            ui.add_space(8.0);
-            if kit::button_ex(ui, ButtonKind::Danger, "Удалить сервер", Some(egui_phosphor::fill::TRASH), !self.busy).clicked() {
-                self.confirm = Some(Confirm::Delete { typed: String::new() });
-            }
-        }
     }
 
     fn ui_members(&mut self, ui: &mut Ui, model: &Model, people: &People, server: i64) {
@@ -517,6 +716,21 @@ impl ServerSettings {
     }
 }
 
+/// Картинка → баннер 960×480 (обрезка по центру, «cover»), PNG; если больше 2 МБ — JPEG.
+pub fn banner_bytes(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
+    let (w, h) = (limits::BANNER_W, limits::BANNER_H);
+    let out = img.resize_to_fill(w, h, image::imageops::FilterType::Lanczos3);
+    let mut png = std::io::Cursor::new(Vec::new());
+    out.write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    let png = png.into_inner();
+    if png.len() <= limits::IMAGE_BANNER_MAX_BYTES {
+        return Ok(png);
+    }
+    let mut jpg = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(out.to_rgb8()).write_to(&mut jpg, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
+    Ok(jpg.into_inner())
+}
+
 fn label(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).font(t::semibold(13.0)).color(t::p().text_muted));
 }
@@ -535,13 +749,13 @@ mod tests {
             Role { id: 13, name: "Участник".into(), position: 0, permissions: perm::INVITE },
         ];
         let mut m = Model::with_me(5);
-        m.set_servers(vec![Server { id: 1, name: "s".into(), icon: None, owner_id: 9, roles, my_role_id: my_role }]);
+        m.set_servers(vec![Server { id: 1, name: "s".into(), icon: None, owner_id: 9, roles, my_role_id: my_role, ..Default::default() }]);
         let u = |id: i64| PublicUser { id, name: format!("u{id}"), display_name: None, avatar: None };
         m.set_members(1, vec![
-            Member { user: u(5), role_id: my_role },
-            Member { user: u(6), role_id: 11 },
-            Member { user: u(7), role_id: 13 },
-            Member { user: u(9), role_id: 10 },
+            Member { user: u(5), role_id: my_role, online: false, activity: None },
+            Member { user: u(6), role_id: 11, online: false, activity: None },
+            Member { user: u(7), role_id: 13, online: false, activity: None },
+            Member { user: u(9), role_id: 10, online: false, activity: None },
         ]);
         m
     }

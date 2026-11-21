@@ -9,7 +9,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use proto::{AddFriendRequest, Friend, FriendRequest, FriendsList, PublicUser, ServerEvent, limits};
+use proto::{Activity, AddFriendRequest, Friend, FriendRequest, FriendsList, PublicUser, ServerEvent, limits};
 
 use crate::{
     AppState,
@@ -19,18 +19,42 @@ use crate::{
     now,
 };
 
-/// Сколько потоков событий открыто у каждого человека.
+/// Сколько потоков событий открыто у каждого человека, и во что он играет (только пока в сети).
 #[derive(Default)]
-pub struct Online(std::sync::Mutex<HashMap<i64, usize>>);
+pub struct Online {
+    streams: std::sync::Mutex<HashMap<i64, usize>>,
+    games: std::sync::Mutex<HashMap<i64, (String, i64)>>,
+}
 
 impl Online {
     pub fn is_online(&self, user: i64) -> bool {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&user).is_some_and(|n| *n > 0)
+        self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&user).is_some_and(|n| *n > 0)
+    }
+
+    /// Игра человека; None — убрать. true — изменилось.
+    pub fn set_game(&self, user: i64, game: Option<(String, i64)>) -> bool {
+        let mut m = self.games.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = m.get(&user) != game.as_ref();
+        match game {
+            Some(g) => m.insert(user, g),
+            None => m.remove(&user),
+        };
+        changed
+    }
+
+    /// Активность для других: игра (если в сети) + свой статус. Не в сети — None.
+    pub fn activity(&self, user: i64, status: Option<String>) -> Option<Activity> {
+        if !self.is_online(user) {
+            return None;
+        }
+        let g = self.games.lock().unwrap_or_else(|e| e.into_inner()).get(&user).cloned();
+        let a = Activity { since: g.as_ref().map(|g| g.1), game: g.map(|g| g.0), status };
+        (!a.is_empty()).then_some(a)
     }
 
     /// +1 поток; true — человек только что появился в сети.
     fn inc(&self, user: i64) -> bool {
-        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         let n = m.entry(user).or_insert(0);
         *n += 1;
         *n == 1
@@ -38,7 +62,7 @@ impl Online {
 
     /// −1 поток; true — у человека больше нет потоков (вышел из сети).
     fn dec(&self, user: i64) -> bool {
-        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         match m.get_mut(&user) {
             Some(n) if *n > 1 => {
                 *n -= 1;
@@ -46,6 +70,8 @@ impl Online {
             }
             Some(_) => {
                 m.remove(&user);
+                drop(m);
+                self.set_game(user, None);
                 true
             }
             None => false,
@@ -76,13 +102,15 @@ impl Drop for OnlineGuard {
     }
 }
 
+/// «В сети / не в сети» — друзьям и соседям по серверам (список участников).
 fn announce(state: AppState, user: i64, online: bool) {
     let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
     rt.spawn(async move {
-        if let Ok(ids) = friend_ids(&state.inner.db, user).await
-            && !ids.is_empty()
-        {
-            publish(&state, Audience::Users(ids), ServerEvent::Presence { user_id: user, online });
+        if let Ok(mut ids) = crate::profile::neighbours(&state.inner.db, user).await {
+            ids.retain(|&id| id != user);
+            if !ids.is_empty() {
+                publish(&state, Audience::Users(ids), ServerEvent::Presence { user_id: user, online });
+            }
         }
     });
 }
@@ -115,9 +143,9 @@ fn changed(state: &AppState, a: i64, b: i64) {
 }
 
 async fn list(state: &AppState, me: i64) -> AppResult<FriendsList> {
-    type Row = (i64, String, i64, String, Option<String>, Option<String>, i64);
+    type Row = (i64, String, i64, String, Option<String>, Option<String>, i64, Option<String>);
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT f.requester_id, f.status, u.id, u.name, u.display_name, u.avatar_key, f.created_at
+        "SELECT f.requester_id, f.status, u.id, u.name, u.display_name, u.avatar_key, f.created_at, u.status
          FROM friendships f JOIN users u ON u.id = CASE WHEN f.requester_id = ?1 THEN f.addressee_id ELSE f.requester_id END
          WHERE f.requester_id = ?1 OR f.addressee_id = ?1
          ORDER BY u.name COLLATE NOCASE",
@@ -126,10 +154,11 @@ async fn list(state: &AppState, me: i64) -> AppResult<FriendsList> {
     .fetch_all(&state.inner.db)
     .await?;
     let mut out = FriendsList::default();
-    for (requester, status, id, name, display_name, avatar, created_at) in rows {
+    for (requester, status, id, name, display_name, avatar, created_at, own_status) in rows {
         let user = PublicUser { id, name, display_name, avatar };
         if status == "accepted" {
-            out.friends.push(Friend { online: state.inner.online.is_online(id), user });
+            let online = &state.inner.online;
+            out.friends.push(Friend { online: online.is_online(id), activity: online.activity(id, own_status), user });
         } else if requester == me {
             out.outgoing.push(FriendRequest { user, created_at });
         } else {

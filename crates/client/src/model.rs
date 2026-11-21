@@ -102,6 +102,43 @@ impl Model {
         self.has_server(id) && !self.layouts.contains_key(&id)
     }
 
+    /// Голосовой канал на моих серверах, где сейчас человек: (сервер, канал).
+    pub fn voice_of(&self, uid: i64) -> Option<(&Server, &Channel)> {
+        let (&ch, _) = self.voice.iter().filter(|(_, ids)| ids.contains(&uid)).min_by_key(|(ch, _)| **ch)?;
+        self.channel_place(ch)
+    }
+
+    /// Сервер и канал по id канала (если раскладка известна).
+    pub fn channel_place(&self, ch: i64) -> Option<(&Server, &Channel)> {
+        self.layouts.iter().find_map(|(sid, l)| {
+            let c = l.channels.iter().find(|c| c.id == ch)?;
+            Some((self.server(*sid)?, c))
+        })
+    }
+
+    /// Все голосовые каналы, где кто-то есть: (сервер, канал, кто), по порядку серверов.
+    pub fn busy_voice(&self) -> Vec<(&Server, &Channel, &[i64])> {
+        let mut out: Vec<_> = self
+            .voice
+            .iter()
+            .filter(|(_, ids)| !ids.is_empty())
+            .filter_map(|(ch, ids)| self.channel_place(*ch).map(|(s, c)| (s, c, ids.as_slice())))
+            .collect();
+        let order = |sid: i64| self.servers.iter().position(|s| s.id == sid).unwrap_or(usize::MAX);
+        out.sort_by_key(|(s, c, _)| (order(s.id), c.position, c.id));
+        out
+    }
+
+    /// Человек — участник сервера (по загруженному списку).
+    pub fn is_member(&self, server: i64, uid: i64) -> bool {
+        self.members.get(&server).is_some_and(|l| l.iter().any(|m| m.user.id == uid))
+    }
+
+    /// Участник сервера.
+    pub fn member(&self, server: i64, uid: i64) -> Option<&Member> {
+        self.members.get(&server).and_then(|l| l.iter().find(|m| m.user.id == uid))
+    }
+
     pub fn server(&self, id: i64) -> Option<&Server> {
         self.servers.iter().find(|s| s.id == id)
     }
@@ -187,11 +224,24 @@ impl Model {
                     }
                 }
             }
+            ServerEvent::Presence { user_id, online } => {
+                for m in self.members.values_mut().flat_map(|l| l.iter_mut()).filter(|m| m.user.id == *user_id) {
+                    m.online = *online;
+                    if !online {
+                        m.activity = None;
+                    }
+                }
+            }
+            ServerEvent::Activity { user_id, activity } => {
+                for m in self.members.values_mut().flat_map(|l| l.iter_mut()).filter(|m| m.user.id == *user_id) {
+                    m.activity = activity.clone();
+                }
+            }
             ServerEvent::MessageCreated { .. }
             | ServerEvent::Hello
             | ServerEvent::Resync
             | ServerEvent::FriendsChanged
-            | ServerEvent::Presence { .. }
+            | ServerEvent::Summon { .. }
             | ServerEvent::ReadState { .. }
             | ServerEvent::Call { .. } => {}
         }
@@ -292,7 +342,7 @@ mod tests {
     }
 
     fn server(id: i64, my_role: i64) -> Server {
-        Server { id, name: format!("s{id}"), icon: None, owner_id: 1, roles: roles(), my_role_id: my_role }
+        Server { id, name: format!("s{id}"), icon: None, owner_id: 1, roles: roles(), my_role_id: my_role, ..Default::default() }
     }
 
     fn user(id: i64, name: &str) -> PublicUser {
@@ -349,7 +399,7 @@ mod tests {
     fn apply_user_updated_changes_member_name() {
         let mut m = Model::default();
         m.set_servers(vec![server(1, 13)]);
-        m.set_members(1, vec![Member { user: user(2, "kurisu"), role_id: 13 }]);
+        m.set_members(1, vec![Member { user: user(2, "kurisu"), role_id: 13, online: false, activity: None }]);
         let new = PublicUser { display_name: Some("Курису".into()), ..user(2, "kurisu") };
         m.apply(&ServerEvent::UserUpdated { user: new.clone() });
         assert_eq!(m.members[&1][0].user, new);
@@ -363,7 +413,7 @@ mod tests {
         assert_eq!(m.my_perms(1), perm::INVITE | perm::KICK | perm::BAN | perm::DISCONNECT);
         assert_eq!(m.my_perms(99), 0, "чужой сервер — прав нет");
         // Моя роль поменялась событием участника.
-        m.apply(&ServerEvent::MemberUpserted { server_id: 1, member: Member { user: user(5, "me"), role_id: 13 } });
+        m.apply(&ServerEvent::MemberUpserted { server_id: 1, member: Member { user: user(5, "me"), role_id: 13, online: false, activity: None } });
         assert_eq!(m.my_perms(1), perm::INVITE);
     }
 
@@ -383,7 +433,7 @@ mod tests {
         m.set_servers(vec![server(1, 13), server(2, 13)]);
         m.apply(&ServerEvent::ServerRemoved { server_id: 2 });
         m.set_layout(2, ChannelLayout { categories: vec![], channels: vec![ch(5, None, 0)] });
-        m.set_members(2, vec![Member { user: user(7, "x"), role_id: 13 }]);
+        m.set_members(2, vec![Member { user: user(7, "x"), role_id: 13, online: false, activity: None }]);
         m.apply(&ServerEvent::LayoutChanged { server_id: 2, layout: ChannelLayout { categories: vec![], channels: vec![] } });
         assert!(!m.layouts.contains_key(&2), "раскладка ушедшего сервера не возвращается");
         assert!(!m.members.contains_key(&2));
@@ -421,7 +471,7 @@ mod tests {
     fn hierarchy_can_act_and_assign() {
         let mut m = Model::with_me(5);
         m.set_servers(vec![server(1, 12)]); // модератор
-        m.set_members(1, vec![Member { user: user(5, "me"), role_id: 12 }, Member { user: user(6, "a"), role_id: 11 }, Member { user: user(7, "b"), role_id: 13 }]);
+        m.set_members(1, vec![Member { user: user(5, "me"), role_id: 12, online: false, activity: None }, Member { user: user(6, "a"), role_id: 11, online: false, activity: None }, Member { user: user(7, "b"), role_id: 13, online: false, activity: None }]);
         assert!(!m.can_act_on(1, 6), "админ выше модератора");
         assert!(m.can_act_on(1, 7));
         assert!(!m.can_act_on(1, 5), "над собой — нет");
