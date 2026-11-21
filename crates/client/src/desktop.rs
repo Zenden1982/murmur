@@ -143,7 +143,10 @@ mod win {
 
     pub fn set_autostart(exe: Option<&Path>) -> Result<(), String> {
         let key = wide(RUN_KEY);
-        let name = wide("Amadeus");
+        // до 0.3.4 запись называлась «Amadeus» и вела на amadeus.exe — убираем её, пишем «Murmur»
+        let old = wide("Amadeus");
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), old.as_ptr()) };
+        let name = wide("Murmur");
         let err = match exe {
             Some(exe) => {
                 let cmd = wide(&format!("\"{}\" {ARG_TRAY}", exe.display()));
@@ -276,6 +279,11 @@ pub fn hkcu_string(key: &str, value: &str) -> Option<String> {
 }
 
 /// Запустить файл (установщик).
+/// Запустить программу с аргументами (без окна консоли и без ожидания).
+pub fn spawn_with_args(path: &Path, args: &[&str]) -> bool {
+    std::process::Command::new(path).args(args).spawn().is_ok()
+}
+
 pub fn run_file(path: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -308,7 +316,7 @@ pub fn is_installed() -> bool {
     current_exe().and_then(|e| e.parent().map(|d| d.join("uninstall.exe").is_file())).unwrap_or(false)
 }
 
-/// Прописать (Some) или убрать (None) автозапуск: `"…\amadeus.exe" --tray`.
+/// Прописать (Some) или убрать (None) автозапуск: `"…\murmur.exe" --tray`.
 pub fn set_autostart(on: bool) -> Result<(), String> {
     #[cfg(windows)]
     {

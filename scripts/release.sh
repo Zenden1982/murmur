@@ -25,9 +25,9 @@ cargo packager -p client --release
 
 OUT="dist/$VERSION"
 mkdir -p "$OUT"
-EXE="amadeus-$VERSION.exe"
+EXE="murmur-$VERSION.exe"
 SETUP="murmur-setup-$VERSION.exe"
-cp target/release/amadeus.exe "$OUT/$EXE"
+cp target/release/murmur.exe "$OUT/$EXE"
 # cargo-packager называет установщик по productName (раньше amadeus_…, теперь murmur_…/Murmur_…)
 mapfile -t BUILT_ALL < <(compgen -G "target/release/*_${VERSION}_x64-setup.exe" || true)
 [[ ${#BUILT_ALL[@]} -eq 1 ]] || { echo "ожидался ровно один установщик ${VERSION}, найдено: ${BUILT_ALL[*]:-ничего}"; exit 1; }
@@ -51,7 +51,7 @@ if [[ -n "${NO_UPLOAD:-}" ]]; then
     exit 0
 fi
 
-TMP="/tmp/amadeus-release-$VERSION"
+TMP="/tmp/murmur-release-$VERSION"
 echo "== выкладываю на $REMOTE_HOST:$REMOTE_DIR"
 ssh "$REMOTE_HOST" "rm -rf $TMP && mkdir -p $TMP"
 scp "$OUT/$EXE" "$OUT/$EXE.gz" "$OUT/$SETUP" "$OUT/latest.json" "$REMOTE_HOST:$TMP/"

@@ -81,7 +81,7 @@ pub struct ReleaseInfo {
     /// Что нового (коротко, для окна обновления).
     #[serde(default)]
     pub notes: String,
-    /// Новый `amadeus.exe` для самообновления.
+    /// Новый exe клиента для самообновления.
     pub file: String,
     /// SHA-256 файла `file` (hex, строчные).
     pub sha256: String,

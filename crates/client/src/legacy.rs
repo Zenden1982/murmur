@@ -15,6 +15,25 @@ pub fn is_legacy_install(exe: &Path, old_install_location: Option<&Path>, new_un
     exe.parent().is_some_and(|dir| norm(dir) == norm(old))
 }
 
+/// Установленный Murmur, но exe ещё старого имени (`amadeus.exe` — автообновление подменяет файл, не переименовывая).
+pub fn is_old_exe_name(exe: &Path, installed: bool) -> bool {
+    installed && exe.file_name().is_some_and(|n| n.eq_ignore_ascii_case("amadeus.exe"))
+}
+
+/// Нужна тихая переустановка под именем murmur.exe (установщик сам уберёт amadeus.exe, поправит автозапуск и ярлыки).
+pub fn needs_rename() -> bool {
+    let Some(exe) = crate::desktop::current_exe() else { return false };
+    let need = is_old_exe_name(&exe, crate::desktop::is_installed());
+    if need {
+        log::info!("программа установлена как {} — переустановлю как murmur.exe", exe.display());
+    }
+    need
+}
+
+/// Аргументы тихой переустановки: без окон (/S), не создавать новых ярлыков (/NS — существующие перенаправит сам
+/// установщик), запустить программу после установки (/R).
+pub const SILENT_ARGS: [&str; 3] = ["/S", "/NS", "/R"];
+
 const OLD_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Amadeus";
 const NEW_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Murmur";
 
@@ -63,5 +82,14 @@ mod tests {
         let dev = PathBuf::from(r"C:\src\discord\target\release\amadeus.exe");
         assert!(!is_legacy_install(&dev, Some(&old), false), "сборка из target — не старая установка");
         assert!(!is_legacy_install(&exe, None, false), "Amadeus не устанавливали");
+    }
+
+    #[test]
+    fn old_exe_name() {
+        let inst = PathBuf::from(r"C:\Users\u\AppData\Local\Murmur\amadeus.exe");
+        assert!(is_old_exe_name(&inst, true));
+        assert!(is_old_exe_name(&PathBuf::from(r"C:\x\Amadeus.EXE"), true));
+        assert!(!is_old_exe_name(&inst, false), "не установлено (сборка из target) — не трогаем");
+        assert!(!is_old_exe_name(&PathBuf::from(r"C:\x\murmur.exe"), true));
     }
 }

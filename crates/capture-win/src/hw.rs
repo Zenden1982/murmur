@@ -34,7 +34,17 @@ const MF_E_TRANSFORM_NEED_MORE_INPUT: i32 = 0xC00D6D72u32 as i32;
 const MF_E_TRANSFORM_STREAM_CHANGE: i32 = 0xC00D6D61u32 as i32;
 const MF_VERSION: u32 = 0x0002_0070;
 const RING: usize = 4;
-const REPEAT_EVERY: Duration = Duration::from_millis(1000);
+/// Как часто повторять последний кадр, когда картинка стоит. Повтор нужен не только «для живости»: запрос ключевого кадра
+/// (PLI после потери) доходит до нас только вместе с очередным кадром через WebRTC, а приёмник замечает потерю хвоста
+/// кадра только по следующему пакету — поэтому редкий повтор (раньше 1 с) затягивал восстановление после потерь.
+/// Опыты: `AMADEUS_REPEAT_MS=N`.
+fn repeat_every() -> Duration {
+    static V: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let ms = std::env::var("AMADEUS_REPEAT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(250);
+        Duration::from_millis(ms.clamp(50, 5000))
+    })
+}
 /// Сколько размер окна должен не меняться, прежде чем пересоздавать энкодер (перетаскивание края — десятки размеров).
 const RESIZE_SETTLE: Duration = Duration::from_millis(600);
 const POLL: Duration = Duration::from_millis(50);
@@ -357,6 +367,8 @@ struct MfEncoder {
     _manager: Sx<IMFDXGIDeviceManager>,
     state: Mutex<EncState>,
     force_key: AtomicBool,
+    /// Когда попросили ключевой кадр (для диагностики: через сколько он вышел и какого размера).
+    key_asked: Mutex<Option<Instant>>,
     stop: AtomicBool,
     /// Текущий битрейт (бит/с).
     bitrate: AtomicU32,
@@ -518,6 +530,7 @@ impl MfEncoder {
                 _manager: Sx(manager),
                 state: Mutex::new(EncState { pending: None, need_input: 0 }),
                 force_key: AtomicBool::new(true),
+                key_asked: Mutex::new(None),
                 stop: AtomicBool::new(false),
                 bitrate: AtomicU32::new(start_bitrate),
                 provides_samples,
@@ -566,6 +579,7 @@ impl MfEncoder {
                 if self.force_key.swap(false, Ordering::Relaxed)
                     && let Some(c) = &self.codec {
                         let _ = c.0.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &variant_u32(1));
+                        self.key_asked.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Instant::now);
                     }
                 self.mft.0.ProcessInput(0, &sample, 0)
             })()
@@ -656,6 +670,17 @@ impl MfEncoder {
             self.out_bytes.fetch_add(len as u64, Ordering::Relaxed);
             if key {
                 self.out_keys.fetch_add(1, Ordering::Relaxed);
+                let asked = self.key_asked.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if crate::diag::on() {
+                    log::info!(
+                        "ДИАГ ключевой кадр «{}»: {:.0} КБ ({:.2} с при цели {} кбит/с){}",
+                        self.name,
+                        len as f64 / 1024.0,
+                        len as f64 * 8.0 / self.bitrate.load(Ordering::Relaxed).max(1) as f64,
+                        self.bitrate.load(Ordering::Relaxed) / 1000,
+                        asked.map(|t| format!(", через {} мс после запроса", t.elapsed().as_millis())).unwrap_or_default()
+                    );
+                }
             }
             if key && !has_nal(data, 7) && !self.seq_header.is_empty() {
                 let mut v = Vec::with_capacity(self.seq_header.len() + data.len());
@@ -1082,7 +1107,7 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
             let m = source.is_minimized();
             if m != shared.minimized.swap(m, Ordering::Relaxed) {
                 shared.sink.event(Event::Minimized(m));
-                last_repeat = Instant::now() - REPEAT_EVERY;
+                last_repeat = Instant::now() - repeat_every();
             }
         }
         if let Some((size, since, sent)) = shared.want_size.lock().unwrap().as_mut()
@@ -1112,7 +1137,7 @@ fn pump(shared: Arc<Shared>, source: SourceId) {
         if let Some(l) = shared.low.as_ref().filter(|_| low_key) {
             l.enc.force_key.store(true, Ordering::Relaxed);
         }
-        if (idle >= REPEAT_EVERY || minimized) && (last_repeat.elapsed() >= REPEAT_EVERY || key_wanted) {
+        if (idle >= repeat_every() || minimized) && (last_repeat.elapsed() >= repeat_every() || key_wanted) {
             last_repeat = Instant::now();
             // Свёрнутое окно: зритель видит последний живой кадр (заглушка — только если кадров ещё не было).
             let last = shared.last.lock().unwrap().0.as_ref().map(|t| t.0.clone());

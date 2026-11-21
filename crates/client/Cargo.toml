@@ -1,19 +1,20 @@
 [package]
 name = "client"
-description = "Amadeus — десктоп-клиент (голос)"
+description = "Murmur — десктоп-клиент (голос, трансляции, чат)"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "amadeus"
+name = "murmur"
 path = "src/main.rs"
 
 # Установщик: `cargo packager -p client --release` (NSIS, в профиль пользователя, без прав администратора).
 # Полный выпуск (установщик + файлы для автообновления на сервер) — scripts/release.sh.
 [package.metadata.packager]
-# Название продукта — Murmur (редизайн 2026-11-19); identifier, имя exe, папка настроек %APPDATA%\Amadeus — прежние.
+# Название продукта — Murmur (редизайн 2026-11-19); exe — murmur.exe (с 0.3.4, раньше amadeus.exe); identifier и папка
+# настроек %APPDATA%\Amadeus — прежние (иначе пропадут вход и настройки).
 productName = "Murmur"
 identifier = "ru.steins-gate.amadeus"
 publisher = "Murmur"
@@ -50,10 +51,36 @@ Section "-RemoveAmadeus"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Amadeus"
   DeleteRegKey HKCU "Software\Amadeus\Amadeus"
   DeleteRegKey /ifempty HKCU "Software\Amadeus"
-  ReadRegStr $R3 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Amadeus"
-  StrCmp $R3 "" +2
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Amadeus" '"$INSTDIR\amadeus.exe" --tray'
   amadeus_done:
+SectionEnd
+
+; Переход amadeus.exe → murmur.exe (0.3.4) в папке Murmur: закрыть и убрать старый exe, автозапуск и ярлыки — на murmur.exe.
+; Работает и для тихой переустановки (/S /NS /R), которую делает сам клиент, если его запустили как amadeus.exe.
+Section "-RenameExeToMurmur"
+  nsis_tauri_utils::KillProcess "amadeus.exe"
+  Pop $R1
+  Sleep 500
+  Delete "$INSTDIR\amadeus.exe"
+  Delete "$INSTDIR\amadeus.exe.old*"
+  Delete "$INSTDIR\amadeus.exe.new"
+  ReadRegStr $R3 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Amadeus"
+  StrCmp $R3 "" run_done
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Amadeus"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Murmur" '"$INSTDIR\murmur.exe" --tray'
+  run_done:
+  IfFileExists "$SMPROGRAMS\Murmur\Murmur.lnk" 0 sm_done
+  CreateShortcut "$SMPROGRAMS\Murmur\Murmur.lnk" "$INSTDIR\murmur.exe"
+  ApplicationID::Set "$SMPROGRAMS\Murmur\Murmur.lnk" "ru.steins-gate.amadeus"
+  sm_done:
+  IfFileExists "$DESKTOP\Amadeus.lnk" 0 dold_done
+  Delete "$DESKTOP\Amadeus.lnk"
+  CreateShortcut "$DESKTOP\Murmur.lnk" "$INSTDIR\murmur.exe"
+  ApplicationID::Set "$DESKTOP\Murmur.lnk" "ru.steins-gate.amadeus"
+  dold_done:
+  IfFileExists "$DESKTOP\Murmur.lnk" 0 d_done
+  CreateShortcut "$DESKTOP\Murmur.lnk" "$INSTDIR\murmur.exe"
+  ApplicationID::Set "$DESKTOP\Murmur.lnk" "ru.steins-gate.amadeus"
+  d_done:
 SectionEnd
 '''
 

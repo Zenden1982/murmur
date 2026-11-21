@@ -20,6 +20,8 @@ struct Sink {
     parser: Mutex<QpParser>,
     want: AtomicU32,
     sent: AtomicBool,
+    /// Запрос ключевого кадра (AMADEUS_PROBE_KEY_EVERY=N — раз в N с; размер и задержка — в строках «ДИАГ ключевой кадр»).
+    key: AtomicBool,
 }
 
 impl EncodedSink for Sink {
@@ -32,7 +34,7 @@ impl EncodedSink for Sink {
         }
     }
     fn take_keyframe_request(&self) -> bool {
-        false
+        self.key.swap(false, Ordering::Relaxed)
     }
     fn take_bitrate_request(&self) -> Option<u32> {
         let w = self.want.load(Ordering::Relaxed);
@@ -71,7 +73,9 @@ fn main() {
         parser: Mutex::new(QpParser::default()),
         want: AtomicU32::new(0),
         sent: AtomicBool::new(false),
+        key: AtomicBool::new(false),
     });
+    let key_every: u64 = std::env::var("AMADEUS_PROBE_KEY_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let cfg = CaptureConfig { max_width: 2560, max_height: 1440, fps: 60 };
     let cap = HwCapture::start(src.id, cfg, 12_000_000, sink.clone()).expect("старт");
     println!("энкодер «{}», {:?}", cap.encoder_name, cap.size);
@@ -82,6 +86,9 @@ fn main() {
         std::thread::sleep(Duration::from_secs(1));
         if s == 1 {
             sink.want.store(target * 1000, Ordering::Relaxed);
+        }
+        if key_every > 0 && s % key_every == 0 {
+            sink.key.store(true, Ordering::Relaxed);
         }
         let f = sink.frames.swap(0, Ordering::Relaxed);
         let kb = sink.bytes.swap(0, Ordering::Relaxed) * 8 / 1000;

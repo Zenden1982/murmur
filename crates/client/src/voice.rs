@@ -135,6 +135,8 @@ pub struct VoiceState {
     pub jitter: Option<f64>,
     /// Доля потерянных пакетов аудио 0..1 за последний замер.
     pub loss: Option<f64>,
+    /// Сглаженное состояние связи для значка пинга (короткие потери — жёлтым, долгие — красным).
+    pub link: crate::link::LinkState,
     pub self_muted: bool,
     pub deafened: bool,
     pub ptt_enabled: bool,
@@ -207,6 +209,7 @@ impl Default for VoiceState {
             rtt: None,
             jitter: None,
             loss: None,
+            link: crate::link::LinkState::Fine,
             self_muted: false,
             deafened: false,
             ptt_enabled: false,
@@ -295,6 +298,7 @@ pub fn spawn(
         video_sent_by_ssrc: HashMap::new(),
         stats_n: 0,
         audio_counts: (0, 0),
+        link: Default::default(),
         video,
         watching: HashSet::new(),
         receivers: HashMap::new(),
@@ -347,6 +351,8 @@ struct Engine {
     stats_n: u64,
     /// Входящее аудио (потеряно, принято) на прошлом замере — для доли потерь.
     audio_counts: (i64, u64),
+    /// Сглаживание значка пинга.
+    link: crate::link::LinkMeter,
     /// Текстуры просматриваемых трансляций (общие с UI).
     video: VideoHub,
     /// Чьи трансляции смотрим; переживает переподключение, сбрасывается при выходе/смене канала.
@@ -626,6 +632,7 @@ impl Engine {
                     s.rtt = None;
                     s.jitter = None;
                     s.loss = None;
+            s.link = crate::link::LinkState::Fine;
                 });
             }
             Cmd::SetSelfMuted(m) => {
@@ -732,8 +739,10 @@ impl Engine {
             s.rtt = None;
             s.jitter = None;
             s.loss = None;
+            s.link = crate::link::LinkState::Fine;
         });
         self.audio_counts = (0, 0);
+        self.link.reset();
         match self.try_join(&ch).await {
             Ok(()) => {
                 self.rejoin = None;
@@ -906,6 +915,7 @@ impl Engine {
             s.rtt = None;
             s.jitter = None;
             s.loss = None;
+            s.link = crate::link::LinkState::Fine;
         });
     }
 
@@ -1169,9 +1179,11 @@ impl Engine {
             log::debug!("rtt {rtt:?}, джиттер {jitter:?}, потери {loss:?}");
             self.set(|s| s.rtt = rtt);
         }
+        let link = self.link.push(Instant::now(), jitter, loss);
         self.set(|s| {
             s.jitter = jitter;
             s.loss = loss;
+            s.link = link;
         });
     }
 

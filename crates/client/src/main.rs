@@ -19,6 +19,7 @@ mod gallery;
 mod kit;
 mod layers;
 mod legacy;
+mod link;
 mod metrics;
 mod mictest;
 mod model;
@@ -85,5 +86,5 @@ fn main() -> eframe::Result {
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default()),
         ..Default::default()
     };
-    eframe::run_native("Amadeus", options, Box::new(|cc| Ok(Box::new(app::App::new(cc, rt)))))
+    eframe::run_native("Murmur", options, Box::new(|cc| Ok(Box::new(app::App::new(cc, rt)))))
 }

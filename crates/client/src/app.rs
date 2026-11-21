@@ -27,6 +27,7 @@ use crate::ptt::{self, Ptt};
 use crate::servers_ui::{self, ServersUi};
 use crate::kit::{self, DockStyle};
 use crate::layers::Quality;
+use crate::link::LinkState;
 use crate::theme as t;
 use crate::video::VideoHub;
 use crate::voice::{self, AudioPrefs, Cmd, Conn, Peer, VoiceHandle, VoiceState};
@@ -47,6 +48,8 @@ enum Msg {
     AvatarPicked(Result<Option<image::DynamicImage>, String>),
     /// Установщик Murmur скачан (переход со старой установки).
     Legacy(Result<std::path::PathBuf, String>),
+    /// Установщик для тихой переустановки как murmur.exe.
+    Rename(Result<std::path::PathBuf, String>),
 }
 
 #[derive(PartialEq)]
@@ -183,6 +186,9 @@ pub struct App {
     legacy: bool,
     legacy_busy: bool,
     legacy_error: Option<String>,
+    /// Тихая переустановка amadeus.exe → murmur.exe: скачанный установщик ждёт, пока не выйдем из звонка.
+    rename_installer: Option<std::path::PathBuf>,
+    rename_checked: bool,
     #[cfg(debug_assertions)]
     gallery: crate::gallery::GalleryState,
     /// Кто был в моём канале на прошлом кадре (канал, identity) — кто-то зашёл → уши кота в заголовке.
@@ -321,6 +327,8 @@ impl App {
             legacy: crate::legacy::detect(),
             legacy_busy: false,
             legacy_error: None,
+            rename_installer: None,
+            rename_checked: false,
             #[cfg(debug_assertions)]
             gallery: Default::default(),
             prev_peers: (None, Vec::new()),
@@ -578,6 +586,10 @@ impl App {
                 Msg::Preview(code, res) => {
                     self.login.preview = Some((code, res));
                 }
+                Msg::Rename(res) => match res {
+                    Ok(path) => self.rename_installer = Some(path),
+                    Err(e) => log::warn!("переустановка как murmur.exe: установщик не скачан: {e} — попробую при следующем запуске"),
+                },
                 Msg::Legacy(res) => {
                     self.legacy_busy = false;
                     match res {
@@ -1483,7 +1495,7 @@ impl App {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(rtt) = vs.rtt {
-                            ping_box(ui, rtt, vs.jitter, vs.loss);
+                            ping_box(ui, rtt, vs.jitter, vs.loss, vs.link);
                         }
                         if let Some(s) = &vs.stream {
                             ui.add_space(4.0);
@@ -2267,6 +2279,7 @@ impl App {
 
     /// «Закрыть» (лампа, Alt+F4) — спрятать в трей; «Выйти» из трея и готовое обновление — выйти по-настоящему.
     fn handle_close(&mut self, ctx: &egui::Context) {
+        self.rename_tick();
         if self.tray.as_ref().is_some_and(|t| t.quit_requested()) && !self.quitting {
             self.quit(ctx);
         }
@@ -2303,6 +2316,30 @@ impl App {
         static ARMED: std::sync::Once = std::sync::Once::new();
         if let (Some(secs), Some(tray)) = (std::env::var("AMADEUS_TRAY_QUIT_IN").ok().and_then(|s| s.parse::<u64>().ok()), &self.tray) {
             ARMED.call_once(|| tray.debug_quit_in(Duration::from_secs(secs), self.ctx.clone()));
+        }
+    }
+
+    /// Переход amadeus.exe → murmur.exe у тех, кто получил 0.3.4+ автообновлением (файл остался со старым именем):
+    /// скачать установщик и, когда не в звонке, тихо переустановиться — установщик закроет нас, уберёт amadeus.exe,
+    /// перенаправит автозапуск и ярлыки и запустит murmur.exe.
+    fn rename_tick(&mut self) {
+        if !self.rename_checked {
+            self.rename_checked = true;
+            if !self.legacy && crate::legacy::needs_rename() {
+                let base = self.api.base().to_string();
+                self.spawn(crate::legacy::download_installer(base), Msg::Rename);
+            }
+        }
+        if self.quitting || self.voice.snapshot().channel.is_some() {
+            return;
+        }
+        if let Some(path) = self.rename_installer.take() {
+            if desktop::spawn_with_args(&path, &crate::legacy::SILENT_ARGS) {
+                log::info!("тихая переустановка как murmur.exe запущена — выхожу");
+                <Self as eframe::App>::on_exit(self);
+            } else {
+                log::warn!("переустановка как murmur.exe: не удалось запустить {}", path.display());
+            }
         }
     }
 
@@ -3252,7 +3289,7 @@ fn wave_phase(ui: &Ui) -> Option<f32> {
     if !crate::anim::speech_wave() {
         return None;
     }
-    Some(if crate::anim::important(ui.ctx()) { (ui.input(|i| i.time) * 40.0 % 20.0) as f32 } else { 0.0 })
+    Some(if crate::anim::important(ui.ctx()) { (ui.input(|i| i.time) * 22.0 % 20.0) as f32 } else { 0.0 })
 }
 
 fn tile(ui: &Ui, rect: Rect, p: &Peer, amp: f32, people: &People) {
@@ -3344,42 +3381,25 @@ fn ping_level(rtt: f64) -> PingLevel {
     }
 }
 
-/// Джиттер выше этого — пинг-волна «дёргается» цветом предупреждения.
-const JITTER_BAD: f64 = 0.030;
-/// Потери выше этого — пунктир цветом опасности и подпись «потери».
-const LOSS_BAD: f64 = 0.02;
-
-/// Состояние связи для пинг-волны.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LinkState {
-    Fine,
-    Jitter,
-    Loss,
-}
-
-fn link_state(jitter: Option<f64>, loss: Option<f64>) -> LinkState {
-    if loss.is_some_and(|l| l > LOSS_BAD) {
-        LinkState::Loss
-    } else if jitter.is_some_and(|j| j > JITTER_BAD) {
-        LinkState::Jitter
-    } else {
-        LinkState::Fine
-    }
-}
-
 /// Пинг в шапке. «Волна и мс»: в норме — статичная тихая линия акцентом; джиттер — дёрганая линия цветом предупреждения
-/// (до 15 к/с, только при анимациях «Все»); потери — пунктир цветом опасности и «потери» вместо мс.
+/// (до 15 к/с, только при анимациях «Все»); короткие потери — пунктир цветом предупреждения; потери надолго — пунктир
+/// цветом опасности и «потери» вместо мс (сглаживание — `link.rs`).
 /// «Только мс» — точка качества и миллисекунды; «Скрыть» — ничего.
-fn ping_box(ui: &mut Ui, rtt: f64, jitter: Option<f64>, loss: Option<f64>) {
+fn ping_box(ui: &mut Ui, rtt: f64, jitter: Option<f64>, loss: Option<f64>, state: LinkState) {
     use crate::config::PingDisplay;
     let mode = crate::anim::ping();
     if mode == PingDisplay::Hidden {
         return;
     }
     let p = t::p();
-    let state = link_state(jitter, loss);
+    let note = match state {
+        LinkState::Fine => "",
+        LinkState::Jitter => "\n\nСвязь неровная — голос может подрагивать.",
+        LinkState::Brief => "\n\nБыли короткие потери пакетов — обычно незаметно.",
+        LinkState::Loss => "\n\nПотери пакетов держатся — голос может прерываться.",
+    };
     let tip = format!(
-        "Время до сервера голоса и обратно: {:.0} мс\nДжиттер: {}\nПотери: {}",
+        "Время до сервера голоса и обратно: {:.0} мс\nДжиттер: {}\nПотери: {}{note}",
         rtt * 1000.0,
         jitter.map_or("—".into(), |j| format!("{:.0} мс", j * 1000.0)),
         loss.map_or("—".into(), |l| format!("{:.1} %", l * 100.0)),
@@ -3412,6 +3432,7 @@ fn ping_box(ui: &mut Ui, rtt: f64, jitter: Option<f64>, loss: Option<f64>) {
                 let left = r.left_center();
                 match state {
                     LinkState::Fine => kit::wave(ui.painter(), left, r.width(), 2.5, 0.0, p.accent, kit::WaveStyle::Solid),
+                    LinkState::Brief => kit::wave(ui.painter(), left, r.width(), 3.0, 0.0, p.warning, kit::WaveStyle::Dashed),
                     LinkState::Loss => kit::wave(ui.painter(), left, r.width(), 3.5, 0.0, p.danger, kit::WaveStyle::Dashed),
                     LinkState::Jitter => {
                         // «дёрганая» линия: каждый кадр (до 15 к/с) — случайные сдвиг и размах
@@ -3475,16 +3496,8 @@ fn toggle_row(ui: &mut Ui, w: f32, left: impl FnOnce(&mut Ui), right: impl FnOnc
 
 #[cfg(test)]
 mod ping_tests {
-    use super::{LinkState, PingLevel, compact_rects, link_state, ping_level};
+    use super::{PingLevel, compact_rects, ping_level};
     use eframe::egui::{Rect, pos2, vec2};
-
-    #[test]
-    fn link_states() {
-        assert_eq!(link_state(None, None), LinkState::Fine);
-        assert_eq!(link_state(Some(0.010), Some(0.0)), LinkState::Fine);
-        assert_eq!(link_state(Some(0.045), Some(0.0)), LinkState::Jitter);
-        assert_eq!(link_state(Some(0.045), Some(0.05)), LinkState::Loss, "потери важнее джиттера");
-    }
 
     #[test]
     fn compact_rects_rows_bottom_aligned() {

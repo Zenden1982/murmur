@@ -1,7 +1,7 @@
 //! Автообновление: раз в 6 часов спрашиваем у бэкенда `/version`; если там новее — в заголовке окна загорается
-//! «Обновление», по кнопке скачиваем новый `amadeus.exe` (`/download/…`, gzip если есть), сверяем размер и SHA-256,
+//! «Обновление», по кнопке скачиваем новый exe (`/download/…`, gzip если есть), сверяем размер и SHA-256,
 //! подменяем свой exe (запущенный файл Windows разрешает переименовать) и перезапускаемся.
-//! Старый exe остаётся рядом как `amadeus.exe.old` и удаляется при следующем запуске.
+//! Старый exe остаётся рядом как `<имя>.exe.old` и удаляется при следующем запуске.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -178,7 +178,7 @@ fn sibling(exe: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Убрать `amadeus.exe.old*` и недокачанный `.new` от прошлых обновлений.
+/// Убрать `<имя>.exe.old*` и недокачанный `.new` от прошлых обновлений.
 fn cleanup_old() {
     let Some(exe) = desktop::current_exe() else { return };
     let (Some(dir), Some(name)) = (exe.parent(), exe.file_name().and_then(|n| n.to_str())) else { return };
@@ -210,7 +210,7 @@ async fn download_and_swap(base: &str, info: &ReleaseInfo, progress: &AtomicU64,
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(60))
-        .user_agent(concat!("Amadeus/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Murmur/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
     let url = format!("{base}/download/{}", info.file);
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn hex_and_sibling() {
         assert_eq!(hex(&[0x00, 0xab, 0x10]), "00ab10");
-        assert_eq!(sibling(Path::new(r"C:\x\amadeus.exe"), ".old"), PathBuf::from(r"C:\x\amadeus.exe.old"));
+        assert_eq!(sibling(Path::new(r"C:\x\murmur.exe"), ".old"), PathBuf::from(r"C:\x\murmur.exe.old"));
     }
 
     #[test]
@@ -284,8 +284,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("amadeus-swap-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("amadeus.exe");
-        let new = dir.join("amadeus.exe.new");
+        let exe = dir.join("murmur.exe");
+        let new = dir.join("murmur.exe.new");
         std::fs::write(&exe, b"old").unwrap();
         std::fs::write(&new, b"new").unwrap();
         std::fs::write(sibling(&exe, ".old"), b"older").unwrap();

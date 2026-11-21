@@ -1,5 +1,5 @@
-# Скриншот окна клиента (для отчётов о вёрстке): powershell -File scripts/shot.ps1 -Title Amadeus -Out shot.png
-# Окно ищется по части заголовка среди процессов amadeus из target\debug (-PathLike — другой); снимок через PrintWindow (работает и под другими окнами).
+# Скриншот окна клиента (для отчётов о вёрстке): powershell -File scripts/shot.ps1 -Title Murmur -Out shot.png
+# Окно ищется по части заголовка среди процессов murmur из target\debug (-PathLike — другой); снимок через PrintWindow (работает и под другими окнами).
 param([string]$Title = "", [Parameter(Mandatory = $true)][string]$Out, [int]$WaitSec = 0, [string]$PathLike = "*\target\debug\*", [int]$ProcId = 0)
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -14,7 +14,7 @@ public static class Shot {
 "@
 [Shot]::SetProcessDPIAware() | Out-Null
 if ($WaitSec -gt 0) { Start-Sleep -Seconds $WaitSec }
-$p = Get-Process amadeus -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$Title*" -and $_.Path -like $PathLike -and ($ProcId -eq 0 -or $_.Id -eq $ProcId) } | Select-Object -First 1
+$p = Get-Process murmur -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$Title*" -and $_.Path -like $PathLike -and ($ProcId -eq 0 -or $_.Id -eq $ProcId) } | Select-Object -First 1
 if (-not $p) { Write-Error "окно не найдено"; exit 1 }
 $r = New-Object Shot+RECT
 [Shot]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null

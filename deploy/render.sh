@@ -34,6 +34,13 @@ rtc:
   tcp_port: ${LK_TCP_PORT}
   udp_port: ${LK_UDP_PORT}
 ${IPCONF}
+  # Как часто SFU передаёт стримеру запрос ключевого кадра (PLI) от зрителя. По умолчанию 1 с для «высокого» слоя:
+  # если первый ключевой кадр после потери тоже побился, зритель ждёт ещё секунду. Ключевые кадры Murmur маленькие
+  # (~60 КБ на 1080p) — можно чаще.
+  pli_throttle:
+    low_quality: 500ms
+    mid_quality: 500ms
+    high_quality: 500ms
 turn:
   enabled: true
   domain: ${TURN_DOMAIN}

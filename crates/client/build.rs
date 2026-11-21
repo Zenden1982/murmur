@@ -6,9 +6,9 @@ fn main() {
         {
             let mut res = winresource::WindowsResource::new();
             res.set_icon("assets/icon.ico")
-                .set("ProductName", "Amadeus")
-                .set("FileDescription", "Amadeus — голосовой чат")
-                .set("CompanyName", "Amadeus");
+                .set("ProductName", "Murmur")
+                .set("FileDescription", "Murmur")
+                .set("CompanyName", "Murmur");
             if let Err(e) = res.compile() {
                 // без иконки exe всё равно рабочий
                 println!("cargo:warning=иконка exe не встроена: {e}");
