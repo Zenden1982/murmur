@@ -236,7 +236,28 @@ impl AnyCapture {
             AnyCapture::Hw(c) => c.stop(),
         }
     }
+
+    /// Остановить, но не дольше `STOP_LIMIT`: остановка WGC/энкодера в редких случаях зависает (у друга 21.11 — на
+    /// пересоздании энкодера), а ждём её в потоке голоса — вместе с ней вставали звонок и выход из программы.
+    /// Не успела — остаётся доделываться в фоне.
+    pub fn stop_bounded(self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("capture-stop".into()).spawn(move || {
+            self.stop();
+            let _ = tx.send(());
+        });
+        match spawned {
+            Ok(_) => {
+                if rx.recv_timeout(STOP_LIMIT).is_err() {
+                    log::warn!("остановка захвата не уложилась в {} с — оставляю её в фоне", STOP_LIMIT.as_secs());
+                }
+            }
+            Err(e) => log::warn!("остановка захвата: поток не создан: {e}"),
+        }
+    }
 }
+
+const STOP_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub struct Started {
     pub capture: AnyCapture,
@@ -267,7 +288,7 @@ pub fn start(
         let (w, h) = capture_win::capture::target_size(width.max(2), height.max(2), &cfg);
         let video = NativeVideoSource::new_encoded(VideoResolution { width: w, height: h });
         let low = (preset.has_low() && low_allowed()).then(|| new_low_source(width, height));
-        match start_hw(id, preset, &video, low.as_ref(), generation, events) {
+        match start_hw(id, preset, &video, low.as_ref(), generation, events, None) {
             Ok(c) => {
                 let encoder = format!("{} (видеокарта)", c.encoder_name);
                 return Ok(Started { capture: AnyCapture::Hw(c), video, low, hw: true, encoder });
@@ -292,13 +313,15 @@ fn start_hw(
     low: Option<&NativeVideoSource>,
     generation: u64,
     events: &mpsc::UnboundedSender<CaptureEvent>,
+    content: Option<(u32, u32)>,
 ) -> Result<HwCapture, String> {
     let sink = Arc::new(LkEncodedSink { source: video.clone(), generation, events: events.clone() });
     let low = low.map(|l| capture_win::hw::LowLayer { sink: Arc::new(LowSink(l.clone())), cfg: LOW_CFG, bitrate: LOW_BITRATE as u32 });
-    HwCapture::start_with_low(id, preset.config(), preset.max_bitrate() as u32, sink, low)
+    HwCapture::start_sized(id, preset.config(), preset.max_bitrate() as u32, sink, low, content)
 }
 
 /// Смена источника в уже опубликованный трек (тот же вид кодирования).
+#[allow(clippy::too_many_arguments)]
 pub fn restart(
     id: SourceId,
     preset: Preset,
@@ -307,9 +330,10 @@ pub fn restart(
     hw: bool,
     generation: u64,
     events: &mpsc::UnboundedSender<CaptureEvent>,
+    content: Option<(u32, u32)>,
 ) -> Result<AnyCapture, String> {
     if hw {
-        start_hw(id, preset, video, low, generation, events).map(AnyCapture::Hw)
+        start_hw(id, preset, video, low, generation, events, content).map(AnyCapture::Hw)
     } else {
         Capture::start(id, preset.config(), sink(video, generation, events)).map(AnyCapture::Cpu)
     }

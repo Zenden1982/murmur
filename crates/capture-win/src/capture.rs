@@ -433,6 +433,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn target_size_is_idempotent() {
+        // пересоздание энкодера берёт размер из SizeChanged (уже target_size) — второй проход не должен его менять
+        let cfgs = [
+            CaptureConfig { max_width: 1920, max_height: 1080, fps: 30 },
+            CaptureConfig { max_width: 1280, max_height: 720, fps: 30 },
+            CaptureConfig { max_width: 0, max_height: 0, fps: 60 },
+        ];
+        for cfg in &cfgs {
+            for (w, h) in [(1920, 1050), (1920, 1054), (2560, 1392), (3440, 1440), (1365, 767), (801, 3001), (17, 17)] {
+                let t = target_size(w, h, cfg);
+                assert_eq!(target_size(t.0, t.1, cfg), t, "{w}×{h} {cfg:?}");
+            }
+        }
+    }
+
+    #[test]
     fn target_size_fits_and_is_even() {
         let p1080 = CaptureConfig { max_width: 1920, max_height: 1080, fps: 60 };
         assert_eq!(target_size(2560, 1440, &p1080), (1920, 1080));

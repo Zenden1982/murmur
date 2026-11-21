@@ -1226,12 +1226,12 @@ impl Engine {
         if let Some(mut st) = self.stream.take() {
             if st.preset == preset && st.publication.is_some() {
                 if let Some(c) = st.capture.take() {
-                    tokio::task::block_in_place(|| c.stop());
+                    tokio::task::block_in_place(|| c.stop_bounded());
                 }
                 self.generation += 1;
                 self.last_video_bytes = None;
                 let low = st.low.as_ref().map(|(s, _)| s.clone());
-                let r = tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, low.as_ref(), st.hw, self.generation, &self.cap_tx));
+                let r = tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, low.as_ref(), st.hw, self.generation, &self.cap_tx, None));
                 match r {
                     Ok(c) => {
                         st.capture = Some(c);
@@ -1274,7 +1274,7 @@ impl Engine {
             Ok(p) => p,
             Err(e) => {
                 log::error!("публикация трансляции: {e}");
-                tokio::task::block_in_place(|| started.capture.stop());
+                tokio::task::block_in_place(|| started.capture.stop_bounded());
                 self.set(|s| s.stream_notice = Some(format!("Не удалось начать трансляцию: {e}")));
                 return;
             }
@@ -1382,7 +1382,7 @@ impl Engine {
     async fn stop_stream_quiet(&mut self) {
         let Some(mut st) = self.stream.take() else { return };
         if let Some(c) = st.capture.take() {
-            tokio::task::block_in_place(|| c.stop());
+            tokio::task::block_in_place(|| c.stop_bounded());
         }
         if let Some(mut a) = st.audio.take() {
             if let Some(c) = a.capture.take() {
@@ -1421,13 +1421,13 @@ impl Engine {
         }
         let (source, preset) = (st.source_id, st.preset);
         if let Some(c) = st.capture.take() {
-            tokio::task::block_in_place(|| c.stop());
+            tokio::task::block_in_place(|| c.stop_bounded());
         }
         self.generation += 1;
         self.last_video_bytes = None;
         let Some(st) = self.stream.as_mut() else { return };
         let low = st.low.as_ref().map(|(s, _)| s.clone());
-        match tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, low.as_ref(), true, self.generation, &self.cap_tx)) {
+        match tokio::task::block_in_place(|| stream::restart(source, preset, &st.source, low.as_ref(), true, self.generation, &self.cap_tx, Some((width, height)))) {
             Ok(c) => {
                 st.capture = Some(c);
                 log::info!("трансляция: энкодер пересоздан под {width}×{height}");

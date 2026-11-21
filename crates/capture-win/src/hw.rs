@@ -837,6 +837,20 @@ impl HwCapture {
 
     /// То же, плюс экономный слой. Не поднялся второй энкодер — трансляция идёт без него.
     pub fn start_with_low(source: SourceId, cfg: CaptureConfig, bitrate: u32, sink: Arc<dyn EncodedSink>, low: Option<LowLayer>) -> R<HwCapture> {
+        Self::start_sized(source, cfg, bitrate, sink, low, None)
+    }
+
+    /// То же, но размер кадров известен заранее (`content` — из события SizeChanged): энкодер создаётся под него.
+    /// Без этого пересоздание брало `GraphicsCaptureItem::Size`, а он у некоторых окон (Яндекс Браузер) стабильно отличается
+    /// от размера кадров (1920×1054 против 1920×1050) — энкодер пересоздавался по кругу раз в секунду, пока захват не завис.
+    pub fn start_sized(
+        source: SourceId,
+        cfg: CaptureConfig,
+        bitrate: u32,
+        sink: Arc<dyn EncodedSink>,
+        low: Option<LowLayer>,
+        content: Option<(u32, u32)>,
+    ) -> R<HwCapture> {
         if !GraphicsCaptureApi::is_supported().unwrap_or(false) {
             return Err("Захват экрана не поддерживается этой версией Windows".into());
         }
@@ -844,12 +858,13 @@ impl HwCapture {
         let (device, ctx) = create_device()?;
         let item = capture_item(source)?;
         let size = item.Size().map_err(e("размер источника"))?;
-        let (w, h) = target_size(size.Width.max(2) as u32, size.Height.max(2) as u32, &cfg);
+        let (src_w, src_h) = content.unwrap_or((size.Width.max(2) as u32, size.Height.max(2) as u32));
+        let (w, h) = target_size(src_w.max(2), src_h.max(2), &cfg);
         let fps = cfg.fps.clamp(1, 120);
         let enc = Arc::new(MfEncoder::new(&device, w, h, fps, bitrate)?);
         let conv = Converter::new(&device, &ctx, w, h, fps)?;
         let low = low.and_then(|l| {
-            let (lw, lh) = target_size(size.Width.max(2) as u32, size.Height.max(2) as u32, &l.cfg);
+            let (lw, lh) = target_size(src_w.max(2), src_h.max(2), &l.cfg);
             let lfps = l.cfg.fps.clamp(1, fps);
             if (lw, lh) == (w, h) && lfps == fps {
                 return None; // экономному слою нечего экономить

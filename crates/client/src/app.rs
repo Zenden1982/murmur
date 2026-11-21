@@ -3071,7 +3071,7 @@ impl eframe::App for App {
         }
         self.tray = None;
         log::logger().flush();
-        std::process::exit(0);
+        desktop::exit_now();
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

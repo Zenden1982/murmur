@@ -296,6 +296,17 @@ pub fn run_file(path: &Path) -> bool {
     }
 }
 
+/// Завершить процесс немедленно. `std::process::exit` выгружает DLL по очереди — если поток видеодрайвера/WGC/WebRTC
+/// завис (у друга 21.11 — после зависшей остановки захвата), выход мог висеть бесконечно. TerminateProcess не ждёт никого.
+pub fn exit_now() -> ! {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
+    std::process::exit(0)
+}
+
 /// Путь к своему exe.
 pub fn current_exe() -> Option<PathBuf> {
     std::env::current_exe().ok().map(|p| dunce_simplify(&p))
