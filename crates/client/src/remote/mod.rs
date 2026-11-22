@@ -6,4 +6,5 @@
 #![allow(dead_code)]
 
 pub mod geom;
+pub mod keys;
 pub mod proto;
