@@ -9,6 +9,10 @@ pub mod geom;
 pub mod guest;
 pub mod host;
 #[cfg(windows)]
+pub mod hooks;
+#[cfg(windows)]
 pub mod inject;
+#[cfg(windows)]
+pub mod overlay;
 pub mod keys;
 pub mod proto;

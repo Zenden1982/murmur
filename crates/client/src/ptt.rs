@@ -84,10 +84,19 @@ impl Ptt {
     }
 }
 
+/// Пока у нас кто-то управляет (хуки следят) — только настоящие нажатия, иначе удалённо введённая клавиша включит рацию.
+fn pick_down(watched: bool, real: bool, async_state: bool) -> bool {
+    if watched { real } else { async_state }
+}
+
 #[cfg(windows)]
 fn is_down(vk: u32) -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-    vk != 0 && unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0
+    if vk == 0 {
+        return false;
+    }
+    let watched = crate::remote::hooks::host_watch_active();
+    pick_down(watched, watched && crate::remote::hooks::real_key_down(vk), unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0)
 }
 
 #[cfg(not(windows))]
@@ -161,6 +170,14 @@ pub fn key_name(vk: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_keys_dont_press_ptt_while_watched() {
+        // у стримера кто-то управляет: клавиши, введённые удалённо (видны GetAsyncKeyState), рацию не жмут
+        assert!(!super::pick_down(true, false, true));
+        assert!(super::pick_down(true, true, false));
+        assert!(super::pick_down(false, false, true));
+    }
+
     #[test]
     fn names() {
         assert_eq!(super::key_name(0x56), "V");
