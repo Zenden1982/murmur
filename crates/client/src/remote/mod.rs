@@ -5,4 +5,5 @@
 // Временно: подключается к voice/app в задачах 8–9 — тогда убрать.
 #![allow(dead_code)]
 
+pub mod geom;
 pub mod proto;
