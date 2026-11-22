@@ -24,7 +24,7 @@ pub(crate) async fn load_user(db: &sqlx::SqlitePool, id: i64) -> AppResult<User>
     .bind(id)
     .fetch_one(db)
     .await?;
-    Ok(User { id, name, is_admin, display_name, avatar, dm_from_servers, about, status })
+    Ok(User { id, name, is_admin, display_name, avatar, dm_from_servers, about, status, banner: None })
 }
 
 /// Все, кто делит с человеком хоть один сервер (и он сам).
@@ -109,6 +109,7 @@ pub async fn profile(State(state): State<AppState>, user: AuthUser, Path(id): Pa
         activity: state.inner.online.activity(id, u.status.clone()),
         user: PublicUser { id: u.id, name: u.name, display_name: u.display_name, avatar: u.avatar },
         about: u.about,
+        banner: u.banner,
         online,
         is_friend,
     }))

@@ -121,7 +121,7 @@ pub async fn create_user(
         crate::servers::insert_server(&mut tx, "Amadeus", id, false).await?;
     }
     tx.commit().await?;
-    Ok(User { id, name, is_admin, display_name: None, avatar: None, dm_from_servers: false, about: None, status: None })
+    Ok(User { id, name, is_admin, display_name: None, avatar: None, dm_from_servers: false, about: None, status: None, banner: None })
 }
 
 pub(crate) async fn insert_user(

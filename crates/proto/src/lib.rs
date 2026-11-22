@@ -42,6 +42,17 @@ pub mod limits {
     pub const BANNER_W: u32 = 960;
     pub const BANNER_H: u32 = 480;
     pub const IMAGE_BANNER_MAX_BYTES: usize = 2 * 1024 * 1024;
+    /// Аватар пользователя (итоговый файл): ровно 256×256, до 2 МБ; PNG/JPEG/WebP/GIF.
+    pub const AVATAR_SIDE: u32 = 256;
+    pub const AVATAR_MAX_BYTES: usize = 2 * 1024 * 1024;
+    /// Баннер пользователя (итоговый файл): ровно 960×384 (5:2), до 4 МБ.
+    pub const USER_BANNER_W: u32 = 960;
+    pub const USER_BANNER_H: u32 = 384;
+    pub const USER_BANNER_MAX_BYTES: usize = 4 * 1024 * 1024;
+    /// Кадров в GIF профиля (и суммарно пикселей — не больше GIF_FRAMES_MAX холстов).
+    pub const GIF_FRAMES_MAX: usize = 300;
+    /// Исходник, который можно открыть в окне обрезки.
+    pub const PROFILE_SOURCE_MAX_BYTES: usize = 20 * 1024 * 1024;
     /// Описание сервера.
     pub const SERVER_DESCRIPTION_MAX: usize = 120;
     /// «О себе» в профиле.
@@ -171,6 +182,9 @@ pub struct User {
     /// Свой статус — перекрывает автоматическую активность.
     #[serde(default)]
     pub status: Option<String>,
+    /// Ключ своего баннера (`GET /images/{key}`).
+    #[serde(default)]
+    pub banner: Option<String>,
 }
 
 /// Человек, каким его видят другие.
@@ -272,6 +286,9 @@ pub struct SetActivityRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserProfile {
     pub user: PublicUser,
+    /// Ключ своего баннера (`GET /images/{key}`); нет — узор в цвете аватара.
+    #[serde(default)]
+    pub banner: Option<String>,
     #[serde(default)]
     pub about: Option<String>,
     pub online: bool,
@@ -788,6 +805,16 @@ pub struct ErrorBody {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn user_and_profile_without_banner_parse() {
+        let u: super::User = serde_json::from_str(r#"{"id":1,"name":"a","is_admin":false}"#).unwrap();
+        assert_eq!(u.banner, None);
+        let p: super::UserProfile =
+            serde_json::from_str(r#"{"user":{"id":1,"name":"a"},"online":false,"is_friend":false}"#).unwrap();
+        assert_eq!(p.banner, None);
+        assert_eq!(super::limits::AVATAR_SIDE, 256);
+    }
+
     use super::*;
 
     #[test]
