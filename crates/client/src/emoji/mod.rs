@@ -117,7 +117,7 @@ pub fn search(q: &str, limit: usize) -> Vec<&'static Entry> {
         .iter()
         .enumerate()
         .filter_map(|(i, e)| {
-            let score = if e.codes.iter().any(|c| *c == q) {
+            let score = if e.codes.contains(&q) {
                 0
             } else if e.codes.iter().any(|c| c.starts_with(&q)) {
                 1
@@ -149,6 +149,33 @@ pub fn by_code(code: &str) -> Option<&'static str> {
 
 pub(crate) fn code_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '+' | '-')
+}
+
+/// Набираемый `:код` перед курсором: (индекс двоеточия в символах, запрос). Нужно ≥ 2 символов,
+/// перед двоеточием — начало строки или пробел (не «12:30», не «привет:ок»).
+pub fn query_at_cursor(text: &str, char_idx: usize) -> Option<(usize, String)> {
+    let chars: Vec<char> = text.chars().take(char_idx).collect();
+    let mut i = chars.len();
+    while i > 0 && code_char(chars[i - 1]) {
+        i -= 1;
+    }
+    let q_len = chars.len() - i;
+    if q_len < 2 || i == 0 || chars[i - 1] != ':' {
+        return None;
+    }
+    let colon = i - 1;
+    if colon > 0 && !chars[colon - 1].is_whitespace() {
+        return None;
+    }
+    Some((colon, chars[i..].iter().collect()))
+}
+
+/// Заменить `:запрос` (символы start..cursor) на эмодзи; вернуть новый курсор.
+pub fn apply_suggestion(text: &mut String, start: usize, cursor: usize, emoji: &str) -> usize {
+    let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
+    let (a, b) = (byte(start), byte(cursor));
+    text.replace_range(a..b, emoji);
+    start + emoji.chars().count()
 }
 
 /// Заменяет целые `:код:` из каталога на эмодзи; всё остальное — как было.
@@ -223,6 +250,35 @@ mod tests {
         assert_eq!(expand_codes(":fire: ок"), "🔥 ок");
         assert_eq!(expand_codes("а :огонь:!"), "а 🔥!");
         assert_eq!(expand_codes(":нетакого:"), ":нетакого:");
+    }
+
+    #[test]
+    fn query_at_cursor_basic() {
+        assert_eq!(query_at_cursor("ок :ог", 6), Some((3, "ог".to_string())));
+        assert_eq!(query_at_cursor(":fire", 5), Some((0, "fire".to_string())));
+    }
+
+    #[test]
+    fn query_at_cursor_short() {
+        assert_eq!(query_at_cursor(":о", 2), None);
+        assert_eq!(query_at_cursor("ок :ог", 3), None);
+    }
+
+    #[test]
+    fn query_at_cursor_ignores_time() {
+        assert_eq!(query_at_cursor("в 12:30", 7), None);
+    }
+
+    #[test]
+    fn query_after_text_colon() {
+        assert_eq!(query_at_cursor("привет:ог", 9), None);
+    }
+
+    #[test]
+    fn apply_suggestion_replaces_query() {
+        let mut s = String::from("ок :ог дальше");
+        assert_eq!(apply_suggestion(&mut s, 3, 6, "🔥"), 4);
+        assert_eq!(s, "ок 🔥 дальше");
     }
 
     #[test]

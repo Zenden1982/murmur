@@ -147,6 +147,9 @@ pub struct Chat {
     /// Недавние эмодзи (сохраняет приложение в настройках).
     recent_emoji: Vec<String>,
     recent_changed: bool,
+    /// Подсказка :кодов: — выбранная строка и скрытый по Esc запрос.
+    suggest_sel: usize,
+    suggest_hidden: Option<String>,
     /// Отладка: шаги AMADEUS_CHAT_SCRIPT и время последнего шага.
     #[cfg(debug_assertions)]
     script: (std::collections::VecDeque<String>, f64),
@@ -185,6 +188,8 @@ impl Chat {
             react_picker: None,
             recent_emoji: Vec::new(),
             recent_changed: false,
+            suggest_sel: 0,
+            suggest_hidden: None,
             #[cfg(debug_assertions)]
             script: (
                 std::env::var("AMADEUS_CHAT_SCRIPT").map(|s| s.split('|').map(str::to_string).collect()).unwrap_or_default(),
@@ -217,7 +222,18 @@ impl Chat {
                 }
                 self.send(channel);
             }
-            ("type", text) => self.drafts.entry(channel).or_default().text = text.to_string(),
+            ("type", text) => {
+                self.drafts.entry(channel).or_default().text = text.to_string();
+                // курсор в конец и фокус в поле — как будто напечатали
+                let id = Id::new(("composer", channel));
+                let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(text.chars().count()))));
+                st.store(ui.ctx(), id);
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            ("enter", _) => ui.ctx().input_mut(|i| {
+                i.events.push(egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE })
+            }),
             ("paste", _) => self.paste_from_clipboard(channel),
             ("attach", path) => self.attach_files(channel, vec![PathBuf::from(path)]),
             ("top", _) => self.scroll_top = true,
@@ -475,7 +491,7 @@ impl Chat {
 
     fn send(&mut self, channel: i64) {
         let d = self.drafts.entry(channel).or_default();
-        let content = d.text.trim().to_string();
+        let content = crate::emoji::expand_codes(d.text.trim());
         if content.is_empty() && d.images.is_empty() {
             return;
         }
@@ -1089,6 +1105,9 @@ impl Chat {
         let mut sticker_anchor: Option<Rect> = None;
         let mut sticker_pick: Option<&'static str> = None;
         let mut toggle_emoji = false;
+        // подсказка :кодов: — (начало, курсор, список)
+        let mut suggest: Option<(usize, usize, Vec<&'static crate::emoji::Entry>)> = None;
+        let mut suggest_used: Option<String> = None;
         let mut emoji_anchor: Option<Rect> = None;
         let mut remove = None;
         let d = self.drafts.entry(ch.id).or_default();
@@ -1097,7 +1116,7 @@ impl Chat {
                 ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
             });
         }
-        Frame::new()
+        let composer_rect = Frame::new()
             .fill(t::p().surface_2)
             .stroke(Stroke::new(1.0, if ui.memory(|m| m.has_focus(id)) { t::p().accent.gamma_multiply(0.7) } else { t::p().border }))
             .corner_radius(CornerRadius::same(kit::R_CARD))
@@ -1142,6 +1161,48 @@ impl Chat {
                         toggle_emoji = true;
                     }
                     emoji_anchor = Some(em.rect);
+                    // :код — подсказка; стрелки/Tab/Enter/Esc забираем до поля ввода
+                    let cursor = egui::text_edit::TextEditState::load(ui.ctx(), id).and_then(|s| s.cursor.char_range()).map(|r| usize::from(r.primary.index));
+                    let q = cursor.filter(|_| ui.memory(|m| m.has_focus(id))).and_then(|c| crate::emoji::query_at_cursor(&d.text, c).map(|(s, q)| (s, c, q)));
+                    if q.as_ref().map(|x| &x.2) != self.suggest_hidden.as_ref() {
+                        self.suggest_hidden = None;
+                    }
+                    let list = match &q {
+                        Some((_, _, q)) if self.suggest_hidden.is_none() => crate::emoji::search(q, 8),
+                        _ => Vec::new(),
+                    };
+                    if let (Some((start, cur, qs)), false) = (q, list.is_empty()) {
+                        let n = list.len();
+                        self.suggest_sel = self.suggest_sel.min(n - 1);
+                        let mut pick = false;
+                        ui.input_mut(|i| {
+                            if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                                self.suggest_sel = (self.suggest_sel + 1) % n;
+                            }
+                            if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                                self.suggest_sel = (self.suggest_sel + n - 1) % n;
+                            }
+                            if i.consume_key(Modifiers::NONE, Key::Escape) {
+                                self.suggest_hidden = Some(qs.clone());
+                            }
+                            if i.consume_key(Modifiers::NONE, Key::Tab) || i.consume_key(Modifiers::NONE, Key::Enter) {
+                                pick = true;
+                            }
+                        });
+                        if pick {
+                            let e = list[self.suggest_sel].emoji;
+                            let pos = crate::emoji::apply_suggestion(&mut d.text, start, cur, e);
+                            let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(pos))));
+                            st.store(ui.ctx(), id);
+                            suggest_used = Some(e.to_string());
+                            self.suggest_sel = 0;
+                        } else if self.suggest_hidden.is_none() {
+                            suggest = Some((start, cur, list));
+                        }
+                    } else {
+                        self.suggest_sel = 0;
+                    }
                     let can_send = !d.text.trim().is_empty() || !d.images.is_empty();
                     let w = ui.available_width() - 40.0;
                     // Enter — отправить, Shift+Enter — новая строка
@@ -1175,10 +1236,43 @@ impl Chat {
                         ui.label(RichText::new(format!("{n} / {}", limits::MESSAGE_MAX)).size(12.0).color(color));
                     });
                 }
+            })
+            .response
+            .rect;
+        if let Some((start, cur, list)) = suggest {
+            let w = composer_rect.width().min(420.0);
+            egui::Area::new(Id::new("emoji-suggest")).order(egui::Order::Foreground).pivot(Align2::LEFT_BOTTOM).fixed_pos(composer_rect.left_top() - vec2(0.0, 6.0)).show(ui.ctx(), |ui| {
+                Frame::new().fill(t::p().surface).stroke(Stroke::new(1.0, t::p().border)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                    ui.set_width(w);
+                    ui.label(RichText::new("Эмодзи · Tab или Enter — вставить, Esc — скрыть").size(11.5).color(t::p().text_muted));
+                    ui.add_space(2.0);
+                    for (i, e) in list.iter().enumerate() {
+                        let (r, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+                        if i == self.suggest_sel || resp.hovered() {
+                            ui.painter().rect_filled(r, CornerRadius::same(6), if i == self.suggest_sel { t::p().accent_soft } else { t::p().row_hover });
+                        }
+                        crate::emoji::paint::paint(ui.painter(), Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 11.0), vec2(22.0, 22.0)), e.emoji);
+                        let code = e.codes.first().cloned().unwrap_or_default();
+                        let g = ui.painter().text(pos2(r.left() + 38.0, r.center().y), Align2::LEFT_CENTER, format!(":{code}:"), t::semibold(13.5), t::p().text);
+                        ui.painter().text(pos2(g.right() + 10.0, r.center().y), Align2::LEFT_CENTER, e.ru_name, t::font(12.5), t::p().text_muted);
+                        if resp.clicked() {
+                            let pos = crate::emoji::apply_suggestion(&mut d.text, start, cur, e.emoji);
+                            let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(pos))));
+                            st.store(ui.ctx(), id);
+                            ui.memory_mut(|m| m.request_focus(id));
+                            suggest_used = Some(e.emoji.to_string());
+                        }
+                    }
+                });
             });
+        }
         if let Some(local) = remove {
             d.images.retain(|i| i.local != local);
             d.error = None;
+        }
+        if let Some(e) = suggest_used {
+            self.used_emoji(&e);
         }
         if toggle_stickers {
             self.sticker_menu = !self.sticker_menu;
@@ -1362,7 +1456,7 @@ fn outgoing_row(ui: &mut Ui, o: &Outgoing) -> Option<FeedAct> {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             if !o.content.is_empty() {
-                ui.add(egui::Label::new(RichText::new(&o.content).size(15.0).color(t::p().text_muted)).wrap());
+                crate::emoji::paint::label(ui, &o.content, t::font(15.0), t::p().text_muted, false);
             }
             if !o.images.is_empty() {
                 ui.horizontal(|ui| {
