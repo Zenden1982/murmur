@@ -13,6 +13,7 @@ pub mod dm;
 pub mod events;
 mod friends;
 mod images;
+mod media;
 mod invites;
 mod profile;
 mod servers;

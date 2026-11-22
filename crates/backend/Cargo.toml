@@ -12,6 +12,9 @@ axum = "0.8.9"
 clap = { version = "4.6.8", features = ["derive", "env"] }
 futures-util = "0.3"
 imagesize = "0.15.0"
+# Картинки профиля: проверка GIF по заголовкам и перекодирование без метаданных.
+gif = "0.14"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 livekit-api = { version = "0.10.2", default-features = false, features = ["access-token", "services", "webhooks", "rustls-tls-webpki-roots"] }
 proto = { path = "../proto" }
 rand = "0.10.4"
