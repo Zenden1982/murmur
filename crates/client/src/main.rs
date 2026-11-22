@@ -31,6 +31,7 @@ mod picker;
 mod server_settings;
 mod servers_ui;
 mod ptt;
+mod remote;
 mod sounds;
 mod stream;
 mod theme;
