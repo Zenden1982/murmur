@@ -3,8 +3,8 @@
 use crate::kit::Cat;
 
 /// Эмодзи реакции по имени из протокола.
-pub fn emoji(name: &str) -> Option<&'static str> {
-    proto::REACTIONS.iter().find(|(n, _)| *n == name).map(|(_, e)| *e)
+pub fn emoji(name: &str) -> Option<&str> {
+    proto::reaction_emoji(name)
 }
 
 /// Какой кот рисует стикер.

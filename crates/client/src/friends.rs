@@ -525,7 +525,7 @@ impl Friends {
                 if let Some((game, text)) = crate::activity::line(a) {
                     let icon = if game { ph::GAME_CONTROLLER } else { ph::CHAT_TEXT };
                     ui.painter().text(pos2(x, sub_y), Align2::LEFT_CENTER, icon, t::font(14.0), p.accent_text);
-                    ui.painter().text(pos2(x + 20.0, sub_y), Align2::LEFT_CENTER, text, t::font(12.5), p.text_muted);
+                    crate::emoji::paint::line(ui.painter(), pos2(x + 20.0, sub_y), &text, t::font(12.5), p.text_muted, rect.right() - 370.0 - x - 20.0);
                 }
             }
             _ => {

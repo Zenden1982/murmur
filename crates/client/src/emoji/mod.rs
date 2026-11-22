@@ -1,5 +1,6 @@
 //! Эмодзи: каталог (группы, :коды:, русские имена из CLDR), поиск, разбор текста, рисование, панель.
 
+pub mod paint;
 pub mod text;
 
 /// Раздел панели эмодзи.
@@ -131,6 +132,12 @@ pub fn search(q: &str, limit: usize) -> Vec<&'static Entry> {
         .collect();
     hits.sort();
     hits.into_iter().take(limit).map(|(_, i)| &catalog()[i]).collect()
+}
+
+/// Запись каталога по эмодзи (с U+FE0F и без).
+pub fn entry(emoji: &str) -> Option<&'static Entry> {
+    let b = bare(emoji);
+    catalog().iter().find(|e| bare(e.emoji) == b)
 }
 
 /// Эмодзи по коду без двоеточий (fire, огонь).

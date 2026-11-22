@@ -891,7 +891,7 @@ impl Chat {
                 }
                 let sticker = m.sticker.as_deref().and_then(crate::reactions::sticker_cat);
                 if !m.content.is_empty() && !(sticker.is_some() && crate::reactions::is_fallback(&m.content)) {
-                    ui.add(egui::Label::new(RichText::new(&m.content).size(15.0).color(t::p().text)).wrap().selectable(true));
+                    crate::emoji::paint::label(ui, &m.content, t::font(15.0), t::p().text, true);
                 }
                 if let Some(cat) = sticker {
                     let (r, _) = ui.allocate_exact_size(vec2(STICKER, STICKER), Sense::hover());
@@ -948,7 +948,9 @@ impl Chat {
                                     if resp.hovered() || !on {
                                         ui.painter().rect_filled(r, CornerRadius::same(6), if on { t::p().row_hover } else { t::p().accent_soft });
                                     }
-                                    ui.painter().text(r.center(), Align2::CENTER_CENTER, *e, t::font(20.0), t::p().text);
+                                    if !crate::emoji::paint::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(22.0, 22.0)), e) {
+                                        ui.painter().text(r.center(), Align2::CENTER_CENTER, *e, t::font(20.0), t::p().text);
+                                    }
                                     if resp.clicked() {
                                         act = Some(FeedAct::React { mid: m.id, name: name.to_string(), on });
                                     }
@@ -1249,12 +1251,16 @@ const STICKER: f32 = 120.0;
 
 /// Значок реакции под сообщением: эмодзи и сколько; своя — подсвечена.
 fn reaction_chip(ui: &mut Ui, emoji: &str, n: usize, mine: bool) -> egui::Response {
-    let text = format!("{emoji} {n}");
-    let g = ui.painter().layout_no_wrap(text, t::font(14.0), if mine { t::p().accent } else { t::p().text });
-    let (r, resp) = ui.allocate_exact_size(g.size() + vec2(16.0, 8.0), Sense::click());
+    const E: f32 = 18.0;
+    let g = ui.painter().layout_no_wrap(n.to_string(), t::font(14.0), if mine { t::p().accent } else { t::p().text });
+    let (r, resp) = ui.allocate_exact_size(vec2(E + 6.0 + g.size().x + 18.0, E.max(g.size().y) + 8.0), Sense::click());
     let (fill, stroke) = if mine { (t::p().accent_soft, t::p().accent) } else if resp.hovered() { (t::p().row_hover, t::p().text_muted) } else { (t::p().surface_2, t::p().border) };
     ui.painter().rect(r, CornerRadius::same(255), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-    ui.painter().galley(r.min + vec2(8.0, 4.0), g, t::p().text);
+    let er = Rect::from_min_size(pos2(r.left() + 9.0, r.center().y - E / 2.0), vec2(E, E));
+    if !crate::emoji::paint::paint(ui.painter(), er, emoji) {
+        ui.painter().text(er.center(), Align2::CENTER_CENTER, emoji, t::font(14.0), t::p().text);
+    }
+    ui.painter().galley(pos2(er.right() + 6.0, r.center().y - g.size().y / 2.0), g, t::p().text);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

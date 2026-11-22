@@ -427,13 +427,14 @@ impl App {
             edited_at: None,
             reply_to: None,
             attachments: Vec::new(),
-            reactions: if id == 2 { vec![proto::Reaction { name: "fire".into(), users: vec![1, 2] }, proto::Reaction { name: "+1".into(), users: vec![3] }] } else { Vec::new() },
+            reactions: if id == 2 { vec![proto::Reaction { name: "fire".into(), users: vec![1, 2] }, proto::Reaction { name: "+1".into(), users: vec![3] }, proto::Reaction { name: "🦆".into(), users: vec![2] }] } else { Vec::new() },
             sticker: None,
         };
         self.chat.demo_seed(3, vec![
             msg(1, (2, "mayuri"), "Туттуру! Кто сегодня в катку?", 42),
             msg(2, (3, "kurisu"), "Я после пар, часов в восемь.", 40),
-            msg(3, (1, "tester"), "Го в катку через 5 минут?", 2),
+            msg(3, (1, "tester"), "Го в катку через 5 минут? 😎🎮 Кто не придёт — тот 🐢. Флаг 🇷🇺, семья 👨‍👩‍👧, 1️⃣ и ❤ — всё цветное.", 2),
+            msg(5, (3, "kurisu"), "🔥🔥", 1),
             proto::Message { sticker: Some("cat-hello".into()), ..msg(4, (2, "mayuri"), "[стикер: Кот машет]", 1) },
         ]);
         // Отладка (скриншоты): AMADEUS_OPEN_STICKERS=1 — открыть выбор стикеров.
@@ -1707,8 +1708,7 @@ impl App {
                     } else {
                         x
                     };
-                    let g = crate::banner::truncate_galley(ui.painter(), &text, t::font(11.5), p.text_muted, rect.right() - tx - right);
-                    ui.painter().galley(pos2(tx, y - g.size().y / 2.0), g, p.text_muted);
+                    crate::emoji::paint::line(ui.painter(), pos2(tx, y), &text, t::font(11.5), p.text_muted, rect.right() - tx - right);
                 }
                 if unread > 0 {
                     kit::count_badge(ui.painter(), pos2(rect.right() - 18.0, rect.center().y), &crate::unread::badge_text(unread), bg);

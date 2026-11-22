@@ -153,8 +153,7 @@ impl Members {
                         }
                         Sub::Text => x,
                     };
-                    let g = crate::banner::truncate_galley(ui.painter(), &text, t::font(12.0), p.text_muted, rect.right() - tx - 6.0);
-                    ui.painter().galley(pos2(tx, sub_y - g.size().y / 2.0), g, p.text_muted);
+                    crate::emoji::paint::line(ui.painter(), pos2(tx, sub_y), &text, t::font(12.0), p.text_muted, rect.right() - tx - 6.0);
                 }
                 let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                 if resp.clicked() {
@@ -216,7 +215,7 @@ impl Members {
                             Some(Ok(pr)) => {
                                 if let Some(a) = &pr.activity {
                                     if let Some(st) = a.status.as_deref() {
-                                        ui.label(RichText::new(st).size(13.0).color(p.text));
+                                        crate::emoji::paint::label(ui, st, t::font(13.0), p.text, false);
                                     }
                                     if let Some(g) = a.game.as_deref() {
                                         let since = a.since.map(|s| format!(" · {}", crate::activity::elapsed_text(s, now()))).unwrap_or_default();

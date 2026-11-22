@@ -32,8 +32,9 @@ pub fn has_emoji(text: &str) -> bool {
 }
 
 fn is_emoji(g: &str) -> bool {
-    // быстрый отсев обычных букв и цифр
-    !(g.len() == 1 || g.chars().all(|c| (c as u32) < 0xA9)) && png(g).is_some()
+    // быстрый отсев: буквы (в т.ч. кириллица) и цифры не ищем в таблице Twemoji
+    let candidate = g.chars().any(|c| matches!(c as u32, 0xA9 | 0xAE | 0x203C..=0x3299 | 0x1F000..=0x1FAFF));
+    candidate && png(g).is_some()
 }
 
 /// PNG 72×72 из Twemoji (ищется и с U+FE0F, и без).
