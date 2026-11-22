@@ -1,0 +1,45 @@
+{
+  "admin": { "disabled": true },
+  "logging": { "logs": { "default": { "level": "INFO" } } },
+  "storage": { "module": "file_system", "root": "/data" },
+  "apps": {
+    "tls": {
+      "certificates": { "automate": ["lk.example.com", "turn.example.com", "api.example.com"] },
+      "automation": { "policies": [ { "issuers": [ { "module": "acme", "email": "admin@example.com",
+        "challenges": { "http": { "disabled": true } } } ] } ] }
+    },
+    "layer4": {
+      "servers": {
+        "main": {
+          "listen": [":443"],
+          "routes": [
+            { "match": [{ "proxy_protocol": {} }],
+              "handle": [ { "handler": "proxy_protocol", "allow": ["127.0.0.1/32", "::1/128"] },
+                          { "handler": "subroute", "routes": [
+          { "match": [{ "tls": { "sni": ["turn.example.com"] } }],
+            "handle": [ { "handler": "tls" },
+                        { "handler": "proxy", "proxy_protocol": "v2", "upstreams": [{ "dial": ["127.0.0.1:5349"] }] } ] },
+          { "match": [{ "tls": { "sni": ["lk.example.com"] } }],
+            "handle": [ { "handler": "tls", "connection_policies": [{ "alpn": ["http/1.1"] }] },
+                        { "handler": "proxy", "upstreams": [{ "dial": ["127.0.0.1:7880"] }] } ] },
+          { "match": [{ "tls": { "sni": ["api.example.com"] } }],
+            "handle": [ { "handler": "tls", "connection_policies": [{ "alpn": ["http/1.1"] }] },
+                        { "handler": "proxy", "proxy_protocol": "v2", "upstreams": [{ "dial": ["127.0.0.1:8080"] }] } ] }
+        ] } ] },
+            { "handle": [ { "handler": "subroute", "routes": [
+          { "match": [{ "tls": { "sni": ["turn.example.com"] } }],
+            "handle": [ { "handler": "tls" },
+                        { "handler": "proxy", "proxy_protocol": "v2", "upstreams": [{ "dial": ["127.0.0.1:5349"] }] } ] },
+          { "match": [{ "tls": { "sni": ["lk.example.com"] } }],
+            "handle": [ { "handler": "tls", "connection_policies": [{ "alpn": ["http/1.1"] }] },
+                        { "handler": "proxy", "upstreams": [{ "dial": ["127.0.0.1:7880"] }] } ] },
+          { "match": [{ "tls": { "sni": ["api.example.com"] } }],
+            "handle": [ { "handler": "tls", "connection_policies": [{ "alpn": ["http/1.1"] }] },
+                        { "handler": "proxy", "proxy_protocol": "v2", "upstreams": [{ "dial": ["127.0.0.1:8080"] }] } ] }
+        ] } ] }
+          ]
+        }
+      }
+    }
+  }
+}

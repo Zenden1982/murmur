@@ -12,6 +12,23 @@ set -a; . ./.env; set +a
 : "${BACKEND_BIND:=127.0.0.1:8080}" "${ACME_CA:=}" "${CADDY_LOG_LEVEL:=INFO}"
 TURN_TLS_INTERNAL=5349   # только loopback: сюда Caddy отдаёт расшифрованный TURN/TLS
 
+# Имена для сертификата и SNI: основное + алиасы (*_DOMAIN_ALIASES через запятую — например, прежние имена sslip.io
+# после перехода на свой домен, чтобы у старых клиентов ничего не сломалось). Вывод: "a", "b"
+names() {
+  out="\"$1\""
+  old_ifs=$IFS; IFS=,
+  for n in ${2:-}; do
+    case "$n" in
+      ''|*[!a-z0-9.-]*) echo "недопустимое имя в *_DOMAIN_ALIASES: '$n' (только a-z 0-9 . -, через запятую)" >&2; exit 1 ;;
+    esac
+    out="$out, \"$n\""
+  done
+  IFS=$old_ifs
+  printf '%s' "$out"
+}
+LK_SNI=$(names "$LK_DOMAIN" "${LK_DOMAIN_ALIASES:-}")
+TURN_SNI=$(names "$TURN_DOMAIN" "${TURN_DOMAIN_ALIASES:-}")
+
 [ -n "${LIVEKIT_API_KEY:-}" ] && [ -n "${LIVEKIT_API_SECRET:-}" ] || {
   echo "LIVEKIT_API_KEY/SECRET пусты — запустите scripts/gen-keys.sh" >&2; exit 1; }
 
@@ -73,18 +90,19 @@ fi
 API_ROUTE=""; API_NAME=""
 if [ "${CADDY_SERVE_API}" = "1" ]; then
   : "${API_DOMAIN:?}"
-  API_NAME=", \"${API_DOMAIN}\""
+  API_SNI=$(names "$API_DOMAIN" "${API_DOMAIN_ALIASES:-}")
+  API_NAME=", ${API_SNI}"
   API_ROUTE=",
-          { \"match\": [{ \"tls\": { \"sni\": [\"${API_DOMAIN}\"] } }],
+          { \"match\": [{ \"tls\": { \"sni\": [${API_SNI}] } }],
             \"handle\": [ { \"handler\": \"tls\", \"connection_policies\": [{ \"alpn\": [\"http/1.1\"] }] },
                         { \"handler\": \"proxy\", \"proxy_protocol\": \"v2\", \"upstreams\": [{ \"dial\": [\"${BACKEND_BIND}\"] }] } ] }"
 fi
 
 SNI_ROUTES="[
-          { \"match\": [{ \"tls\": { \"sni\": [\"${TURN_DOMAIN}\"] } }],
+          { \"match\": [{ \"tls\": { \"sni\": [${TURN_SNI}] } }],
             \"handle\": [ { \"handler\": \"tls\" },
                         { \"handler\": \"proxy\", \"proxy_protocol\": \"v2\", \"upstreams\": [{ \"dial\": [\"127.0.0.1:${TURN_TLS_INTERNAL}\"] }] } ] },
-          { \"match\": [{ \"tls\": { \"sni\": [\"${LK_DOMAIN}\"] } }],
+          { \"match\": [{ \"tls\": { \"sni\": [${LK_SNI}] } }],
             \"handle\": [ { \"handler\": \"tls\", \"connection_policies\": [{ \"alpn\": [\"http/1.1\"] }] },
                         { \"handler\": \"proxy\", \"upstreams\": [{ \"dial\": [\"127.0.0.1:7880\"] }] } ] }${API_ROUTE}
         ]"
@@ -99,7 +117,7 @@ cat > generated/caddy.json <<EOF
   "storage": { "module": "file_system", "root": "/data" },
   "apps": {
     "tls": {
-      "certificates": { "automate": ["${LK_DOMAIN}", "${TURN_DOMAIN}"${API_NAME}] },
+      "certificates": { "automate": [${LK_SNI}, ${TURN_SNI}${API_NAME}] },
       "automation": { "policies": [ { "issuers": [ { "module": "acme", ${EMAIL_JSON}
         "challenges": { "http": { "disabled": true } } } ] } ] }
     },

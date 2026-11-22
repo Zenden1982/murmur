@@ -5,7 +5,8 @@ name: amadeus
 services:
   livekit:
     profiles: [media]
-    image: livekit/livekit-server:v1.13.11
+    # Готовый образ: LIVEKIT_IMAGE в .env (self-host — копия на ghcr, см. .env.example); по умолчанию — Docker Hub.
+    image: ${LIVEKIT_IMAGE:-livekit/livekit-server:v1.13.11}
     command: --config /etc/livekit.yaml
     network_mode: host          # WebRTC: без NAT докера, порты LK_TCP_PORT/LK_UDP_PORT/TURN_UDP_PORT напрямую
     restart: unless-stopped
@@ -17,7 +18,7 @@ services:
     build:
       context: ./caddy             # Caddy + layer4 (TLS по SNI для wss и TURN/TLS), см. caddy/Dockerfile
       args: [HTTP_PROXY, HTTPS_PROXY]
-    image: amadeus/caddy-l4:2.11.9
+    image: ${CADDY_IMAGE:-amadeus/caddy-l4:2.11.9}   # готовый: ghcr.io/zenden1982/murmur-caddy
     command: run --config /etc/caddy.json
     network_mode: host
     restart: unless-stopped
@@ -31,7 +32,7 @@ services:
       context: ..
       dockerfile: crates/backend/Dockerfile
       args: [HTTP_PROXY, HTTPS_PROXY, NO_PROXY]
-    image: amadeus/backend:latest
+    image: ${BACKEND_IMAGE:-amadeus/backend:latest}  # готовый: ghcr.io/zenden1982/murmur-backend
     restart: unless-stopped
     env_file: .env
     environment:
