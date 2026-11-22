@@ -1457,7 +1457,7 @@ impl App {
                 let full = ui.max_rect();
                 ui.painter().vline(full.right(), full.y_range(), Stroke::new(1.0, t::p().border));
 
-                if self.view == View::Friends {
+                if matches!(self.view, View::Friends | View::Dm(_)) {
                     egui::Panel::bottom("side-me")
                         .show_separator_line(false)
                         .frame(Frame::new().inner_margin(Margin::same(8)))
@@ -1618,7 +1618,14 @@ impl App {
                     (Conn::Reconnecting | Conn::Rejoining { .. }, _) => "нет связи…".into(),
                     _ => status.unwrap_or_else(|| "не в канале".into()),
                 };
-                ui.label(RichText::new(sub).size(12.0).color(t::p().text_muted));
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new(sub).size(12.0).color(t::p().text_muted));
+                    // капсулы с «Отключиться» вне экрана канала нет — маленькая красная трубка здесь
+                    if vs.channel.is_some() && self.view != View::Voice && leave_button(ui).clicked() {
+                        self.voice.send(Cmd::Leave);
+                    }
+                });
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -1646,7 +1653,9 @@ impl App {
         ui.add_space(10.0);
         let badge = self.friends.incoming();
         let trailing = (badge > 0).then(|| badge.to_string());
-        kit::row(ui, ph::USERS, "Друзья", true, trailing.as_deref(), true);
+        if kit::row(ui, ph::USERS, "Друзья", self.view == View::Friends, trailing.as_deref(), true).clicked() {
+            self.view = View::Friends;
+        }
         ui.add_space(14.0);
         ui.horizontal(|ui| {
             ui.add_space(6.0);
@@ -1977,8 +1986,8 @@ impl App {
     /// Нижняя панель управления — плавающая капсула по центру: круглые кнопки-значки (микрофон, звук, экран),
     /// разделитель и «Отключиться» (единственная красная кнопка).
     fn ui_dock(&mut self, ui: &mut Ui, vs: &VoiceState) {
-        // капсула — только в голосовом канале; вне канала управление — в панели пользователя слева
-        if vs.channel.is_none() {
+        // капсула — только в голосовом канале и на его экране; в чатах управление — в панели пользователя слева
+        if vs.channel.is_none() || self.view != View::Voice {
             return;
         }
         egui::Panel::bottom("dock")
@@ -4036,6 +4045,18 @@ fn toggle_row(ui: &mut Ui, w: f32, left: impl FnOnce(&mut Ui), right: impl FnOnc
         ui.with_layout(Layout::right_to_left(Align::Center), right);
     });
     ui.add_space(4.0);
+}
+
+/// Маленькая красная трубка «Отключиться» (в панели пользователя, когда капсулы не видно).
+fn leave_button(ui: &mut Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(20.0, 16.0), Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), kit::HOVER_S);
+    let p = t::p();
+    if hover > 0.0 {
+        ui.painter().rect_filled(rect.expand(2.0), CornerRadius::same(5), p.danger.gamma_multiply(0.2 * hover));
+    }
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, egui_phosphor::fill::PHONE_X, t::icon_fill(14.0), p.danger);
+    resp.on_hover_text("Отключиться").on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 #[cfg(test)]

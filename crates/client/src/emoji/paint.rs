@@ -26,6 +26,58 @@ pub fn paint(painter: &Painter, rect: Rect, emoji: &str) -> bool {
     true
 }
 
+/// Разметка для поля ввода: эмодзи прозрачные (их место занимает глиф шрифта), сверху рисует `overlay`.
+/// `measure` — ширина текста этим шрифтом: место под эмодзи добирается отступом слева до `EDIT_EMOJI_W`.
+pub fn edit_job(text: &str, font: FontId, color: Color32, wrap: f32, mut measure: impl FnMut(&str) -> f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap;
+    let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
+    for seg in segments(text) {
+        match seg {
+            Seg::Text(t) => job.append(t, 0.0, fmt(color)),
+            Seg::Emoji(e) => {
+                // добавка слева (leading_space): правый край места = позиция курсора после эмодзи
+                let pad = (EDIT_EMOJI_W - measure(e)).max(0.0);
+                job.append(e, pad, fmt(Color32::TRANSPARENT));
+            }
+        }
+    }
+    job
+}
+
+/// Ширина места под эмодзи в поле ввода (картинка `EDIT_EMOJI_W - 2`).
+pub const EDIT_EMOJI_W: f32 = 21.0;
+
+/// Цветные эмодзи поверх галеи поля ввода (разметка из `edit_job`).
+pub fn overlay(painter: &Painter, galley: &egui::Galley, galley_pos: Pos2, font: &FontId, size: f32) {
+    let text = galley.text();
+    let mut chars = 0usize;
+    let mut last = 0usize;
+    for seg in segments(text) {
+        let s = match seg {
+            Seg::Text(t) | Seg::Emoji(t) => t,
+        };
+        // сегменты идут подряд — считаем символы без повторного прохода
+        let start_byte = s.as_ptr() as usize - text.as_ptr() as usize;
+        chars += text[last..start_byte].chars().count();
+        last = start_byte;
+        let c0 = chars;
+        let n = s.chars().count();
+        chars += n;
+        last += s.len();
+        let Seg::Emoji(e) = seg else { continue };
+        // курсор перед эмодзи стоит после добавки слева (см. edit_job): место = [x - добавка, x + ширина глифа]
+        let r0 = galley.pos_from_cursor(egui::text::CCursor::new(c0));
+        let w = painter.layout_no_wrap(e.to_string(), font.clone(), Color32::WHITE).size().x;
+        let pad = (EDIT_EMOJI_W - w).max(0.0);
+        let span = Rect::from_x_y_ranges((r0.left() - pad)..=(r0.left() + w), r0.y_range()).translate(galley_pos.to_vec2());
+        let img = Rect::from_center_size(span.center(), vec2(size, size));
+        if !paint(painter, img, e) {
+            painter.text(span.center(), Align2::CENTER_CENTER, e, FontId::proportional(size * 0.8), Color32::WHITE);
+        }
+    }
+}
+
 /// Только эмодзи (1–3) и пробелы — показываем крупно, как в Discord.
 #[cfg(test)]
 pub fn jumbo(text: &str) -> bool {
@@ -119,6 +171,7 @@ pub fn line(painter: &Painter, at: Pos2, text: &str, font: FontId, color: Color3
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn jumbo_rules() {

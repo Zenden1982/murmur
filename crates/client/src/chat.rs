@@ -731,9 +731,9 @@ impl Chat {
             .show_separator_line(false)
             .frame(Frame::new().inner_margin(Margin { left: 24, right: 24, top: 6, bottom: 18 }))
             .show(ui, |ui| {
+                // мерить содержимое, а не ui.min_rect(): у панели с exact_size он не меньше прошлой высоты — поле не сжималось после картинок
                 let top = ui.cursor().top();
-                self.ui_composer(ui, ch, composer_id);
-                ui.min_rect().bottom() - top
+                ui.scope(|ui| self.ui_composer(ui, ch, composer_id)).response.rect.bottom() - top
             });
         let need = (panel.inner + 24.0).ceil();
         if (need - self.composer_h).abs() > 0.5 {
@@ -1146,7 +1146,8 @@ impl Chat {
                     });
                     ui.add_space(4.0);
                 }
-                ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
+                // horizontal, а не with_layout: тот занимает всю высоту панели, и поле не сжималось обратно (после картинок)
+                ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     if kit::icon_button(ui, ph::PLUS_CIRCLE, kit::IconState::Normal, "Прикрепить картинку (или Ctrl+V, перетаскивание)").clicked() {
                         pick = true;
@@ -1208,7 +1209,15 @@ impl Chat {
                     // Enter — отправить, Shift+Enter — новая строка
                     let enter = ui.memory(|m| m.has_focus(id))
                         && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift && !i.modifiers.ctrl && !i.modifiers.alt);
+                    let text_c = t::p().text;
+                    let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                        let job = ui.ctx().fonts_mut(|f| {
+                            crate::emoji::paint::edit_job(buf.as_str(), t::font(15.0), text_c, wrap, |s| f.layout_no_wrap(s.to_string(), t::font(15.0), text_c).size().x)
+                        });
+                        ui.ctx().fonts_mut(|f| f.layout_job(job))
+                    };
                     let edit = TextEdit::multiline(&mut d.text)
+                        .layouter(&mut layouter)
                         .id(id)
                         .frame(egui::Frame::NONE)
                         .desired_rows(1)
@@ -1218,7 +1227,8 @@ impl Chat {
                         .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
                         .hint_text(RichText::new(if crate::dms::is_dm(ch) { format!("Написать {}", ch.name) } else { format!("Написать в #{}", ch.name) }).color(t::p().text_muted));
                     egui::ScrollArea::vertical().id_salt(("composer-scroll", ch.id)).max_height(200.0).min_scrolled_height(0.0).max_width(w).show(ui, |ui| {
-                        ui.add(edit);
+                        let out = edit.show(ui);
+                        crate::emoji::paint::overlay(ui.painter(), &out.galley, out.galley_pos, &t::font(15.0), crate::emoji::paint::EDIT_EMOJI_W - 2.0);
                     });
                     if enter {
                         send = true;
