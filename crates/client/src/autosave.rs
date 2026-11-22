@@ -57,8 +57,20 @@ impl Autosave {
     }
 
     /// Закрытие настроек: есть несохранённое — true (вызывающий отправляет сразу).
+    /// Если отправка ещё в полёте — false, а несохранённое уйдёт сразу после ответа (`due`).
     pub fn flush(&mut self) -> bool {
+        if self.in_flight {
+            if self.dirty {
+                self.now = true;
+            }
+            return false;
+        }
         self.dirty
+    }
+
+    /// Есть несохранённое или отправка в полёте (для индикатора).
+    pub fn busy(&self) -> bool {
+        self.dirty || self.in_flight
     }
 
     /// Ждёт ли что-то отправки (для перерисовки по таймеру).
@@ -135,6 +147,18 @@ mod tests {
         a.sent();
         a.done(true);
         assert!(!a.flush());
+    }
+
+    #[test]
+    fn close_during_send_waits_for_answer() {
+        let mut a = Autosave::default();
+        a.edited(0.0);
+        assert!(a.due(1.0));
+        a.sent();
+        a.edited(1.2);
+        assert!(!a.flush(), "отправка в полёте — второй запрос не слать");
+        a.done(true);
+        assert!(a.due(1.3), "после ответа — дослать сразу, без паузы");
     }
 
     #[test]

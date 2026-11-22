@@ -33,31 +33,53 @@ pub fn bucket(px: f32) -> u32 {
 
 /// GIF с больше чем одним кадром (без распаковки кадров).
 pub fn is_animated(bytes: &[u8]) -> bool {
+    frame_count_upto(bytes, 2) > 1
+}
+
+/// Число кадров GIF без распаковки (0 — не GIF).
+pub fn frame_count(bytes: &[u8]) -> usize {
+    frame_count_upto(bytes, usize::MAX)
+}
+
+fn frame_count_upto(bytes: &[u8], limit: usize) -> usize {
     if !(bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
-        return false;
+        return 0;
     }
     let mut o = gif::DecodeOptions::new();
     o.skip_frame_decoding(true);
-    let Ok(mut d) = o.read_info(std::io::Cursor::new(bytes)) else { return false };
+    let Ok(mut d) = o.read_info(std::io::Cursor::new(bytes)) else { return 0 };
     let mut n = 0;
-    while let Ok(Some(_)) = d.read_next_frame() {
+    while n < limit && matches!(d.read_next_frame(), Ok(Some(_))) {
         n += 1;
-        if n > 1 {
-            return true;
-        }
     }
-    false
+    n
 }
 
 /// Все кадры GIF, уменьшенные до w×h (cover — обрезка по центру), для аватара — круглые. Задержки в мс.
+#[cfg(test)]
 pub fn decode_frames(bytes: &[u8], w: u32, h: u32, round: bool) -> Result<(Vec<egui::ColorImage>, Vec<u32>), String> {
+    decode_frames_capped(bytes, w, h, round, usize::MAX)
+}
+
+/// Как `decode_frames`, но кадров не больше чем на `max_bytes` (RGBA): лишние прореживаются, задержки складываются.
+pub fn decode_frames_capped(bytes: &[u8], w: u32, h: u32, round: bool, max_bytes: usize) -> Result<(Vec<egui::ColorImage>, Vec<u32>), String> {
     use image::AnimationDecoder;
+    let per = (w as usize * h as usize * 4).max(1);
+    let n = frame_count(bytes).clamp(1, proto::limits::GIF_FRAMES_MAX);
+    let step = (n * per).div_ceil(max_bytes.max(per)).max(1);
     let dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let (mut frames, mut delays) = (Vec::new(), Vec::new());
-    for f in dec.into_frames().take(proto::limits::GIF_FRAMES_MAX) {
+    for (i, f) in dec.into_frames().take(proto::limits::GIF_FRAMES_MAX).enumerate() {
         let f = f.map_err(|e| e.to_string())?;
-        let (n, d) = f.delay().numer_denom_ms();
-        delays.push(n.checked_div(d).unwrap_or(0));
+        let (num, den) = f.delay().numer_denom_ms();
+        let ms = num.checked_div(den).unwrap_or(0);
+        if i % step != 0 {
+            if let Some(last) = delays.last_mut() {
+                *last += ms;
+            }
+            continue;
+        }
+        delays.push(ms);
         let img = image::DynamicImage::ImageRgba8(f.into_buffer());
         let mut px = img.resize_to_fill(w, h, image::imageops::FilterType::Triangle).to_rgba8().into_raw();
         if round {
@@ -74,22 +96,34 @@ pub fn decode_frames(bytes: &[u8], w: u32, h: u32, round: bool) -> Result<(Vec<e
 /// Последние показанные — в конце; вытесняются самые давние, пока сумма больше бюджета.
 pub struct Lru {
     budget: usize,
-    items: VecDeque<(String, usize)>,
+    /// (id, байты, номер кадра последнего показа)
+    items: VecDeque<(String, usize, u64)>,
+    tick: u64,
 }
 
 impl Lru {
     pub fn new(budget: usize) -> Self {
-        Self { budget, items: VecDeque::new() }
+        Self { budget, items: VecDeque::new(), tick: 0 }
     }
 
-    /// Отметить показ (и размер); вернуть вытесненные id.
+    /// Отметить показ (каждый вызов — как новый кадр); вернуть вытесненные id.
     pub fn touch(&mut self, id: &str, bytes: usize) -> Vec<String> {
-        self.items.retain(|(k, _)| k != id);
-        self.items.push_back((id.to_string(), bytes));
-        let mut sum: usize = self.items.iter().map(|(_, b)| b).sum();
+        self.tick += 1;
+        let t = self.tick;
+        self.touch_at(id, bytes, t)
+    }
+
+    /// Отметить показ в кадре `frame`; вытесняются самые давние, но не показанные в этом же кадре
+    /// (иначе две анимации на экране вытесняли бы друг друга по кругу).
+    pub fn touch_at(&mut self, id: &str, bytes: usize, frame: u64) -> Vec<String> {
+        self.items.retain(|(k, _, _)| k != id);
+        self.items.push_back((id.to_string(), bytes, frame));
+        let mut sum: usize = self.items.iter().map(|(_, b, _)| b).sum();
         let mut out = Vec::new();
-        while sum > self.budget && self.items.len() > 1 {
-            let (k, b) = self.items.pop_front().unwrap();
+        while sum > self.budget {
+            // показанные в этом или прошлом кадре — на экране (порядок отрисовки внутри кадра не важен)
+            let Some(i) = self.items.iter().position(|(_, _, f)| f + 1 < frame) else { break };
+            let (k, b, _) = self.items.remove(i).unwrap();
             sum -= b;
             out.push(k);
         }
@@ -159,6 +193,26 @@ mod tests {
         assert_eq!(bucket(33.0), 64);
         assert_eq!(bucket(100.0), 128);
         assert_eq!(bucket(300.0), 256);
+    }
+
+    #[test]
+    fn lru_keeps_items_shown_this_frame() {
+        let mut l = Lru::new(100);
+        // a и b вместе больше бюджета, оба на экране в одном кадре — никто не вытесняется (иначе — бесконечное перекодирование)
+        assert!(l.touch_at("a", 60, 1).is_empty());
+        assert!(l.touch_at("b", 60, 1).is_empty());
+        assert!(l.touch_at("a", 60, 2).is_empty());
+        assert!(l.touch_at("b", 60, 2).is_empty());
+        // кадр 4: показан только c — a и b с кадра 2 не показывались, вытесняются
+        assert_eq!(l.touch_at("c", 60, 4), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn decode_caps_bytes_by_thinning() {
+        // 3 кадра по 64×64×4 = 16 КБ; предел 40 КБ → каждый 2-й кадр, задержки складываются
+        let (frames, delays) = decode_frames_capped(&gif3(), 64, 64, true, 40_000).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(delays, vec![150, 150]);
     }
 
     #[test]

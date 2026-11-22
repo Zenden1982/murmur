@@ -25,7 +25,7 @@ pub fn head(ui: &mut Ui, people: &People, d: &CardData) {
     let p = t::p();
     let (b, _) = ui.allocate_exact_size(vec2(CARD_W, BANNER_H), Sense::hover());
     let round = CornerRadius { nw: kit::R_CARD, ne: kit::R_CARD, sw: 0, se: 0 };
-    paint_banner(ui.painter(), b, round, people, d.user, d.banner);
+    paint_banner(ui.painter(), b, round, people, d.user, d.banner, true);
     let av = pos2(b.left() + 50.0, b.bottom() + 4.0);
     ui.painter().circle_filled(av, 38.0, p.surface);
     people.paint_playing(ui.painter(), av, 34.0, d.user, 0.0, false);
@@ -34,8 +34,9 @@ pub fn head(ui: &mut Ui, people: &People, d: &CardData) {
 }
 
 /// Свой баннер (cover), а пока не загружен или его нет — волны в цвете аватара.
-pub fn paint_banner(painter: &egui::Painter, rect: Rect, round: CornerRadius, people: &People, user: &PublicUser, key: Option<&str>) {
-    if let Some(tex) = key.and_then(|k| people.banner(k, true, rect.height() * painter.ctx().pixels_per_point())) {
+/// play — анимировать GIF (миниатюра в настройках — нет).
+pub fn paint_banner(painter: &egui::Painter, rect: Rect, round: CornerRadius, people: &People, user: &PublicUser, key: Option<&str>, play: bool) {
+    if let Some(tex) = key.and_then(|k| people.banner(k, play, rect.height() * painter.ctx().pixels_per_point())) {
         let img = tex.size_vec2();
         let scale = (rect.width() / img.x).max(rect.height() / img.y);
         let shown = vec2(rect.width() / (img.x * scale), rect.height() / (img.y * scale));

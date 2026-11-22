@@ -711,7 +711,12 @@ impl App {
                             self.profile_save_state = crate::autosave::SaveState::Failed;
                         }
                     }
-                    if ok && !self.profile_saves.iter_mut().any(|s| s.flush()) {
+                    // правили во время отправки и уже закрыли настройки — дослать сейчас
+                    let now = self.ctx.input(|i| i.time);
+                    if self.profile_saves[i].due(now) && !self.settings_open {
+                        self.profile_send(i);
+                    }
+                    if ok && !self.profile_saves.iter().any(|s| s.busy()) {
                         self.profile_save_state = crate::autosave::SaveState::Saved;
                     }
                 }
@@ -921,6 +926,8 @@ impl App {
 
     fn logout(&mut self) {
         self.voice.send(Cmd::Leave);
+        // дослать несохранённое в профиле, пока токен ещё действует
+        self.profile_flush();
         let api = self.api.clone();
         self.rt.spawn(async move {
             let _ = api.logout().await;
@@ -932,6 +939,8 @@ impl App {
         self.model = Default::default();
         self.channels.clear();
         self.settings_open = false;
+        self.ptt.cancel_capture();
+        self.set_query.clear();
         self.stop_mic_test();
         self.popup = None;
         self.login.tab = Tab::Login;
@@ -3251,7 +3260,7 @@ impl App {
                 if self.updater.available.is_some() {
                     if kit::button(ui, kit::ButtonKind::Primary, "Обновить", Some(egui_phosphor::fill::ARROW_CIRCLE_UP)).clicked() {
                         self.update_open = true;
-                        self.settings_open = false;
+                        self.close_settings();
                     }
                 } else if kit::button_ex(ui, kit::ButtonKind::Secondary, "Проверить обновления", None, !self.updater.checking).clicked() {
                     self.updater.check();
@@ -3358,7 +3367,6 @@ impl App {
     fn ui_settings_profile(&mut self, ui: &mut Ui, w: f32) {
         let Some(me) = self.me.clone() else { return };
         let busy = self.profile_busy;
-        let p = t::p();
         let two = w >= 600.0;
         let left_w = if two { w - profile_card::CARD_W - 32.0 } else { w };
         let now = ui.input(|i| i.time);
@@ -3377,7 +3385,6 @@ impl App {
             self.ui_profile_preview(ui, &me);
         }
         self.profile_autosave(now);
-        let _ = p;
     }
 
     fn ui_profile_preview(&mut self, ui: &mut Ui, me: &User) {
@@ -3429,7 +3436,7 @@ impl App {
         caps(ui, "БАННЕР", None);
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(70.0, 28.0), Sense::hover());
-            profile_card::paint_banner(ui.painter(), rect, CornerRadius::same(6), &self.people, &people::public(me), me.banner.as_deref());
+            profile_card::paint_banner(ui.painter(), rect, CornerRadius::same(6), &self.people, &people::public(me), me.banner.as_deref(), false);
             ui.add_space(12.0);
             if kit::button_ex(ui, kit::ButtonKind::Primary, "Сменить…", Some(egui_phosphor::fill::IMAGE), !busy).clicked() {
                 self.pick_profile_image(crate::crop::Shape::Banner);
@@ -3925,12 +3932,17 @@ impl App {
             });
         });
         if close {
-            self.profile_flush();
-            self.ptt.cancel_capture();
-            self.settings_open = false;
-            self.set_query.clear();
-            self.stop_mic_test();
+            self.close_settings();
         }
+    }
+
+    /// Закрыть настройки (Esc, крестик, «Обновить», выход): дослать несохранённое в профиле.
+    fn close_settings(&mut self) {
+        self.profile_flush();
+        self.ptt.cancel_capture();
+        self.settings_open = false;
+        self.set_query.clear();
+        self.stop_mic_test();
     }
 
     /// Левое меню настроек: кто я, поиск, разделы, «Выйти» и версия. true — нажали «Выйти».

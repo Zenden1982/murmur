@@ -11,6 +11,9 @@ use proto::{Author, PublicUser, User};
 
 use crate::api::Api;
 
+/// Сколько байтов GIF-файлов держать в памяти.
+const GIF_BYTES_BUDGET: usize = 32 * 1024 * 1024;
+
 /// Сторона текстуры аватара (пикселей): хватает на плитку комнаты (до ~92 логических точек при 150 %).
 const TEX_SIDE: u32 = 160;
 
@@ -46,6 +49,8 @@ pub struct People {
     /// Кадры: "ключ@w×h".
     anims: RefCell<HashMap<String, Anim>>,
     lru: RefCell<crate::anim_img::Lru>,
+    /// Предел байтов GIF в памяти (вытесненные — перескачаются при следующем показе).
+    gif_lru: RefCell<crate::anim_img::Lru>,
 }
 
 pub fn public(u: &User) -> PublicUser {
@@ -70,6 +75,7 @@ impl People {
             gifs: RefCell::new(HashMap::new()),
             anims: RefCell::new(HashMap::new()),
             lru: RefCell::new(crate::anim_img::Lru::new(crate::anim_img::BUDGET_BYTES)),
+            gif_lru: RefCell::new(crate::anim_img::Lru::new(GIF_BYTES_BUDGET)),
         }
     }
 
@@ -84,6 +90,7 @@ impl People {
         self.gifs.borrow_mut().clear();
         self.anims.borrow_mut().clear();
         self.lru.borrow_mut().clear();
+        self.gif_lru.borrow_mut().clear();
     }
 
     pub fn learn(&mut self, u: PublicUser) {
@@ -109,7 +116,15 @@ impl People {
                 }
                 Ev::Image { key, res, gif } => {
                     if let Some(g) = gif {
-                        self.gifs.borrow_mut().insert(key.trim_start_matches("rect:").to_string(), g);
+                        let k = key.trim_start_matches("rect:").to_string();
+                        for gone in self.gif_lru.borrow_mut().touch(&k, g.len()) {
+                            // забыть и картинку — при следующем показе скачается заново (вместе с байтами GIF)
+                            self.gifs.borrow_mut().remove(&gone);
+                            let mut tex = self.tex.borrow_mut();
+                            tex.remove(&gone);
+                            tex.remove(&format!("rect:{gone}"));
+                        }
+                        self.gifs.borrow_mut().insert(k, g);
                     }
                     let tex = match res {
                         Ok(ci) => Tex::Ready(self.ctx.load_texture(format!("avatar-{key}"), ci, TextureOptions::LINEAR)),
@@ -247,7 +262,8 @@ impl People {
                 let t_ms = (self.ctx.input(|i| i.time) * 1000.0) as u64;
                 let (i, next) = crate::anim_img::frame_at(delays, t_ms);
                 let tex = frames.get(i).cloned();
-                for gone in self.lru.borrow_mut().touch(&id, *bytes) {
+                let frame = self.ctx.cumulative_frame_nr();
+                for gone in self.lru.borrow_mut().touch_at(&id, *bytes, frame) {
                     anims.remove(&gone);
                 }
                 self.ctx.request_repaint_after(std::time::Duration::from_millis(next.max(16) as u64));
@@ -258,7 +274,8 @@ impl People {
                 anims.insert(id.clone(), Anim::Loading);
                 let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
                 self.rt.spawn_blocking(move || {
-                    let res = crate::anim_img::decode_frames(&bytes, w, h, round);
+                    // одна анимация — не больше четверти бюджета (длинные GIF прореживаются)
+                    let res = crate::anim_img::decode_frames_capped(&bytes, w, h, round, crate::anim_img::BUDGET_BYTES / 4);
                     let _ = tx.send(Ev::Anim { id, res });
                     ctx.request_repaint();
                 });
