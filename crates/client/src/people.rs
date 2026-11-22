@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 
 use eframe::egui::{self, ColorImage, Pos2, TextureHandle, TextureOptions};
@@ -20,7 +21,16 @@ enum Tex {
 }
 
 enum Ev {
-    Image { key: String, res: Result<ColorImage, String> },
+    /// gif — байты, если картинка анимированная (для кадров при показе).
+    Image { key: String, res: Result<ColorImage, String>, gif: Option<Arc<Vec<u8>>> },
+    Anim { id: String, res: Result<(Vec<ColorImage>, Vec<u32>), String> },
+}
+
+/// Кадры анимации одного размера показа.
+enum Anim {
+    Loading,
+    Ready { frames: Vec<TextureHandle>, delays: Vec<u32>, bytes: usize },
+    Failed,
 }
 
 pub struct People {
@@ -31,6 +41,11 @@ pub struct People {
     rx: std_mpsc::Receiver<Ev>,
     users: HashMap<i64, PublicUser>,
     tex: RefCell<HashMap<String, Tex>>,
+    /// Анимированные картинки (ключ → байты GIF).
+    gifs: RefCell<HashMap<String, Arc<Vec<u8>>>>,
+    /// Кадры: "ключ@w×h".
+    anims: RefCell<HashMap<String, Anim>>,
+    lru: RefCell<crate::anim_img::Lru>,
 }
 
 pub fn public(u: &User) -> PublicUser {
@@ -44,7 +59,18 @@ pub fn from_author(a: &Author) -> PublicUser {
 impl People {
     pub fn new(rt: tokio::runtime::Handle, ctx: egui::Context, api: Api) -> Self {
         let (tx, rx) = std_mpsc::channel();
-        Self { rt, ctx, api, tx, rx, users: HashMap::new(), tex: RefCell::new(HashMap::new()) }
+        Self {
+            rt,
+            ctx,
+            api,
+            tx,
+            rx,
+            users: HashMap::new(),
+            tex: RefCell::new(HashMap::new()),
+            gifs: RefCell::new(HashMap::new()),
+            anims: RefCell::new(HashMap::new()),
+            lru: RefCell::new(crate::anim_img::Lru::new(crate::anim_img::BUDGET_BYTES)),
+        }
     }
 
     /// Новый сервер/сессия: всё забыть (старые задачи пишут в закрытый канал).
@@ -55,6 +81,9 @@ impl People {
         self.rx = rx;
         self.users.clear();
         self.tex.borrow_mut().clear();
+        self.gifs.borrow_mut().clear();
+        self.anims.borrow_mut().clear();
+        self.lru.borrow_mut().clear();
     }
 
     pub fn learn(&mut self, u: PublicUser) {
@@ -64,7 +93,24 @@ impl People {
     pub fn poll(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Ev::Image { key, res } => {
+                Ev::Anim { id, res } => {
+                    let anim = match res {
+                        Ok((frames, delays)) => {
+                            let bytes = frames.iter().map(|f| f.pixels.len() * 4).sum();
+                            let frames = frames.into_iter().enumerate().map(|(i, ci)| self.ctx.load_texture(format!("anim-{id}-{i}"), ci, TextureOptions::LINEAR)).collect();
+                            Anim::Ready { frames, delays, bytes }
+                        }
+                        Err(e) => {
+                            log::warn!("анимация {id}: {e}");
+                            Anim::Failed
+                        }
+                    };
+                    self.anims.borrow_mut().insert(id, anim);
+                }
+                Ev::Image { key, res, gif } => {
+                    if let Some(g) = gif {
+                        self.gifs.borrow_mut().insert(key.trim_start_matches("rect:").to_string(), g);
+                    }
                     let tex = match res {
                         Ok(ci) => Tex::Ready(self.ctx.load_texture(format!("avatar-{key}"), ci, TextureOptions::LINEAR)),
                         Err(e) => {
@@ -103,13 +149,16 @@ impl People {
         map.insert(key.to_string(), Tex::Loading);
         let (api, tx, ctx, key) = (self.api.clone(), self.tx.clone(), self.ctx.clone(), key.to_string());
         self.rt.spawn(async move {
-            let res = match api.image(&key).await {
-                Ok(bytes) => tokio::task::spawn_blocking(move || round_image(&bytes, TEX_SIDE))
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string())),
-                Err(e) => Err(e.message),
+            let (res, gif) = match api.image(&key).await {
+                Ok(bytes) => tokio::task::spawn_blocking(move || {
+                    let gif = crate::anim_img::is_animated(&bytes).then(|| Arc::new(bytes.clone()));
+                    (round_image(&bytes, TEX_SIDE), gif)
+                })
+                .await
+                .unwrap_or_else(|e| (Err(e.to_string()), None)),
+                Err(e) => (Err(e.message), None),
             };
-            let _ = tx.send(Ev::Image { key, res });
+            let _ = tx.send(Ev::Image { key, res, gif });
             ctx.request_repaint();
         });
         None
@@ -127,11 +176,16 @@ impl People {
         map.insert(id.clone(), Tex::Loading);
         let (api, tx, ctx, key) = (self.api.clone(), self.tx.clone(), self.ctx.clone(), key.to_string());
         self.rt.spawn(async move {
-            let res = match api.image(&key).await {
-                Ok(bytes) => tokio::task::spawn_blocking(move || rect_image(&bytes, 960)).await.unwrap_or_else(|e| Err(e.to_string())),
-                Err(e) => Err(e.message),
+            let (res, gif) = match api.image(&key).await {
+                Ok(bytes) => tokio::task::spawn_blocking(move || {
+                    let gif = crate::anim_img::is_animated(&bytes).then(|| Arc::new(bytes.clone()));
+                    (rect_image(&bytes, 960), gif)
+                })
+                .await
+                .unwrap_or_else(|e| (Err(e.to_string()), None)),
+                Err(e) => (Err(e.message), None),
             };
-            let _ = tx.send(Ev::Image { key: id, res });
+            let _ = tx.send(Ev::Image { key: id, res, gif });
             ctx.request_repaint();
         });
         None
@@ -143,9 +197,74 @@ impl People {
     }
 
     /// Аватар: картинка в круге, а пока её нет (или нет вовсе) — буква на цветном круге.
+    /// GIF играет, только пока над аватаром мышь.
     pub fn paint(&self, painter: &egui::Painter, center: Pos2, r: f32, u: &PublicUser, glow: f32, dim: bool) {
-        let tex = u.avatar.as_deref().and_then(|k| self.texture(k));
+        let hover = painter.ctx().pointer_hover_pos().is_some_and(|p| painter.clip_rect().contains(p) && p.distance(center) <= r);
+        self.paint_impl(painter, center, r, u, glow, dim, hover);
+    }
+
+    /// Аватар, GIF играет всегда (карточка профиля, предпросмотр).
+    pub fn paint_playing(&self, painter: &egui::Painter, center: Pos2, r: f32, u: &PublicUser, glow: f32, dim: bool) {
+        self.paint_impl(painter, center, r, u, glow, dim, true);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_impl(&self, painter: &egui::Painter, center: Pos2, r: f32, u: &PublicUser, glow: f32, dim: bool, play: bool) {
+        let tex = u.avatar.as_deref().and_then(|k| {
+            let side = crate::anim_img::bucket(2.0 * r * painter.ctx().pixels_per_point());
+            let anim = if play { self.anim_frame(k, side, side, true) } else { None };
+            anim.or_else(|| self.texture(k))
+        });
         paint_avatar(painter, center, r, avatar_name(u), tex.as_ref(), glow, dim);
+    }
+
+    /// Кадр баннера (cover, 5:2) по ключу; play — анимировать GIF. Пока не загружен — None.
+    pub fn banner(&self, key: &str, play: bool, height_px: f32) -> Option<TextureHandle> {
+        if play {
+            let h = [128u32, 256, 384].into_iter().find(|&b| height_px <= b as f32).unwrap_or(384);
+            if let Some(t) = self.anim_frame(key, h * 5 / 2, h, false) {
+                return Some(t);
+            }
+        }
+        self.picture(key)
+    }
+
+    /// Можно ли сейчас анимировать GIF: анимации не выключены и окно на виду.
+    pub fn can_play(ctx: &egui::Context) -> bool {
+        crate::anim::level() != crate::config::AnimPref::Off && crate::anim::window_active(ctx)
+    }
+
+    /// Текущий кадр анимации ключа в размере w×h; первый запрос — декодирование в фоне. Не GIF / нельзя играть — None.
+    fn anim_frame(&self, key: &str, w: u32, h: u32, round: bool) -> Option<TextureHandle> {
+        if !Self::can_play(&self.ctx) {
+            return None;
+        }
+        let bytes = self.gifs.borrow().get(key).cloned()?;
+        let id = format!("{key}@{w}x{h}");
+        let mut anims = self.anims.borrow_mut();
+        match anims.get(&id) {
+            Some(Anim::Ready { frames, delays, bytes }) => {
+                let t_ms = (self.ctx.input(|i| i.time) * 1000.0) as u64;
+                let (i, next) = crate::anim_img::frame_at(delays, t_ms);
+                let tex = frames.get(i).cloned();
+                for gone in self.lru.borrow_mut().touch(&id, *bytes) {
+                    anims.remove(&gone);
+                }
+                self.ctx.request_repaint_after(std::time::Duration::from_millis(next.max(16) as u64));
+                tex
+            }
+            Some(_) => None,
+            None => {
+                anims.insert(id.clone(), Anim::Loading);
+                let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+                self.rt.spawn_blocking(move || {
+                    let res = crate::anim_img::decode_frames(&bytes, w, h, round);
+                    let _ = tx.send(Ev::Anim { id, res });
+                    ctx.request_repaint();
+                });
+                None
+            }
+        }
     }
 }
 
@@ -178,8 +297,14 @@ fn center_square(img: image::DynamicImage) -> image::DynamicImage {
 pub fn round_image(bytes: &[u8], side: u32) -> Result<ColorImage, String> {
     let img = image::load_from_memory(bytes).map_err(|e| format!("не картинка: {e}"))?;
     let sq = center_square(img).resize_exact(side, side, image::imageops::FilterType::Lanczos3).to_rgba8();
-    let c = side as f32 / 2.0;
     let mut px = sq.into_raw();
+    mask_round(&mut px, side);
+    Ok(ColorImage::from_rgba_unmultiplied([side as usize, side as usize], &px))
+}
+
+/// Круг с мягким краем: альфа углов квадрата RGBA side×side → 0.
+pub fn mask_round(px: &mut [u8], side: u32) {
+    let c = side as f32 / 2.0;
     for y in 0..side {
         for x in 0..side {
             let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
@@ -188,7 +313,6 @@ pub fn round_image(bytes: &[u8], side: u32) -> Result<ColorImage, String> {
             px[i] = (px[i] as f32 * a) as u8;
         }
     }
-    Ok(ColorImage::from_rgba_unmultiplied([side as usize, side as usize], &px))
 }
 
 #[cfg(test)]

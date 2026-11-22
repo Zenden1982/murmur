@@ -3,6 +3,7 @@
 
 mod activity;
 mod anim;
+mod anim_img;
 mod banner;
 mod api;
 mod app;
