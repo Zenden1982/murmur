@@ -56,6 +56,9 @@ pub fn insert_at(text: &mut String, char_idx: usize, s: &str) -> usize {
     idx + s.chars().count()
 }
 
+/// (недавние, строки сетки, начало каждого раздела)
+type GridCache = (Vec<String>, Vec<Row>, Vec<(Option<Group>, usize)>);
+
 #[derive(Default)]
 pub struct Picker {
     query: String,
@@ -63,6 +66,8 @@ pub struct Picker {
     jump: Option<Option<Group>>,
     hovered: Option<&'static str>,
     focused: bool,
+    /// Строки сетки и метки разделов — пересчёт, только когда меняются недавние.
+    cache: Option<GridCache>,
 }
 
 pub enum PickerOut {
@@ -201,12 +206,17 @@ impl Picker {
             }
             return picked;
         }
-        let (rows, marks) = rows(recent);
+        if self.cache.as_ref().is_none_or(|(r, _, _)| r.as_slice() != recent) {
+            let (rows, marks) = rows(recent);
+            self.cache = Some((recent.to_vec(), rows, marks));
+        }
+        let (_, rows, marks) = self.cache.take().unwrap_or_default();
         let mut sa = egui::ScrollArea::vertical().id_salt("emoji-grid").max_height(300.0).min_scrolled_height(300.0);
         if let Some(g) = self.jump.take() && let Some((_, i)) = marks.iter().find(|(m, _)| *m == g) {
             sa = sa.vertical_scroll_offset(*i as f32 * CELL);
         }
-        sa.show_rows(ui, CELL, rows.len(), |ui, range| {
+        let n = rows.len();
+        sa.show_rows(ui, CELL, n, |ui, range| {
             ui.set_width(W);
             for row in &rows[range] {
                 match row {
@@ -226,6 +236,7 @@ impl Picker {
                 }
             }
         });
+        self.cache = Some((recent.to_vec(), rows, marks));
         picked
     }
 

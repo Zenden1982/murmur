@@ -33,6 +33,8 @@ pub struct Entry {
 struct Catalog {
     entries: Vec<Entry>,
     by_code: std::collections::HashMap<String, usize>,
+    /// эмодзи без U+FE0F → запись
+    by_bare: std::collections::HashMap<String, usize>,
 }
 
 static CATALOG: std::sync::OnceLock<Catalog> = std::sync::OnceLock::new();
@@ -66,6 +68,7 @@ fn build() -> Catalog {
     }
     let mut entries = Vec::new();
     let mut by_code = std::collections::HashMap::new();
+    let mut by_bare = std::collections::HashMap::new();
     for e in emojis::iter() {
         let s = e.as_str();
         if s.chars().any(|c| ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)) || text::png(s).is_none() {
@@ -92,9 +95,10 @@ fn build() -> Catalog {
         for c in &codes {
             by_code.entry(c.clone()).or_insert(i);
         }
+        by_bare.entry(bare(s)).or_insert(i);
         entries.push(Entry { emoji: s, group, codes, ru_name, ru_keywords });
     }
-    Catalog { entries, by_code }
+    Catalog { entries, by_code, by_bare }
 }
 
 fn cat() -> &'static Catalog {
@@ -108,6 +112,15 @@ pub fn catalog() -> &'static [Entry] {
 
 /// Поиск без учёта регистра: точный код → код с начала → русское имя/ключевые слова с начала слова → подстрока.
 pub fn search(q: &str, limit: usize) -> Vec<&'static Entry> {
+    search_upto(q, limit, 3)
+}
+
+/// Подсказка при наборе `:код`: без совпадений по подстроке (иначе «:DD» нашёл бы middle_finger).
+pub fn suggest(q: &str, limit: usize) -> Vec<&'static Entry> {
+    search_upto(q, limit, 2)
+}
+
+fn search_upto(q: &str, limit: usize, max_score: u8) -> Vec<&'static Entry> {
     let q = q.trim().trim_matches(':').to_lowercase();
     if q.is_empty() {
         return Vec::new();
@@ -128,7 +141,7 @@ pub fn search(q: &str, limit: usize) -> Vec<&'static Entry> {
             } else {
                 return None;
             };
-            Some((score, i))
+            (score <= max_score).then_some((score, i))
         })
         .collect();
     hits.sort();
@@ -137,8 +150,8 @@ pub fn search(q: &str, limit: usize) -> Vec<&'static Entry> {
 
 /// Запись каталога по эмодзи (с U+FE0F и без).
 pub fn entry(emoji: &str) -> Option<&'static Entry> {
-    let b = bare(emoji);
-    catalog().iter().find(|e| bare(e.emoji) == b)
+    let c = cat();
+    c.by_bare.get(&bare(emoji)).map(|&i| &c.entries[i])
 }
 
 /// Эмодзи по коду без двоеточий (fire, огонь).
@@ -272,6 +285,22 @@ mod tests {
     #[test]
     fn query_after_text_colon() {
         assert_eq!(query_at_cursor("привет:ог", 9), None);
+    }
+
+    #[test]
+    fn suggest_ignores_text_smileys() {
+        for q in ["DD", "PP", "pp", "oo", "dd"] {
+            assert!(suggest(q, 8).is_empty(), "{q}: {:?}", suggest(q, 8).iter().map(|e| e.emoji).collect::<Vec<_>>());
+        }
+        assert!(has(&suggest("ог", 8), "🔥"));
+        assert_eq!(suggest("fire", 1)[0].emoji, "🔥");
+    }
+
+    #[test]
+    fn entry_with_and_without_fe0f() {
+        assert_eq!(entry("❤").map(|e| e.emoji), entry("❤️").map(|e| e.emoji));
+        assert!(entry("🔥").is_some());
+        assert!(entry("x").is_none());
     }
 
     #[test]

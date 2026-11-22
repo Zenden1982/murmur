@@ -1,7 +1,7 @@
 //! Рисование цветных эмодзи (Twemoji): текстуры, строка текста с эмодзи, подпись.
 
 use eframe::egui;
-use super::text::{Seg, has_emoji, png, segments};
+use super::text::{Seg, png, segments};
 use egui::{Align2, Color32, Context, FontId, Id, Painter, Pos2, Rect, Response, RichText, Sense, TextureHandle, TextureOptions, Ui, pos2, vec2};
 
 /// Текстура эмодзи; PNG декодируется один раз и живёт в памяти egui.
@@ -27,8 +27,12 @@ pub fn paint(painter: &Painter, rect: Rect, emoji: &str) -> bool {
 }
 
 /// Только эмодзи (1–3) и пробелы — показываем крупно, как в Discord.
+#[cfg(test)]
 pub fn jumbo(text: &str) -> bool {
-    let segs = segments(text);
+    jumbo_segs(&segments(text))
+}
+
+fn jumbo_segs(segs: &[Seg<'_>]) -> bool {
     let n = segs.iter().filter(|s| matches!(s, Seg::Emoji(_))).count();
     (1..=3).contains(&n) && segs.iter().all(|s| match s { Seg::Text(t) => t.trim().is_empty(), Seg::Emoji(_) => true })
 }
@@ -39,13 +43,14 @@ fn hint(e: &str) -> String {
 
 /// Текст с цветными эмодзи, с переносом. Без эмодзи — обычная подпись.
 pub fn label(ui: &mut Ui, text: &str, font: FontId, color: Color32, selectable: bool) -> Response {
-    if !has_emoji(text) {
+    let segs = segments(text);
+    if !segs.iter().any(|s| matches!(s, Seg::Emoji(_))) {
         return ui.add(egui::Label::new(RichText::new(text).font(font).color(color)).wrap().selectable(selectable));
     }
-    let size = if jumbo(text) { (font.size * 2.2).round() } else { (font.size * 1.25).round() };
+    let size = if jumbo_segs(&segs) { (font.size * 2.2).round() } else { (font.size * 1.25).round() };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        for seg in segments(text) {
+        for seg in segs {
             match seg {
                 Seg::Text(t) => {
                     for (i, line) in t.split('\n').enumerate() {
@@ -63,9 +68,11 @@ pub fn label(ui: &mut Ui, text: &str, font: FontId, color: Color32, selectable: 
                     if !paint(ui.painter(), img, e) {
                         ui.painter().text(r.center(), Align2::CENTER_CENTER, e, font.clone(), color);
                     }
-                    let h = hint(e);
-                    if !h.is_empty() {
-                        resp.on_hover_text(h);
+                    if resp.hovered() {
+                        let h = hint(e);
+                        if !h.is_empty() {
+                            resp.on_hover_text(h);
+                        }
                     }
                 }
             }

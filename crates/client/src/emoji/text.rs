@@ -27,6 +27,7 @@ pub fn segments(text: &str) -> Vec<Seg<'_>> {
     out
 }
 
+#[cfg(test)]
 pub fn has_emoji(text: &str) -> bool {
     text.graphemes(true).any(is_emoji)
 }

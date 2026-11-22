@@ -1168,7 +1168,7 @@ impl Chat {
                         self.suggest_hidden = None;
                     }
                     let list = match &q {
-                        Some((_, _, q)) if self.suggest_hidden.is_none() => crate::emoji::search(q, 8),
+                        Some((_, _, q)) if self.suggest_hidden.is_none() => crate::emoji::suggest(q, 8),
                         _ => Vec::new(),
                     };
                     if let (Some((start, cur, qs)), false) = (q, list.is_empty()) {
