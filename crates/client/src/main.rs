@@ -83,8 +83,18 @@ fn main() -> eframe::Result {
         .thread_name("amadeus-rt")
         .build()
         .expect("tokio runtime");
+    #[allow(unused_mut)]
+    let mut viewport = eframe::egui::ViewportBuilder::default();
+    // Отладка (тестовые окна на втором мониторе владельца): AMADEUS_WINDOW_POS="x,y" — где открыть окно, без фокуса.
+    #[cfg(debug_assertions)]
+    if let Some((x, y)) = std::env::var("AMADEUS_WINDOW_POS").ok().and_then(|v| {
+        let (x, y) = v.split_once(',')?;
+        Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+    }) {
+        viewport = viewport.with_position([x, y]).with_active(false);
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
+        viewport: viewport
             .with_title(if capture_win::diag::on() { "Murmur · диагностика" } else { "Murmur" })
             // своя рамка и заголовок — frame.rs
             .with_decorations(false)

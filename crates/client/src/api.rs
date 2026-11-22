@@ -160,6 +160,11 @@ impl Api {
         }
     }
 
+    /// Жив ли сервер (экран входа).
+    pub async fn health(&self) -> ApiResult<proto::HealthResponse> {
+        self.call(Method::GET, "/health", None::<&()>).await
+    }
+
     pub async fn login(&self, name: &str, password: &str) -> ApiResult<AuthResponse> {
         let body = LoginRequest { name: name.to_string(), password: password.to_string() };
         self.call(Method::POST, "/auth/login", Some(&body)).await
@@ -494,6 +499,13 @@ pub fn normalize_invite(raw: &str) -> String {
     raw.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).take(12).collect()
 }
 
+/// Код из того, что вставили: сам код или ссылка (берём хвост после последнего «/», без ?query и #).
+pub fn invite_from_input(raw: &str) -> String {
+    let s = raw.trim();
+    let s = s.split(['?', '#']).next().unwrap_or(s).trim_end_matches('/');
+    normalize_invite(s.rsplit('/').next().unwrap_or(s))
+}
+
 /// `K7PMQ4XXYYZZ` → `K7PM-Q4XX-YYZZ`.
 pub fn format_invite(norm: &str) -> String {
     norm.as_bytes().chunks(4).map(|c| std::str::from_utf8(c).unwrap_or("")).collect::<Vec<_>>().join("-")
@@ -501,6 +513,14 @@ pub fn format_invite(norm: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invite_from_link_or_code() {
+        use super::invite_from_input as f;
+        assert_eq!(f("k7pm-q4xx-yyzz"), "K7PMQ4XXYYZZ");
+        assert_eq!(f(" https://murmurchat.ru/i/K7PM-Q4XX-YYZZ/ "), "K7PMQ4XXYYZZ");
+        assert_eq!(f("https://murmurchat.ru/invite/K7PMQ4XXYYZZ?from=tg#x"), "K7PMQ4XXYYZZ");
+    }
+
     use super::*;
 
     #[test]

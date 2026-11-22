@@ -156,6 +156,8 @@ pub struct Settings {
     pub collapsed_categories: Vec<i64>,
     /// Показывать друзьям и соседям по серверам, во что я играю.
     pub share_activity: bool,
+    /// «Не выходить» на экране входа: сохранять сеанс между запусками.
+    pub stay_signed_in: bool,
     /// Свернуть «Не в сети» в списке друзей.
     pub friends_offline_open: bool,
     /// Показан список участников справа (на сервере).
@@ -196,6 +198,7 @@ impl Default for Settings {
             last_server: None,
             collapsed_categories: Vec::new(),
             share_activity: true,
+            stay_signed_in: true,
             friends_offline_open: false,
             members_open: true,
             recent_emoji: Vec::new(),

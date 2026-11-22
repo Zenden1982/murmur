@@ -197,7 +197,7 @@ enum Btn {
 /// Полоса заголовка — первой панелью кадра (на всю ширину окна). В полноэкранном режиме не показывать.
 /// Слева знак + «Murmur», справа — свернуть/развернуть/закрыть (тонкие значки, подложка при наведении; «закрыть» — красная).
 /// `badge` — надпись-кнопка слева от кнопок (есть обновление); возвращает true, если по ней кликнули.
-pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
+pub fn title_bar(ui: &mut Ui, badge: Option<&str>, logo: bool) -> bool {
     let mut badge_clicked = false;
     egui::Panel::top("titlebar")
         .exact_size(HEIGHT)
@@ -248,7 +248,9 @@ pub fn title_bar(ui: &mut Ui, badge: Option<&str>) -> bool {
             p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, t::p().border));
             // лого бренда (знак + «murmur»); окно без фокуса — приглушённо
             const LOGO_H: f32 = 20.0;
-            t::paint_lockup_pose(p, pos2(r.left() + 14.0, r.center().y - LOGO_H / 2.0), LOGO_H, focused, cat_pose(&ctx));
+            if logo {
+                t::paint_lockup_pose(p, pos2(r.left() + 14.0, r.center().y - LOGO_H / 2.0), LOGO_H, focused, cat_pose(&ctx));
+            }
 
             let forced = forced_hover();
             for (rect, kind) in [(minb, Btn::Min), (maxb, Btn::Max), (close, Btn::Close)] {

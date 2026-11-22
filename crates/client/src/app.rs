@@ -40,6 +40,8 @@ const CHANNELS_REFRESH: Duration = Duration::from_secs(60);
 enum Msg {
     Me(ApiResult<User>),
     Auth(ApiResult<AuthResponse>),
+    /// Проверка сервера на экране входа: (адрес, отвечает ли).
+    Health(String, bool),
     /// Превью приглашения на экране входа: (код, куда зовут).
     Preview(String, Result<InvitePreview, String>),
     /// Профиль сохранён (`Ok(None)` — выбор файла отменён).
@@ -77,11 +79,28 @@ enum Tab {
     Invite,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServerState {
+    Checking,
+    Up,
+    Down,
+}
+
 struct LoginForm {
     tab: Tab,
     name: String,
     password: String,
-    invite: [String; 3],
+    /// Ссылка или код приглашения как ввели.
+    invite: String,
+    show_password: bool,
+    /// Ошибка «неверный ник или пароль» — под паролем, рамка поля красная.
+    bad_password: bool,
+    forgot_hint: bool,
+    /// Поставить фокус на первое пустое поле (открытие экрана, смена вкладки).
+    focus_pending: bool,
+    server_state: ServerState,
+    /// Какой адрес и когда проверяли.
+    server_checked: Option<(String, Instant)>,
     /// Куда зовёт введённый код: (код, ответ).
     preview: Option<(String, Result<InvitePreview, String>)>,
     error: Option<String>,
@@ -280,7 +299,13 @@ impl App {
             tab: if settings.last_name.is_empty() { Tab::Invite } else { Tab::Login },
             name: settings.last_name.clone(),
             password: String::new(),
-            invite: Default::default(),
+            invite: String::new(),
+            show_password: false,
+            bad_password: false,
+            forgot_hint: false,
+            focus_pending: true,
+            server_state: ServerState::Checking,
+            server_checked: None,
             preview: None,
             error: None,
             busy: false,
@@ -622,19 +647,35 @@ impl App {
                     self.login.busy = false;
                     match res {
                         Ok(auth) => {
-                            self.settings.session_token = Some(auth.token.clone());
+                            // «Не выходить» выключено — сеанс только до закрытия приложения
+                            self.settings.session_token = self.settings.stay_signed_in.then(|| auth.token.clone());
+                            self.login.server_state = ServerState::Up;
+                            self.login.bad_password = false;
                             self.settings.last_name = auth.user.name.clone();
                             self.settings.save();
                             self.set_api(self.api.with_token(Some(auth.token)));
                             self.set_me(auth.user);
                             self.login.password.clear();
-                            self.login.invite = Default::default();
+                            self.login.invite.clear();
                             self.login.preview = None;
                             self.login.error = None;
                             self.screen = Screen::Main;
                             self.fetch_channels();
                         }
-                        Err(e) => self.login.error = Some(e.message),
+                        Err(e) => {
+                            self.login.bad_password = e.code == "bad_credentials";
+                            if e.code == "network" {
+                                self.login.server_state = ServerState::Down;
+                                self.login.error = Some("Сервер не отвечает. Проверьте интернет или адрес сервера.".into());
+                            } else {
+                                self.login.error = Some(e.message);
+                            }
+                        }
+                    }
+                }
+                Msg::Health(url, ok) => {
+                    if url == self.settings.server_url {
+                        self.login.server_state = if ok { ServerState::Up } else { ServerState::Down };
                     }
                 }
                 Msg::AvatarPicked(res) => match res {
@@ -816,15 +857,16 @@ impl App {
         let f = &mut self.login;
         let name = f.name.trim().to_string();
         let pass = f.password.clone();
-        let code = api::normalize_invite(&f.invite.concat());
+        let code = api::invite_from_input(&f.invite);
         f.error = None;
+        f.bad_password = false;
         if name.chars().count() < proto::limits::NAME_MIN {
             f.error = Some("Введите ник.".into());
             return;
         }
         if f.tab == Tab::Invite {
             if code.len() != 12 {
-                f.error = Some("Код приглашения — 12 знаков (XXXX-XXXX-XXXX).".into());
+                f.error = Some("Вставьте ссылку или код приглашения (12 знаков, XXXX-XXXX-XXXX).".into());
                 return;
             }
             if pass.chars().count() < proto::limits::PASSWORD_MIN {
@@ -894,44 +936,82 @@ impl App {
     }
 
     fn ui_login(&mut self, ui: &mut Ui) {
+        self.check_server_health();
+        // Отладка (скриншоты): AMADEUS_LOGIN_SUBMIT="ник|пароль" — через 2 с заполнить форму и нажать «Войти».
+        #[cfg(debug_assertions)]
+        if ui.input(|i| i.time) > 2.0
+            && let Some(v) = std::env::var("AMADEUS_LOGIN_SUBMIT").ok()
+            && !self.login.busy
+            && self.login.error.is_none()
+            && let Some((n, pw)) = v.split_once('|')
+        {
+            self.login.name = n.into();
+            self.login.password = pw.into();
+            self.submit_login();
+        }
         egui::Panel::right("login-form")
-            .exact_size(440.0)
+            .exact_size(420.0)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(t::p().surface).inner_margin(Margin { left: 44, right: 44, top: 56, bottom: 56 }))
+            .frame(Frame::new().fill(t::p().surface).inner_margin(Margin::symmetric(40, 32)))
             .show(ui, |ui| {
                 let r = ui.max_rect();
-                ui.painter().vline(r.left() - 44.0, ui.clip_rect().y_range(), Stroke::new(1.0, t::p().border));
-                self.ui_login_form(ui);
+                ui.painter().vline(r.left() - 40.0, ui.clip_rect().y_range(), Stroke::new(1.0, t::p().border));
+                // форма целиком по центру по вертикали: высота — с прошлого кадра
+                let hid = Id::new("login-form-h");
+                let h: f32 = ui.data(|d| d.get_temp(hid)).unwrap_or(0.0);
+                ui.add_space(((ui.available_height() - h) / 2.0).max(0.0));
+                // мерить содержимое (scope), а не min_rect панели — он во всю высоту
+                let nh = ui.scope(|ui| self.ui_login_form(ui)).response.rect.height();
+                if (nh - h).abs() > 0.5 {
+                    ui.data_mut(|d| d.insert_temp(hid, nh));
+                    ui.ctx().request_repaint();
+                }
             });
-        egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::symmetric(64, 56))).show(ui, |ui| {
+        egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::symmetric(64, 48))).show(ui, |ui| {
             let r = ui.max_rect();
             let p = ui.painter().clone();
+            login_waves(&p, r.expand2(vec2(64.0, 48.0)));
             t::wordmark(ui, 40.0);
-            // кот и подпись — по центру левой части
-            let mid = r.center().y;
-            kit::cat_figure(&p, Rect::from_center_size(pos2(r.left() + 90.0, mid - 80.0), vec2(186.0, 150.0)), kit::Cat::Hello);
-            p.text(pos2(r.left(), mid + 40.0), Align2::LEFT_TOP, "Созвоны, игры и учёба —\nсо своими.", t::xbold(30.0), t::p().text);
-            p.text(
-                pos2(r.left(), mid + 136.0),
-                Align2::LEFT_TOP,
-                "Голос, трансляции экрана и чат. Попасть сюда можно только по приглашению.",
+            // кот, заголовок и подпись — одним блоком по центру по вертикали
+            let wrap = r.width().min(560.0);
+            let title = p.layout("Созвоны, игры и учёба —\nсо своими.".to_string(), t::xbold(34.0), t::p().text, wrap);
+            let sub = p.layout(
+                "Голос, трансляции экрана и чат. Попасть сюда можно только по приглашению.".to_string(),
                 t::font(15.0),
                 t::p().text_muted,
+                wrap,
             );
-            // адрес сервера
-            let bottom = Rect::from_min_max(pos2(r.left(), r.bottom() - 34.0), r.max);
+            let cat = vec2(124.0, 100.0);
+            let h = cat.y + 28.0 + title.size().y + 14.0 + sub.size().y;
+            let mut y = r.center().y - h / 2.0;
+            kit::cat_figure(&p, Rect::from_min_size(pos2(r.left() + 4.0, y), cat), kit::Cat::Hello);
+            y += cat.y + 28.0;
+            let th = title.size().y;
+            p.galley(pos2(r.left(), y), title, t::p().text);
+            y += th + 14.0;
+            p.galley(pos2(r.left(), y), sub, t::p().text_muted);
+            // строка сервера: точка статуса, адрес, «сменить сервер»
+            let bottom = Rect::from_min_max(pos2(r.left(), r.bottom() - 28.0), r.max);
             ui.scope_builder(egui::UiBuilder::new().max_rect(bottom), |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     match self.login.server_edit.take() {
                         None => {
+                            let (dot, word) = match self.login.server_state {
+                                ServerState::Up => (t::p().success, "доступен"),
+                                ServerState::Down => (t::p().danger, "не отвечает"),
+                                ServerState::Checking => (t::p().text_faint, "проверяем…"),
+                            };
+                            let (d, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                            ui.painter().circle_filled(d.center(), 4.0, dot);
                             let host = self.settings.server_url.trim_start_matches("https://").trim_start_matches("http://").to_string();
-                            ui.label(RichText::new(format!("{} {host} ·", ph::HARD_DRIVES)).color(t::p().text_muted).size(13.0));
-                            let link = ui.add(egui::Label::new(RichText::new("сменить сервер").size(13.0).underline()).sense(Sense::click()));
+                            ui.label(RichText::new(format!("{} {host}", ph::HARD_DRIVES)).color(t::p().text_muted).size(13.0));
+                            ui.label(RichText::new(format!("· {word} ·")).color(t::p().text_faint).size(13.0));
+                            let link = ui.add(egui::Label::new(RichText::new("сменить сервер").size(13.0).color(t::p().accent_text).underline()).sense(Sense::click()));
                             if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                 self.login.server_edit = Some(self.settings.server_url.clone());
-                            } 
+                            }
                         }
                         Some(mut s) => {
                             ui.label(RichText::new(ph::HARD_DRIVES).color(t::p().text_muted));
@@ -950,120 +1030,169 @@ impl App {
         });
     }
 
+    /// Проверка сервера для строки статуса на входе: при открытии экрана, смене адреса и раз в 10 с, пока недоступен.
+    fn check_server_health(&mut self) {
+        let url = self.settings.server_url.clone();
+        let stale = self.login.server_checked.as_ref().is_none_or(|(u, at)| {
+            *u != url || (self.login.server_state == ServerState::Down && at.elapsed() > Duration::from_secs(10))
+        });
+        if !stale {
+            return;
+        }
+        if self.login.server_checked.as_ref().is_none_or(|(u, _)| *u != url) {
+            self.login.server_state = ServerState::Checking;
+        }
+        self.login.server_checked = Some((url.clone(), Instant::now()));
+        let api = self.api.with_token(None);
+        self.spawn(async move { api.health().await.is_ok() }, move |ok| Msg::Health(url, ok));
+        self.ctx.request_repaint_after(Duration::from_secs(10));
+    }
+
     fn ui_login_form(&mut self, ui: &mut Ui) {
         let w = ui.available_width();
+        let p = t::p();
         // вкладки
         let (tabs_rect, _) = ui.allocate_exact_size(vec2(w, 42.0), Sense::hover());
-        ui.painter().rect_filled(tabs_rect, CornerRadius::same(255), t::p().surface_3);
+        ui.painter().rect_filled(tabs_rect, CornerRadius::same(10), p.rail);
         let half = (tabs_rect.width() - 8.0) / 2.0;
         for (i, (tab, label)) in [(Tab::Login, "Вход"), (Tab::Invite, "У меня приглашение")].into_iter().enumerate() {
             let rr = Rect::from_min_size(tabs_rect.min + vec2(4.0 + half * i as f32, 4.0), vec2(half, 34.0));
             let resp = ui.interact(rr, Id::new(("tab", i)), Sense::click());
             let on = self.login.tab == tab;
             if on {
-                ui.painter().rect_filled(rr, CornerRadius::same(255), t::p().surface);
+                // тёмная тема — светлее подложки (row_active), светлая — белая вкладка
+                let fill = if p.bg.r() < 128 { p.row_active } else { p.bg };
+                ui.painter().rect_filled(rr, CornerRadius::same(8), fill);
             }
-            let color = if on || resp.hovered() { t::p().text } else { t::p().text_muted };
+            let color = if on || resp.hovered() { p.text } else { p.text_muted };
             ui.painter().text(rr.center(), Align2::CENTER_CENTER, label, t::bold(14.0), color);
-            if resp.clicked() && !on {
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on {
                 self.login.tab = tab;
                 self.login.error = None;
+                self.login.bad_password = false;
+                self.login.focus_pending = true;
             }
         }
-        ui.add_space(22.0);
+        ui.add_space(26.0);
+        let invite = self.login.tab == Tab::Invite;
+        let (head, sub) = if invite { ("Вас позвали", "Вставьте ссылку или код приглашения") } else { ("С возвращением", "Войдите, чтобы продолжить") };
+        ui.label(RichText::new(head).font(t::xbold(22.0)).color(p.text));
+        ui.add_space(2.0);
+        ui.label(RichText::new(sub).size(14.0).color(p.text_muted));
+        ui.add_space(20.0);
 
+        let ids = [Id::new("login-invite"), Id::new("login-name"), Id::new("login-pass")];
         let mut submit = false;
-        if self.login.tab == Tab::Invite {
-            label(ui, "Код приглашения");
-            self.invite_input(ui, w);
-            let code = api::normalize_invite(&self.login.invite.concat());
+        let enter = |ui: &Ui, r: &egui::Response| r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if invite {
+            label(ui, "Приглашение");
+            let r = ui.add(login_field(&mut self.login.invite, w, ids[0]).hint_text("ссылка или код XXXX-XXXX-XXXX"));
+            submit |= enter(ui, &r);
+            let code = api::invite_from_input(&self.login.invite);
             if code.len() == 12 && self.login.preview.as_ref().is_none_or(|(c, _)| *c != code) {
                 self.login.preview = Some((code.clone(), Err(String::new())));
                 let api = self.api.with_token(None);
-                let c = code.clone();
-                self.spawn(async move { api.invite_preview(&c).await.map_err(|e| e.message) }, move |r| Msg::Preview(code, r));
+                let (c, key) = (code.clone(), code.clone());
+                self.spawn(async move { api.invite_preview(&c).await.map_err(|e| e.message) }, move |r| Msg::Preview(key, r));
             }
-            let code = api::normalize_invite(&self.login.invite.concat());
+            ui.add_space(4.0);
             match &self.login.preview {
-                Some((c, Ok(p))) if *c == code => {
-                    ui.label(RichText::new(format!("Вас пригласили на «{}»", p.server_name)).font(t::semibold(14.0)).color(t::p().text));
+                Some((c, Ok(pv))) if *c == code => {
+                    ui.label(RichText::new(format!("Вас пригласили на «{}»", pv.server_name)).font(t::semibold(13.0)).color(p.accent_text));
                 }
                 Some((c, Err(e))) if *c == code && !e.is_empty() => {
-                    ui.label(RichText::new(e).size(12.5).color(t::p().danger_text));
+                    ui.label(RichText::new(e).size(12.5).color(p.danger_text));
                 }
                 _ => {
-                    ui.label(RichText::new("Регистр и дефисы не важны — можно вставить целиком.").size(12.5).color(t::p().text_muted));
+                    ui.label(RichText::new("Регистр и дефисы не важны.").size(12.5).color(p.text_muted));
                 }
             }
             ui.add_space(12.0);
         }
         label(ui, "Ник");
-        let r = ui.add(kit::text_field(&mut self.login.name, w).hint_text("например, okabe"));
-        submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        ui.add_space(12.0);
-        label(ui, "Пароль");
-        let r = ui.add(kit::text_field(&mut self.login.password, w).password(true));
-        submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let r = ui.add(login_field(&mut self.login.name, w, ids[1]).hint_text("например, okabe"));
+        submit |= enter(ui, &r);
         ui.add_space(14.0);
-        if let Some(err) = &self.login.error {
+        label(ui, "Пароль");
+        let show = self.login.show_password;
+        let r = ui.add(
+            TextEdit::singleline(&mut self.login.password)
+                .id(ids[2])
+                .password(!show)
+                .desired_width(w)
+                .margin(Margin { left: 14, right: 42, top: 12, bottom: 12 })
+                .font(t::font(15.0)),
+        );
+        submit |= enter(ui, &r);
+        if self.login.bad_password {
+            ui.painter().rect_stroke(r.rect, ui.visuals().widgets.inactive.corner_radius, Stroke::new(1.5, p.danger), StrokeKind::Inside);
+        }
+        // глаз — показать/скрыть пароль
+        let eye = Rect::from_center_size(pos2(r.rect.right() - 22.0, r.rect.center().y), vec2(30.0, 30.0));
+        let er = ui.interact(eye, Id::new("login-eye"), Sense::click());
+        let ec = if er.hovered() { p.text } else { p.text_muted };
+        ui.painter().text(eye.center(), Align2::CENTER_CENTER, if show { ph::EYE_SLASH } else { ph::EYE }, t::font(18.0), ec);
+        if er.on_hover_text(if show { "Скрыть пароль" } else { "Показать пароль" }).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            self.login.show_password = !show;
+        }
+        if self.login.bad_password
+            && let Some(err) = &self.login.error
+        {
+            ui.add_space(6.0);
+            ui.label(RichText::new(err).size(13.0).color(p.danger_text));
+        }
+        ui.add_space(14.0);
+        // «Не выходить» и «Забыли пароль?»
+        ui.horizontal(|ui| {
+            let mut on = self.settings.stay_signed_in;
+            if login_checkbox(ui, &mut on, "Не выходить") {
+                self.settings.stay_signed_in = on;
+                self.settings.save();
+            }
+            if !invite {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let l = ui.add(egui::Label::new(RichText::new("Забыли пароль?").size(13.0).color(p.accent_text).underline()).sense(Sense::click()));
+                    if l.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        self.login.forgot_hint = !self.login.forgot_hint;
+                    }
+                });
+            }
+        });
+        if self.login.forgot_hint && !invite {
+            ui.add_space(6.0);
+            ui.label(RichText::new(format!("{}  Пароль сбрасывает администратор сервера — напишите ему.", ph::INFO)).size(12.5).color(p.text_muted));
+        }
+        ui.add_space(20.0);
+        let text = match (self.login.busy, invite) {
+            (true, false) => "Входим…",
+            (true, true) => "Создаём аккаунт…",
+            (false, false) => "Войти",
+            (false, true) => "Принять приглашение",
+        };
+        if login_button(ui, text, w, !self.login.busy) {
+            submit = true;
+        }
+        if !self.login.bad_password
+            && let Some(err) = &self.login.error
+        {
+            ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("{}  {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
+                ui.label(RichText::new(format!("{}  {err}", ph::WARNING_CIRCLE)).size(13.0).color(p.danger_text));
             });
         }
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            let text = match (self.login.busy, self.login.tab) {
-                (true, _) => "Подождите…",
-                (false, Tab::Login) => "Войти",
-                (false, Tab::Invite) => "Создать аккаунт",
+        if self.login.focus_pending {
+            self.login.focus_pending = false;
+            let target = if invite && self.login.invite.trim().is_empty() {
+                ids[0]
+            } else if self.login.name.trim().is_empty() {
+                ids[1]
+            } else {
+                ids[2]
             };
-            if kit::button_wide(ui, kit::ButtonKind::Primary, text, w, !self.login.busy).clicked() {
-                submit = true;
-            }
-        });
+            ui.memory_mut(|m| m.request_focus(target));
+        }
         if submit && !self.login.busy {
             self.submit_login();
-        }
-    }
-
-    /// Три сегмента кода; вставка целиком раскладывается по сегментам.
-    fn invite_input(&mut self, ui: &mut Ui, w: f32) {
-        let ids = [Id::new("inv0"), Id::new("inv1"), Id::new("inv2")];
-        let dash_w = 14.0;
-        let seg_w = (w - 2.0 * (dash_w + 16.0) - 4.0) / 3.0;
-        let mut edited = None;
-        ui.horizontal(|ui| {
-            for i in 0..3 {
-                let resp = ui.add(
-                    TextEdit::singleline(&mut self.login.invite[i])
-                        .id(ids[i])
-                        .font(t::xbold(24.0))
-                        .text_color(t::p().text)
-                        .horizontal_align(Align::Center)
-                        .desired_width(seg_w)
-                        .margin(Margin::symmetric(10, 6))
-                        .hint_text(RichText::new("····").font(t::xbold(24.0)).color(t::p().text_faint)),
-                );
-                if resp.changed() {
-                    edited = Some(i);
-                }
-                if i < 2 {
-                    ui.label(RichText::new("–").color(t::p().border_strong).size(20.0));
-                }
-            }
-        });
-        if let Some(i) = edited {
-            let before = self.login.invite[i].len();
-            let all = api::normalize_invite(&self.login.invite.concat());
-            for (k, seg) in self.login.invite.iter_mut().enumerate() {
-                *seg = all.chars().skip(k * 4).take(4).collect();
-            }
-            // заполнили сегмент (или вставили код целиком) — фокус дальше
-            if before >= 4 {
-                let target = (all.len() / 4).min(2);
-                if target != i {
-                    ui.memory_mut(|m| m.request_focus(ids[target]));
-                }
-            }
         }
     }
 
@@ -3480,7 +3609,7 @@ impl eframe::App for App {
             if !SIZED.swap(true, Ordering::Relaxed) {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(1240.0, 960.0)));
             }
-            crate::frame::title_bar(ui, None);
+            crate::frame::title_bar(ui, None, true);
             let mut theme = self.settings.theme;
             crate::gallery::ui(ui, &mut self.gallery, &mut theme);
             self.settings.theme = theme;
@@ -3593,7 +3722,8 @@ impl eframe::App for App {
         // В полноэкранном просмотре трансляции рамки нет.
         if !self.fullscreen {
             let badge = self.updater.available.as_ref().map(|i| format!("Обновление {}", i.version));
-            if crate::frame::title_bar(ui, badge.as_deref()) {
+            // на экране входа логотип один — большой слева, в заголовке только кнопки окна
+            if crate::frame::title_bar(ui, badge.as_deref(), self.screen != Screen::Login) {
                 self.update_open = true;
             }
         }
@@ -4058,6 +4188,70 @@ fn leave_button(ui: &mut Ui) -> egui::Response {
     }
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, egui_phosphor::fill::PHONE_X, t::icon_fill(14.0), p.danger);
     resp.on_hover_text("Отключиться").on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Поле формы входа: 44 px высотой.
+fn login_field(text: &mut String, width: f32, id: Id) -> TextEdit<'_> {
+    TextEdit::singleline(text).id(id).desired_width(width).margin(Margin::symmetric(14, 12)).font(t::font(15.0))
+}
+
+/// Галочка с подписью; true — переключили.
+fn login_checkbox(ui: &mut Ui, on: &mut bool, text: &str) -> bool {
+    let p = t::p();
+    let g = ui.painter().layout_no_wrap(text.to_string(), t::font(13.5), p.text_muted);
+    let (rect, resp) = ui.allocate_exact_size(vec2(18.0 + 8.0 + g.size().x, 20.0), Sense::click());
+    let b = Rect::from_min_size(pos2(rect.left(), rect.center().y - 9.0), vec2(18.0, 18.0));
+    if *on {
+        ui.painter().rect_filled(b, CornerRadius::same(5), p.accent_strong);
+        let c = b.center();
+        ui.painter().add(egui::Shape::line(vec![c + vec2(-4.5, 0.2), c + vec2(-1.3, 3.4), c + vec2(4.6, -3.4)], Stroke::new(2.0, p.on_accent)));
+    } else {
+        let stroke = if resp.hovered() { p.text_muted } else { p.border_strong };
+        ui.painter().rect_stroke(b, CornerRadius::same(5), Stroke::new(1.5, stroke), StrokeKind::Inside);
+    }
+    ui.painter().galley(pos2(b.right() + 8.0, rect.center().y - g.size().y / 2.0), g, p.text_muted);
+    let clicked = resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+    if clicked {
+        *on = !*on;
+    }
+    clicked
+}
+
+/// Большая кнопка формы входа (46 px, accent_strong); true — нажали.
+fn login_button(ui: &mut Ui, text: &str, w: f32, enabled: bool) -> bool {
+    let p = t::p();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), if enabled { Sense::click() } else { Sense::hover() });
+    let hover = ui.ctx().animate_bool_with_time(resp.id, enabled && resp.hovered(), kit::HOVER_S);
+    let mut fill = p.accent_strong.lerp_to_gamma(p.accent_strong_hover, hover);
+    if !enabled {
+        fill = fill.gamma_multiply(0.6);
+    }
+    ui.painter().rect_filled(rect, CornerRadius::same(kit::R_CARD), fill);
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, t::bold(15.0), p.on_accent);
+    enabled && resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Фон левой части входа: три тихие «волны пульса» цветом акцента.
+fn login_waves(p: &egui::Painter, r: Rect) {
+    const PERIOD: f32 = 170.0;
+    let blip = [(0.0, 0.0), (7.5, 0.0), (12.5, -1.0), (20.0, 1.0), (25.0, -0.55), (30.0, 0.55), (35.0, 0.0)];
+    for (i, (fy, alpha, amp)) in [(0.28, 0.07, 16.0), (0.55, 0.09, 20.0), (0.82, 0.05, 14.0)].into_iter().enumerate() {
+        let y = r.top() + r.height() * fy;
+        let shift = 40.0 + i as f32 * 63.0;
+        let mut pts = vec![pos2(r.left(), y)];
+        let mut x0 = r.left() + shift - PERIOD;
+        while x0 < r.right() {
+            for (bx, by) in blip {
+                let x = x0 + bx;
+                if x > r.left() && x < r.right() {
+                    pts.push(pos2(x, y + by * amp));
+                }
+            }
+            x0 += PERIOD;
+        }
+        pts.push(pos2(r.right(), y));
+        p.add(egui::Shape::line(pts, Stroke::new(2.0, t::p().accent.gamma_multiply(alpha))));
+    }
 }
 
 #[cfg(test)]
