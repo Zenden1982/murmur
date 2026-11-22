@@ -358,6 +358,9 @@ Murmur нужен свободный 443 (и 7881, 7882/udp, 3478/udp). Если
   INVITE=""
   if ! dc exec -T backend backend admin-exists >/dev/null 2>&1; then
     step "Администратор"
+    if [ -n "$YES" ] && { [ -z "$ADMIN" ] || [ -z "$PWFILE" ]; }; then
+      die "администратора ещё нет — с --yes нужны --admin <ник> и --admin-password-file <файл>"
+    fi
     if [ -z "$ADMIN" ]; then ADMIN=$(ask "Ник администратора (2–32 символа)"); fi
     if [ -n "$PWFILE" ]; then ADMIN_PASSWORD=$(cat "$PWFILE")
     else
