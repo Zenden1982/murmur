@@ -7,6 +7,7 @@ mod anim_img;
 mod banner;
 mod api;
 mod app;
+mod autosave;
 mod channels_ui;
 mod chat;
 mod config;
