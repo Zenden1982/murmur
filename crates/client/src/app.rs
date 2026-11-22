@@ -1618,7 +1618,8 @@ impl App {
                     (Conn::Reconnecting | Conn::Rejoining { .. }, _) => "нет связи…".into(),
                     _ => status.unwrap_or_else(|| "не в канале".into()),
                 };
-                ui.horizontal(|ui| {
+                // не ui.horizontal: он берёт высоту interact_size, и подпись уезжала вниз от имени
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), 0.0), Layout::left_to_right(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(RichText::new(sub).size(12.0).color(t::p().text_muted));
                     // капсулы с «Отключиться» вне экрана канала нет — маленькая красная трубка здесь

@@ -235,6 +235,7 @@ impl Chat {
                 i.events.push(egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE })
             }),
             ("paste", _) => self.paste_from_clipboard(channel),
+            ("pick", _) => self.pick_files(channel),
             ("attach", path) => self.attach_files(channel, vec![PathBuf::from(path)]),
             ("top", _) => self.scroll_top = true,
             ("lightbox", _) => {
@@ -624,6 +625,7 @@ impl Chat {
         self.rt.spawn_blocking(move || {
             let Some(paths) = rfd::FileDialog::new()
                 .set_title("Прикрепить картинки")
+                .set_parent(&crate::desktop::main_window())
                 .add_filter("Картинки", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
                 .pick_files()
             else {
@@ -695,6 +697,7 @@ impl Chat {
                 tokio::task::spawn_blocking(move || {
                     let Some(path) = rfd::FileDialog::new()
                         .set_title("Сохранить картинку")
+                        .set_parent(&crate::desktop::main_window())
                         .set_file_name(format!("amadeus-{id}.{ext}"))
                         .add_filter("Картинка", &[ext])
                         .save_file()

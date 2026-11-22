@@ -209,8 +209,38 @@ pub fn claim_single_instance() -> bool {
     true
 }
 
+/// Главное окно (для родителя системных диалогов); 0 — ещё нет.
+static MAIN_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Главное окно приложения — родитель для диалогов выбора файла (иначе диалог из фонового потока может открыться позади окна).
+pub fn main_window() -> Window {
+    Window(MAIN_WINDOW.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+impl raw_window_handle::HasWindowHandle for Window {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        #[cfg(windows)]
+        if let Some(h) = std::num::NonZeroIsize::new(self.0) {
+            let raw = raw_window_handle::RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(h));
+            // SAFETY: HWND главного окна живёт до конца процесса.
+            return Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) });
+        }
+        Err(raw_window_handle::HandleError::Unavailable)
+    }
+}
+
+impl raw_window_handle::HasDisplayHandle for Window {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        #[cfg(windows)]
+        return Ok(raw_window_handle::DisplayHandle::windows());
+        #[cfg(not(windows))]
+        Err(raw_window_handle::HandleError::Unavailable)
+    }
+}
+
 /// Пометить окно — по метке его находит вторая копия, чтобы показать.
 pub fn mark_window(w: Window) {
+    MAIN_WINDOW.store(w.0, std::sync::atomic::Ordering::Relaxed);
     #[cfg(windows)]
     win::mark(w);
     #[cfg(not(windows))]

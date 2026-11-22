@@ -120,6 +120,7 @@ async fn load_one(api: &Api, server: Server) -> ApiResult<Loaded> {
 pub fn pick_image(title: &str) -> Result<Option<image::DynamicImage>, String> {
     let Some(path) = rfd::FileDialog::new()
         .set_title(title)
+        .set_parent(&crate::desktop::main_window())
         .add_filter("Картинки", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
         .pick_file()
     else {
