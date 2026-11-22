@@ -13,6 +13,7 @@ mod crash;
 mod crop;
 mod denoise;
 mod dms;
+mod emoji;
 mod desktop;
 mod frame;
 mod friends;
