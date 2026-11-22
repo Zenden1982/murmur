@@ -52,6 +52,7 @@ impl Held {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // для тестов
     pub fn any(&self) -> bool {
         !self.keys.is_empty() || !self.buttons.is_empty()
     }

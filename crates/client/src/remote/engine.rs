@@ -293,6 +293,7 @@ impl RcEngine {
             return Vec::new();
         }
         self.notice_sent = Some(now);
+        log::info!("управление: ввод от {who} не выполнен: {b:?}");
         vec![rc_to(who, &RcMsg::Notice { text: b.text().to_string() })]
     }
 
@@ -565,7 +566,7 @@ impl RcEngine {
                 .iter()
                 .map(|(who, &(x, y))| {
                     let name = self.names.get(who).cloned().unwrap_or_else(|| who.clone());
-                    let c = crate::theme::avatar_color(&name);
+                    let c = crate::remote_ui::pointer_color(&name);
                     OverlayPointer {
                         pos: from_norm(rect, x, y),
                         color: [c.r(), c.g(), c.b(), 255],

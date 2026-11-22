@@ -284,6 +284,7 @@ pub struct DryRun {
 }
 
 impl DryRun {
+    #[cfg_attr(not(test), allow(dead_code))] // для тестов
     pub fn count(&self) -> usize {
         self.n.load(Ordering::Relaxed)
     }

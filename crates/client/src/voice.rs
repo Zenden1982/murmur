@@ -319,7 +319,17 @@ pub fn spawn(
             }
         }
     });
+    // Сообщения управления — одной очередью по порядку (иначе «отпустить» обгоняет «нажать», и стример отбрасывает ввод).
+    let (rc_tx, mut rc_rx) = mpsc::unbounded_channel::<(LocalParticipant, livekit::DataPacket)>();
+    rt.spawn(async move {
+        while let Some((lp, packet)) = rc_rx.recv().await {
+            if let Err(e) = lp.publish_data(packet).await {
+                log::warn!("управление: отправка: {e}");
+            }
+        }
+    });
     let engine = Engine {
+        rc_tx,
         api,
         state: state.clone(),
         repaint,
@@ -427,6 +437,8 @@ struct Engine {
     viewers: HashSet<String>,
     /// Указка и управление трансляцией.
     rc: RcEngine,
+    /// Очередь отправки сообщений управления (по порядку).
+    rc_tx: mpsc::UnboundedSender<(LocalParticipant, livekit::DataPacket)>,
 }
 
 /// Идущая трансляция. Захват и источник живут дольше публикации: при переподключении
@@ -1926,11 +1938,7 @@ impl Engine {
                     reliable: o.reliable,
                     destination_identities: o.to.into_iter().map(Into::into).collect(),
                 };
-                tokio::spawn(async move {
-                    if let Err(e) = lp.publish_data(packet).await {
-                        log::warn!("управление: отправка: {e}");
-                    }
-                });
+                let _ = self.rc_tx.send((lp, packet));
             }
         }
         self.publish_rc();
@@ -1939,10 +1947,16 @@ impl Engine {
     fn publish_rc(&self) {
         let (host, guest, ptrs) = (self.rc.host_view(), self.rc.guest_views(), self.rc.pointer_views());
         let notice = self.rc.notice.as_ref().map(|(t, _)| t.clone());
-        let changed = {
+        let (changed, new_ask) = {
             let s = self.state.lock().unwrap();
-            s.rc_host != host || s.rc_guest != guest || s.rc_pointers != ptrs || s.rc_notice != notice
+            (
+                s.rc_host != host || s.rc_guest != guest || s.rc_pointers != ptrs || s.rc_notice != notice,
+                host.pending.len() > s.rc_host.pending.len(),
+            )
         };
+        if new_ask {
+            self.play(Sound::DirectMessage);
+        }
         if changed {
             self.set(|s| {
                 s.rc_host = host;

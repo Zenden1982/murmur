@@ -137,7 +137,9 @@ fn create_window(class: &[u16]) -> Option<HWND> {
 pub struct Overlay {
     thread_id: u32,
     wanted: Arc<Mutex<Vec<OverlayPointer>>>,
+    #[cfg_attr(not(test), allow(dead_code))] // для тестов
     count: Arc<AtomicUsize>,
+    #[cfg_attr(not(test), allow(dead_code))] // для тестов
     probe_ok: bool,
 }
 
@@ -201,10 +203,12 @@ impl Overlay {
         unsafe { PostThreadMessageW(self.thread_id, WM_SYNC, 0, 0) };
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // для тестов
     pub fn probe_excluded(&self) -> bool {
         self.probe_ok
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // для тестов
     pub fn window_count(&self) -> usize {
         self.count.load(Ordering::Relaxed)
     }

@@ -185,6 +185,10 @@ pub struct App {
     view: View,
     /// Окно (HWND) — прятать в трей и показывать.
     window: Window,
+    /// Сколько запросов управления было на прошлом кадре (новый — поднять окно).
+    rc_asked: usize,
+    /// Фокус окна, последний отправленный движку (клавиатура управляющего — только в фокусе).
+    rc_focus: Option<bool>,
     /// Значок в трее; `None` — не создался, тогда «закрыть» закрывает.
     tray: Option<Tray>,
     updater: Updater,
@@ -264,6 +268,7 @@ impl App {
         let voice = voice::spawn(rt.handle(), api.clone(), prefs, video.clone(), repaint.clone());
         let (ptt_tx, ptt_rx) = std_mpsc::channel();
         let ptt = Ptt::start(settings.ptt_key, settings.ptt_enabled, voice.sender(), ptt_tx, repaint);
+        voice.send(Cmd::RcPttKey(settings.ptt_key));
         // Отладка: AMADEUS_START_DEAF=1 — второй клиент на том же ПК без заводки через колонки.
         #[cfg(debug_assertions)]
         if std::env::var_os("AMADEUS_START_DEAF").is_some() {
@@ -342,6 +347,8 @@ impl App {
             profile_error: None,
             view: View::Voice,
             window,
+            rc_asked: 0,
+            rc_focus: None,
             tray,
             updater,
             update_open: false,
@@ -648,6 +655,7 @@ impl App {
             if vk != 0x1B {
                 self.settings.ptt_key = vk;
                 self.ptt.set_key(vk);
+                self.voice.send(Cmd::RcPttKey(vk));
                 self.settings.save();
             }
         }
@@ -1073,10 +1081,13 @@ impl App {
         self.debug_autostream(&vs);
         #[cfg(debug_assertions)]
         self.debug_autowatch(ui, &vs);
+        #[cfg(debug_assertions)]
+        self.debug_rc(&vs);
         self.chat.ensure_stream();
         self.leave_if_gone(&vs);
         self.sync_focus(ui, &vs);
         self.speech_repaint(ui, &vs);
+        self.ui_remote(ui.ctx(), &vs);
         if self.fullscreen {
             self.ui_fullscreen(ui, &vs);
             self.report_views(&vs);
@@ -1169,6 +1180,77 @@ impl App {
         if live {
             ctx.request_repaint_after(crate::anim::SPEECH_FRAME);
         }
+    }
+
+    /// Отладка управления (debug): AMADEUS_RC_ASK=pointer|control — зритель сам просит доступ у первого стримера, которого смотрит;
+    /// AMADEUS_RC_GRANT=pointer|control|deny — стример сам отвечает; AMADEUS_RC_DRIVE=1 — зритель берёт управление и водит
+    /// указку по кругу, раз в 3 с кликает и печатает «a». С AMADEUS_RC_DRYRUN=1 у стримера ввод идёт в журнал, курсор не двигается.
+    #[cfg(debug_assertions)]
+    fn debug_rc(&mut self, vs: &VoiceState) {
+        use crate::remote::proto::{Btn, InputEv, Level};
+        use std::sync::Mutex;
+        static STATE: Mutex<Option<(String, Instant, u32)>> = Mutex::new(None);
+        let level = |v: &str| match v {
+            "control" => Some(Level::Control),
+            "pointer" => Some(Level::Pointer),
+            _ => None,
+        };
+        if let Ok(g) = std::env::var("AMADEUS_RC_GRANT")
+            && let Some((who, _)) = vs.rc_host.pending.first()
+        {
+            self.voice.send(Cmd::RcRespond { identity: who.clone(), grant: level(&g) });
+        }
+        // AMADEUS_RC_REVOKE_AFTER=<с> — стример сам жмёт «Забрать» через столько секунд после начала управления (один раз).
+        {
+            static SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+            static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if let Some(secs) = std::env::var("AMADEUS_RC_REVOKE_AFTER").ok().and_then(|v| v.parse::<u64>().ok())
+                && vs.rc_host.controller.is_some()
+                && !DONE.load(Ordering::Relaxed)
+            {
+                let mut s = SINCE.lock().unwrap();
+                let at = *s.get_or_insert_with(Instant::now);
+                if at.elapsed() >= Duration::from_secs(secs) {
+                    DONE.store(true, Ordering::Relaxed);
+                    self.voice.send(Cmd::RcRevokeAll);
+                }
+            }
+        }
+        let mut st = STATE.lock().unwrap();
+        if let Ok(a) = std::env::var("AMADEUS_RC_ASK")
+            && st.is_none()
+            && let Some(w) = vs.watching.first()
+            && self.video.frame(w).is_some()
+            && let Some(l) = level(&a)
+        {
+            self.voice.send(Cmd::RcRequest { identity: w.clone(), level: l });
+            *st = Some((w.clone(), Instant::now(), 0));
+        }
+        if std::env::var_os("AMADEUS_RC_DRIVE").is_none() {
+            return;
+        }
+        let Some((w, at, n)) = st.as_mut() else { return };
+        let Some(g) = vs.rc_guest.get(w.as_str()) else { return };
+        if !matches!(g.phase, crate::remote::guest::GuestPhase::Granted { .. }) {
+            return;
+        }
+        if !matches!(g.phase, crate::remote::guest::GuestPhase::Granted { controlling: true, .. }) && !g.upgrade_pending {
+            self.voice.send(Cmd::RcTake { identity: w.clone(), on: true });
+        }
+        let t = at.elapsed().as_secs_f32();
+        let (x, y) = (0.5 + 0.3 * (t * 0.8).cos(), 0.5 + 0.3 * (t * 0.8).sin());
+        self.voice.send(Cmd::RcPointer { identity: w.clone(), x, y });
+        let tick = (t / 3.0) as u32;
+        if tick > *n {
+            *n = tick;
+            for down in [true, false] {
+                self.voice.send(Cmd::RcInput { identity: w.clone(), ev: InputEv::Button { b: Btn::L, down, x, y } });
+            }
+            for down in [true, false] {
+                self.voice.send(Cmd::RcInput { identity: w.clone(), ev: InputEv::Key { sc: 0x1E, ext: false, down } });
+            }
+        }
+        self.ctx.request_repaint_after(Duration::from_millis(30));
     }
 
     /// Отладка: AMADEUS_AUTOWATCH=1 — сразу смотреть каждую трансляцию в канале
@@ -2100,6 +2182,8 @@ impl App {
         let radius = CornerRadius::same(kit::R_CARD);
         kit::stream_tile_frame(&painter, rect, false);
         let small = rect.height() < 200.0;
+        // мышь над видео управляет ПК друга — плитка на клики не реагирует
+        let mut rc_captured = false;
 
         if p.is_local {
             // Своё видео не декодируем (лишняя нагрузка) — только подпись.
@@ -2116,6 +2200,7 @@ impl App {
                     let vr = fit_rect(rect, f.size);
                     egui::Image::new(egui::load::SizedTexture::new(f.texture, vr.size())).corner_radius(radius).paint_at(ui, vr);
                     self.mark_view(&p.identity, vr, ui.ctx().pixels_per_point());
+                    rc_captured = crate::remote_ui::guest_layer(ui, rect, vr, &p.identity, vs, &self.voice, hovered);
                     // Стример сам сообщает, почему картинка стоит; иначе — догадка по отсутствию кадров.
                     match vs.stream_paused.get(&p.identity) {
                         Some(voice::StreamPause::Minimized) => {
@@ -2175,6 +2260,9 @@ impl App {
         }
         // Кнопки поверх видео (появляются при наведении).
         let mut act = None;
+        if rc_captured {
+            return;
+        }
         if watching && hovered {
             let mut c = pos2(rect.right() - 30.0, rect.bottom() - 30.0);
             if overlay_button(ui, c, ph::X, "Перестать смотреть", Id::new(("s-stop", &p.identity))).clicked() {
@@ -2340,11 +2428,13 @@ impl App {
         egui::CentralPanel::no_frame().frame(Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
             let r = ui.max_rect();
             let resp = ui.interact(r, Id::new("fs-video"), Sense::click());
+            let mut rc_captured = false;
             match self.video.frame(&id) {
                 Some(f) => {
                     let vr = fit_rect(r, f.size);
                     egui::Image::new(egui::load::SizedTexture::new(f.texture, vr.size())).paint_at(ui, vr);
                     self.mark_view(&id, vr, ui.ctx().pixels_per_point());
+                    rc_captured = crate::remote_ui::guest_layer(ui, r, vr, &id, vs, &self.voice, !idle);
                     if !idle {
                         chip(ui.painter(), r.left_top() + vec2(20.0, 20.0), Align2::LEFT_TOP, &format!("{}  {} · {}×{} · {:.0} к/с", ph::MONITOR, p.name, f.size[0], f.size[1], f.fps), ON_VIDEO);
                     }
@@ -2358,7 +2448,7 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                 // Проверить ещё раз, когда пора прятать/показывать.
                 ui.ctx().request_repaint_after(Duration::from_millis(250));
-                if resp.double_clicked() {
+                if resp.double_clicked() && !rc_captured {
                     self.set_fullscreen(ui.ctx(), false);
                 }
                 return;
@@ -2371,10 +2461,27 @@ impl App {
                 return;
             }
             c.x -= 44.0;
-            if overlay_button(ui, c, ph::CORNERS_IN, "Выйти из полного экрана (Esc)", Id::new("fs-exit")).clicked() || resp.double_clicked() {
+            if overlay_button(ui, c, ph::CORNERS_IN, "Выйти из полного экрана (Esc)", Id::new("fs-exit")).clicked() || (resp.double_clicked() && !rc_captured) {
                 self.set_fullscreen(ui.ctx(), false);
             }
         });
+    }
+
+    /// Указка и управление: запрос, плашка «Забрать», уведомления; запрос поднимает окно из трея.
+    fn ui_remote(&mut self, ctx: &egui::Context, vs: &VoiceState) {
+        let n = vs.rc_host.pending.len();
+        if n > self.rc_asked && !desktop::is_visible(self.window) {
+            desktop::show(self.window);
+        }
+        self.rc_asked = n;
+        crate::remote_ui::host_dialog(ctx, vs, &self.voice);
+        crate::remote_ui::host_bar(ctx, vs, &self.voice);
+        crate::remote_ui::notice(ctx, vs);
+        let focused = ctx.input(|i| i.focused);
+        if self.rc_focus != Some(focused) {
+            self.rc_focus = Some(focused);
+            self.voice.send(Cmd::RcGuestFocus(focused));
+        }
     }
 
     fn ui_banner(&mut self, ui: &mut Ui, vs: &VoiceState) {
