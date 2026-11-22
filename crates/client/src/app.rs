@@ -441,6 +441,10 @@ impl App {
         if std::env::var_os("AMADEUS_OPEN_STICKERS").is_some() {
             self.chat.debug_open_stickers();
         }
+        // AMADEUS_OPEN_EMOJI=1 — открыть панель эмодзи.
+        if std::env::var_os("AMADEUS_OPEN_EMOJI").is_some() {
+            self.chat.debug_open_emoji();
+        }
         self.chat.demo_seed(4, Vec::new());
         if let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
             self.view = View::Text(id);
@@ -562,6 +566,7 @@ impl App {
         self.profile_about = user.about.clone().unwrap_or_default();
         self.model.me = Some(user.id);
         self.chat.set_me(user.id);
+        self.chat.set_recent_emoji(self.settings.recent_emoji.clone());
         self.me = Some(user);
     }
 
@@ -3481,6 +3486,10 @@ impl eframe::App for App {
         }
         self.handle_msgs();
         self.chat.poll();
+        if let Some(r) = self.chat.take_recent_emoji() {
+            self.settings.recent_emoji = r;
+            self.settings.save();
+        }
         for u in self.chat.take_users() {
             if let Some(me) = self.me.as_mut().filter(|m| m.id == u.id) {
                 me.display_name = u.display_name.clone();

@@ -139,6 +139,14 @@ pub struct Chat {
     react_menu: Option<i64>,
     /// Открыт выбор стикера.
     sticker_menu: bool,
+    /// Открыта панель эмодзи у поля ввода.
+    emoji_menu: bool,
+    emoji_picker: crate::emoji::picker::Picker,
+    /// Панель эмодзи для реакции: (сообщение, кнопка-якорь).
+    react_picker: Option<(i64, Rect)>,
+    /// Недавние эмодзи (сохраняет приложение в настройках).
+    recent_emoji: Vec<String>,
+    recent_changed: bool,
     /// Отладка: шаги AMADEUS_CHAT_SCRIPT и время последнего шага.
     #[cfg(debug_assertions)]
     script: (std::collections::VecDeque<String>, f64),
@@ -172,6 +180,11 @@ impl Chat {
             me_id: 0,
             react_menu: None,
             sticker_menu: false,
+            emoji_menu: false,
+            emoji_picker: Default::default(),
+            react_picker: None,
+            recent_emoji: Vec::new(),
+            recent_changed: false,
             #[cfg(debug_assertions)]
             script: (
                 std::env::var("AMADEUS_CHAT_SCRIPT").map(|s| s.split('|').map(str::to_string).collect()).unwrap_or_default(),
@@ -516,6 +529,25 @@ impl Chat {
 
     pub fn debug_open_stickers(&mut self) {
         self.sticker_menu = true;
+    }
+
+    pub fn set_recent_emoji(&mut self, v: Vec<String>) {
+        self.recent_emoji = v;
+    }
+
+    /// Недавние эмодзи изменились — сохранить.
+    pub fn take_recent_emoji(&mut self) -> Option<Vec<String>> {
+        std::mem::take(&mut self.recent_changed).then(|| self.recent_emoji.clone())
+    }
+
+    fn used_emoji(&mut self, e: &str) {
+        crate::emoji::picker::push_recent(&mut self.recent_emoji, e);
+        self.recent_changed = true;
+    }
+
+    /// Отладка (скриншоты): открыть панель эмодзи у поля ввода.
+    pub fn debug_open_emoji(&mut self) {
+        self.emoji_menu = true;
     }
 
     pub fn set_me(&mut self, id: i64) {
@@ -924,7 +956,7 @@ impl Chat {
             ui.painter().set(bg_idx, egui::Shape::rect_filled(row, CornerRadius::same(kit::R_ROW), t::p().row_hover));
         }
         // «добавить реакцию» — при наведении, справа сверху строки
-        let menu_open = self.react_menu == Some(m.id);
+        let menu_open = self.react_menu == Some(m.id) || self.react_picker.is_some_and(|(id, _)| id == m.id);
         if hovered || menu_open {
             let br = Rect::from_center_size(pos2(row.right() - 22.0, row.top() + 14.0), vec2(30.0, 24.0));
             let resp = ui.interact(br, Id::new(("react-btn", m.id)), Sense::click());
@@ -934,6 +966,7 @@ impl Chat {
             if resp.on_hover_text("Реакция").clicked() {
                 self.react_menu = if menu_open { None } else { Some(m.id) };
             }
+            let mut open_picker = false;
             if self.react_menu == Some(m.id) {
                 let mine: Vec<&str> = m.reactions.iter().filter(|r| crate::reactions::mine(r, self.me_id)).map(|r| r.name.as_str()).collect();
                 let area = egui::Area::new(Id::new(("react-menu", m.id)))
@@ -959,11 +992,32 @@ impl Chat {
                                     }
                                 }
                             });
+                            let more = ui.add(egui::Button::new(RichText::new(format!("{}  Ещё эмодзи", ph::PLUS)).size(13.0).color(t::p().text_muted)).frame(false));
+                            if more.clicked() {
+                                open_picker = true;
+                            }
                         });
                     });
                 // клик мимо — закрыть
                 if ui.input(|i| i.pointer.any_click()) && !area.response.hovered() && !ui.rect_contains_pointer(br) {
                     self.react_menu = None;
+                }
+            }
+            if open_picker {
+                self.react_menu = None;
+                self.react_picker = Some((m.id, br));
+                self.emoji_picker.reset();
+            }
+            if let Some((mid, a)) = self.react_picker.filter(|(id, _)| *id == m.id) {
+                let recent = self.recent_emoji.clone();
+                match self.emoji_picker.show(ui.ctx(), Id::new("react-emoji"), pos2(a.right(), a.bottom() + 4.0), Align2::RIGHT_TOP, a, &recent) {
+                    crate::emoji::picker::PickerOut::Picked(e) => {
+                        self.used_emoji(&e);
+                        act = Some(FeedAct::React { mid, name: proto::reaction_name(&e), on: true });
+                        self.react_picker = None;
+                    }
+                    crate::emoji::picker::PickerOut::Close => self.react_picker = None,
+                    crate::emoji::picker::PickerOut::None => {}
                 }
             }
         }
@@ -1034,6 +1088,8 @@ impl Chat {
         let mut toggle_stickers = false;
         let mut sticker_anchor: Option<Rect> = None;
         let mut sticker_pick: Option<&'static str> = None;
+        let mut toggle_emoji = false;
+        let mut emoji_anchor: Option<Rect> = None;
         let mut remove = None;
         let d = self.drafts.entry(ch.id).or_default();
         if let Some(e) = &d.error {
@@ -1081,6 +1137,11 @@ impl Chat {
                         toggle_stickers = true;
                     }
                     sticker_anchor = Some(st.rect);
+                    let em = kit::icon_button(ui, ph::SMILEY, if self.emoji_menu { kit::IconState::Active } else { kit::IconState::Normal }, "Эмодзи");
+                    if em.clicked() {
+                        toggle_emoji = true;
+                    }
+                    emoji_anchor = Some(em.rect);
                     let can_send = !d.text.trim().is_empty() || !d.images.is_empty();
                     let w = ui.available_width() - 40.0;
                     // Enter — отправить, Shift+Enter — новая строка
@@ -1121,6 +1182,35 @@ impl Chat {
         }
         if toggle_stickers {
             self.sticker_menu = !self.sticker_menu;
+            self.emoji_menu = false;
+        }
+        if toggle_emoji {
+            self.emoji_menu = !self.emoji_menu;
+            self.sticker_menu = false;
+            self.emoji_picker.reset();
+        }
+        if self.emoji_menu && let Some(a) = emoji_anchor {
+            let recent = self.recent_emoji.clone();
+            match self.emoji_picker.show(ui.ctx(), Id::new("emoji-menu"), pos2(a.left(), a.top() - 8.0), Align2::LEFT_BOTTOM, a, &recent) {
+                crate::emoji::picker::PickerOut::Picked(e) => {
+                    let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                    let at = st.cursor.char_range().map_or(usize::MAX, |r| r.primary.index.into());
+                    let d = self.drafts.entry(ch.id).or_default();
+                    let pos = crate::emoji::picker::insert_at(&mut d.text, at, &e);
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(pos))));
+                    st.store(ui.ctx(), id);
+                    self.used_emoji(&e);
+                    if !ui.input(|i| i.modifiers.shift) {
+                        self.emoji_menu = false;
+                        ui.memory_mut(|m| m.request_focus(id));
+                    }
+                }
+                crate::emoji::picker::PickerOut::Close => {
+                    self.emoji_menu = false;
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+                crate::emoji::picker::PickerOut::None => {}
+            }
         }
         if self.sticker_menu && let Some(a) = sticker_anchor {
             let area = egui::Area::new(Id::new("sticker-menu"))

@@ -160,6 +160,8 @@ pub struct Settings {
     pub friends_offline_open: bool,
     /// Показан список участников справа (на сервере).
     pub members_open: bool,
+    /// Недавние эмодзи (панель эмодзи), новые — первыми.
+    pub recent_emoji: Vec<String>,
 }
 
 impl Default for Settings {
@@ -196,6 +198,7 @@ impl Default for Settings {
             share_activity: true,
             friends_offline_open: false,
             members_open: true,
+            recent_emoji: Vec::new(),
         }
     }
 }
