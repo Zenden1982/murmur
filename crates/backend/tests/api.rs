@@ -1108,3 +1108,13 @@ mod upstream {
         assert_eq!(st, StatusCode::NOT_FOUND);
     }
 }
+
+#[tokio::test]
+async fn admin_exists_cli() {
+    let t = setup().await;
+    assert!(!backend::admin_exists(&t.pool).await.unwrap());
+    backend::create_user(&t.pool, "user", "user-password", false).await.unwrap();
+    assert!(!backend::admin_exists(&t.pool).await.unwrap(), "обычный пользователь — не админ");
+    backend::create_user(&t.pool, "boss", "boss-password", true).await.unwrap();
+    assert!(backend::admin_exists(&t.pool).await.unwrap());
+}

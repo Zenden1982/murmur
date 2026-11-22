@@ -4,7 +4,10 @@
 set -eu
 cd "$(dirname "$0")"
 [ -f .env ] || { echo "нет deploy/.env — скопируйте .env.example и запустите scripts/gen-keys.sh" >&2; exit 1; }
-set -a; . ./.env; set +a
+set -a
+# shellcheck disable=SC1091 # .env — файл установки, не исходник
+. ./.env
+set +a
 
 : "${LK_DOMAIN:?}" "${TURN_DOMAIN:?}"
 : "${LK_TCP_PORT:=7881}" "${LK_UDP_PORT:=7882}" "${TURN_UDP_PORT:=3478}"

@@ -29,7 +29,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::sync::{broadcast, watch};
 
-pub use db::{backup, connect, create_invite, create_user};
+pub use db::{admin_exists, backup, connect, create_invite, create_user};
 pub use routes::router;
 
 use config::LiveKitConfig;

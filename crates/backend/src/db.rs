@@ -103,6 +103,12 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(d) if d.is_unique_violation())
 }
 
+/// Есть ли хоть один администратор (CLI: `backend admin-exists`, установщик — чтобы не создавать второго).
+pub async fn admin_exists(pool: &SqlitePool) -> anyhow::Result<bool> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin = 1").fetch_one(pool).await?;
+    Ok(n > 0)
+}
+
 /// Создать пользователя напрямую (CLI: `backend create-admin`).
 pub async fn create_user(
     pool: &SqlitePool,

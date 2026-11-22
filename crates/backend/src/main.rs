@@ -34,6 +34,11 @@ enum Cmd {
         #[arg(long, env = "DATABASE_URL", default_value = "sqlite://data/app.db")]
         database_url: String,
     },
+    /// Есть ли администратор: код выхода 0 — есть, 1 — нет (для установщика).
+    AdminExists {
+        #[arg(long, env = "DATABASE_URL", default_value = "sqlite://data/app.db")]
+        database_url: String,
+    },
     /// Выпустить инвайт-код от имени администратора (первый админ, если --by не задан).
     CreateInvite {
         #[arg(long, default_value_t = 1)]
@@ -76,6 +81,12 @@ async fn main() -> anyhow::Result<()> {
             backend::backup(&pool, &out).await?;
             println!("Копия базы: {}", out.display());
             Ok(())
+        }
+        Some(Cmd::AdminExists { database_url }) => {
+            let pool = backend::connect(&database_url).await?;
+            let yes = backend::admin_exists(&pool).await?;
+            println!("{}", if yes { "есть" } else { "нет" });
+            std::process::exit(if yes { 0 } else { 1 });
         }
         Some(Cmd::CreateInvite {
             uses,
