@@ -893,3 +893,218 @@ async fn releases_version_and_download() {
     let (st, _) = t.call(Method::GET, "/version", None, None).await;
     assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+
+// ------------------------------------------------------------ обновления с официального сервера (upstream)
+
+mod upstream {
+    use super::common::*;
+    use axum::{
+        Router,
+        http::{Method, StatusCode, header},
+        response::IntoResponse,
+        routing::get,
+    };
+    use backend::releases::Upstream;
+    use serde_json::{Value, json};
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    #[derive(Clone)]
+    enum Resp {
+        Json(Value),
+        Status(u16),
+        Body(Vec<u8>),
+        Hang,
+    }
+
+    #[derive(Clone)]
+    struct Fake {
+        resp: Arc<Mutex<Resp>>,
+        hits: Arc<AtomicUsize>,
+        base: String,
+    }
+
+    impl Fake {
+        fn set(&self, r: Resp) {
+            *self.resp.lock().unwrap() = r;
+        }
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Настоящий HTTP-сервер на 127.0.0.1 — «официальный сервер» с /version.
+    async fn fake() -> Fake {
+        let f = Fake {
+            resp: Arc::new(Mutex::new(Resp::Status(404))),
+            hits: Arc::new(AtomicUsize::new(0)),
+            base: String::new(),
+        };
+        let st = f.clone();
+        let app = Router::new().route(
+            "/version",
+            get(move || {
+                let st = st.clone();
+                async move {
+                    st.hits.fetch_add(1, Ordering::SeqCst);
+                    let r = st.resp.lock().unwrap().clone();
+                    match r {
+                        Resp::Json(v) => axum::Json(v).into_response(),
+                        Resp::Status(s) => StatusCode::from_u16(s).unwrap().into_response(),
+                        Resp::Body(b) => b.into_response(),
+                        Resp::Hang => {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            StatusCode::OK.into_response()
+                        }
+                    }
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        Fake { base: format!("http://{addr}"), ..f }
+    }
+
+    fn release(version: &str, min_server: Option<&str>) -> Value {
+        let mut v = json!({
+            "version": version,
+            "notes": "новое",
+            "file": format!("murmur-{version}.exe"),
+            "sha256": "0".repeat(64),
+            "size": 10,
+            "installer": format!("murmur-setup-{version}.exe"),
+        });
+        if let Some(m) = min_server {
+            v["min_server"] = json!(m);
+        }
+        v
+    }
+
+    fn up(f: &Fake) -> Upstream {
+        Upstream::new(&f.base, "0.3.13").with_timings(
+            Duration::from_secs(300),
+            Duration::from_secs(86400),
+            Duration::from_millis(500),
+        )
+    }
+
+    #[tokio::test]
+    async fn upstream_relays_version() {
+        let f = fake().await;
+        f.set(Resp::Json(release("0.3.14", None)));
+        let t = setup_with_upstream(up(&f)).await;
+        let (st, v) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["version"], "0.3.14");
+        let (st, _) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(f.hits(), 1, "второй запрос — из кеша");
+    }
+
+    #[tokio::test]
+    async fn upstream_local_wins() {
+        let f = fake().await;
+        f.set(Resp::Json(release("0.3.14", None)));
+        let t = setup_with_upstream(up(&f)).await;
+        let dir = t.uploads.join("releases");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("latest.json"), release("0.3.10", None).to_string()).unwrap();
+        let (st, v) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v["version"], "0.3.10");
+        assert_eq!(f.hits(), 0);
+    }
+
+    #[tokio::test]
+    async fn upstream_incompatible_hidden() {
+        let f = fake().await;
+        f.set(Resp::Json(release("0.3.14", Some("99.0.0"))));
+        let t = setup_with_upstream(up(&f)).await;
+        let (st, _) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        f.set(Resp::Json(release("0.3.14", Some("0.3.13"))));
+        let t = setup_with_upstream(up(&f)).await;
+        let (st, _) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn upstream_garbage_is_not_found() {
+        let f = fake().await;
+        for bad in [
+            Resp::Body(b"<html>maintenance</html>".to_vec()),
+            Resp::Body(vec![b'{'; 2 * 1024 * 1024]),
+            Resp::Status(500),
+            Resp::Json(json!({"version": "0.3.14", "file": "../x", "sha256": "0", "size": 1})),
+        ] {
+            f.set(bad);
+            let t = setup_with_upstream(up(&f)).await;
+            let (st, _) = t.call(Method::GET, "/version", None, None).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_timeout_uses_stale_cache() {
+        let f = fake().await;
+        f.set(Resp::Json(release("0.3.14", None)));
+        let stale = Upstream::new(&f.base, "0.3.13").with_timings(
+            Duration::ZERO,
+            Duration::from_secs(86400),
+            Duration::from_millis(300),
+        );
+        let t = setup_with_upstream(stale).await;
+        let (st, _) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        f.set(Resp::Hang);
+        let started = std::time::Instant::now();
+        let (st, v) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::OK, "старый кеш");
+        assert_eq!(v["version"], "0.3.14");
+        assert!(started.elapsed() < Duration::from_secs(5), "не висим дольше таймаута");
+
+        // кеш слишком старый — «обновлений нет»
+        f.set(Resp::Json(release("0.3.14", None)));
+        let no_stale = Upstream::new(&f.base, "0.3.13").with_timings(Duration::ZERO, Duration::ZERO, Duration::from_millis(300));
+        let t = setup_with_upstream(no_stale).await;
+        let (st, _) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        f.set(Resp::Hang);
+        let (st, _) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn upstream_download_redirects() {
+        let f = fake().await;
+        let t = setup_with_upstream(up(&f)).await;
+        let (st, _, h, _) = t.call_raw(Method::GET, "/download/murmur-9.9.9.exe", None, vec![]).await;
+        assert_eq!(st, StatusCode::FOUND);
+        assert_eq!(h[header::LOCATION], format!("{}/download/murmur-9.9.9.exe", f.base));
+        for bad in ["/download/..%2Fx", "/download/.hidden", "/download/a%5Cb"] {
+            let (st, _, _, _) = t.call_raw(Method::GET, bad, None, vec![]).await;
+            assert!(st == StatusCode::NOT_FOUND || st == StatusCode::BAD_REQUEST, "{bad}: {st}");
+        }
+        // свой файл по-прежнему отдаётся сам
+        let dir = t.uploads.join("releases");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("murmur-0.3.10.exe"), b"MZ-local").unwrap();
+        let (st, _, _, b) = t.call_raw(Method::GET, "/download/murmur-0.3.10.exe", None, vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(b, b"MZ-local");
+    }
+
+    #[tokio::test]
+    async fn upstream_disabled_keeps_404() {
+        let t = setup().await;
+        let (st, _, _, _) = t.call_raw(Method::GET, "/download/murmur-9.9.9.exe", None, vec![]).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+}

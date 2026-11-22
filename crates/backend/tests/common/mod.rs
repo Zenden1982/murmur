@@ -31,6 +31,15 @@ pub struct T {
 }
 
 pub async fn setup_with_limit(limit: u32) -> T {
+    setup_inner(limit, None).await
+}
+
+/// Сервер с «upstream обновлений» (официальный сервер) — см. releases::Upstream.
+pub async fn setup_with_upstream(up: backend::releases::Upstream) -> T {
+    setup_inner(1000, Some(up)).await
+}
+
+async fn setup_inner(limit: u32, upstream: Option<backend::releases::Upstream>) -> T {
     let opts: SqliteConnectOptions = "sqlite::memory:".parse().unwrap();
     // одно соединение — одна in-memory база на тест
     let pool = SqlitePoolOptions::new()
@@ -59,7 +68,10 @@ pub async fn setup_with_limit(limit: u32) -> T {
         uploads.join("releases"),
     );
     let rooms = Arc::new(MockRooms::default());
-    let state = state.with_rooms(rooms.clone());
+    let mut state = state.with_rooms(rooms.clone());
+    if let Some(up) = upstream {
+        state = state.with_upstream(up);
+    }
     T {
         rooms,
         app: backend::router(state.clone()),

@@ -19,6 +19,11 @@ pub struct Config {
     #[arg(long, env = "RELEASES_DIR", default_value = "data/releases")]
     pub releases_dir: std::path::PathBuf,
 
+    /// Откуда брать обновления клиента, если своих выпусков нет (`latest.json` в RELEASES_DIR):
+    /// официальный сервер Murmur. Пустая строка — выключено (клиентам «обновлений нет»).
+    #[arg(long, env = "UPDATES_UPSTREAM", default_value = "https://api.murmurchat.ru")]
+    pub updates_upstream: String,
+
     #[command(flatten)]
     pub livekit: LiveKitConfig,
 

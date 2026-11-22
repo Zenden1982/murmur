@@ -128,7 +128,11 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         cfg.uploads_dir.clone(),
         cfg.releases_dir.clone(),
     );
-    let state = state.with_rooms(std::sync::Arc::new(backend::voice::LiveKitRooms::new(&cfg.livekit_api_url, &cfg.livekit)));
+    let mut state = state.with_rooms(std::sync::Arc::new(backend::voice::LiveKitRooms::new(&cfg.livekit_api_url, &cfg.livekit)));
+    if let Some(up) = backend::releases::Upstream::from_config(&cfg.updates_upstream, env!("CARGO_PKG_VERSION")) {
+        tracing::info!(upstream = %up.base(), "обновления клиента — с официального сервера, если своих нет");
+        state = state.with_upstream(up);
+    }
     backend::chat::spawn_janitor(state.clone());
     backend::voice::spawn_reconciler(state.clone());
     let app = backend::router(state.clone());

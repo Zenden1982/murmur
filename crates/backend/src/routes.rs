@@ -18,7 +18,9 @@ use crate::{
 };
 
 pub fn router(state: AppState) -> Router {
-    let downloads = ServeDir::new(&state.inner.releases_dir).precompressed_gzip();
+    let downloads = ServeDir::new(&state.inner.releases_dir)
+        .precompressed_gzip()
+        .fallback(get(releases::download_fallback).with_state(state.clone()));
     Router::new()
         .route("/health", get(health))
         .route("/version", get(releases::version))

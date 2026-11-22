@@ -20,7 +20,7 @@ mod servers;
 pub mod voice;
 mod extract;
 pub(crate) mod perm;
-mod releases;
+pub mod releases;
 
 pub use extract::ClientAddr;
 mod routes;
@@ -67,6 +67,8 @@ pub struct Inner {
     pub releases_dir: PathBuf,
     /// События для `GET /events` (каждое — со своей аудиторией).
     pub events: broadcast::Sender<events::Scoped>,
+    /// Официальный сервер, с которого берутся обновления клиента, если своих выпусков нет.
+    pub upstream: Option<releases::Upstream>,
     /// Комнаты LiveKit (RoomService); по умолчанию — заглушка.
     pub rooms: Arc<dyn voice::Rooms>,
     /// Кто сейчас в голосовых каналах.
@@ -116,6 +118,7 @@ impl AppState {
                 uploads_dir,
                 releases_dir,
                 events: broadcast::channel(256).0,
+                upstream: None,
                 rooms: Arc::new(voice::NoRooms),
                 presence: voice::Presence::default(),
                 online: friends::Online::default(),
@@ -123,6 +126,12 @@ impl AppState {
                 shutdown: watch::channel(false).0,
             }),
         }
+    }
+
+    /// Подключить upstream обновлений (сразу после создания состояния).
+    pub fn with_upstream(mut self, up: releases::Upstream) -> Self {
+        Arc::get_mut(&mut self.inner).expect("with_upstream до клонирования состояния").upstream = Some(up);
+        self
     }
 
     /// Подключить RoomService (сразу после создания состояния).
