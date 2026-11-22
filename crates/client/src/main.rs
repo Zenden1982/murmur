@@ -19,6 +19,7 @@ mod frame;
 mod friends;
 #[cfg(debug_assertions)]
 mod gallery;
+mod gate;
 mod kit;
 mod layers;
 mod legacy;
