@@ -169,7 +169,7 @@ pub fn render_step(job: &RenderJob, step: usize) -> Result<Vec<u8>, String> {
         for (i, f) in gif_frames(&src.bytes)?.enumerate() {
             let f = f.map_err(|_| "GIF повреждён.".to_string())?;
             let (n, d) = f.delay().numer_denom_ms();
-            let ms = if d == 0 { 0 } else { n / d };
+            let ms = n.checked_div(d).unwrap_or(0);
             if i % step == 0 {
                 flush(pending.take(), &mut enc)?;
                 pending = Some((cut(&DynamicImage::ImageRgba8(f.into_buffer()), &job.st, job.shape), ms));

@@ -31,6 +31,7 @@ mod metrics;
 mod mictest;
 mod model;
 mod people;
+mod profile_card;
 mod picker;
 mod server_settings;
 mod servers_ui;

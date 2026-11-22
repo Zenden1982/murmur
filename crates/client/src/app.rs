@@ -21,6 +21,7 @@ use crate::desktop::{self, Window};
 use crate::tray::Tray;
 use crate::update::{self, Updater};
 use crate::mictest::{self, MicTest};
+use crate::profile_card;
 use crate::people::{self, People};
 use crate::picker::{self, Picker};
 use crate::ptt::{self, Ptt};
@@ -47,6 +48,8 @@ enum Msg {
     /// Профиль сохранён (`Ok(None)` — выбор файла отменён).
     Profile(Result<Option<User>, String>),
     /// Картинка для аватара выбрана — открыть обрезку.
+    /// Поле профиля сохранено (0 — имя, 1 — статус, 2 — о себе).
+    ProfileField(usize, Result<User, String>),
     /// Картинка профиля выбрана: исходник и форма (аватар/баннер).
     AvatarPicked(Result<Option<crate::crop::Source>, String>, crate::crop::Shape),
     /// Установщик Murmur скачан (переход со старой установки).
@@ -240,6 +243,11 @@ pub struct App {
     last_call: Option<i64>,
     /// Настройки → Профиль: поле имени, идёт сохранение, ошибка.
     profile_name: String,
+    /// Настройки → Профиль: свой статус.
+    profile_status: String,
+    /// Автосохранение полей (имя, статус, о себе) и индикатор у заголовка.
+    profile_saves: [crate::autosave::Autosave; 3],
+    profile_save_state: crate::autosave::SaveState,
     profile_busy: bool,
     profile_error: Option<String>,
     view: View,
@@ -413,6 +421,9 @@ impl App {
             ring_at: None,
             last_call: None,
             profile_name: String::new(),
+            profile_status: String::new(),
+            profile_saves: Default::default(),
+            profile_save_state: Default::default(),
             profile_busy: false,
             profile_error: None,
             view: View::Voice,
@@ -636,8 +647,14 @@ impl App {
 
     fn set_me(&mut self, user: User) {
         self.people.learn(people::public(&user));
-        self.profile_name = user.display_name.clone().unwrap_or_default();
-        self.profile_about = user.about.clone().unwrap_or_default();
+        // поля профиля — только при входе (иначе ответ на загрузку аватара затёр бы то, что сейчас печатают)
+        if self.me.as_ref().map(|m| m.id) != Some(user.id) {
+            self.profile_name = user.display_name.clone().unwrap_or_default();
+            self.profile_status = user.status.clone().unwrap_or_default();
+            self.profile_about = user.about.clone().unwrap_or_default();
+            self.profile_saves = Default::default();
+            self.profile_save_state = Default::default();
+        }
         self.model.me = Some(user.id);
         self.chat.set_me(user.id);
         self.chat.set_recent_emoji(self.settings.recent_emoji.clone());
@@ -679,6 +696,23 @@ impl App {
                         self.screen = Screen::Login;
                     } else {
                         self.boot_error = Some(e.message);
+                    }
+                }
+                Msg::ProfileField(i, res) => {
+                    let ok = res.is_ok();
+                    self.profile_saves[i].done(ok);
+                    match res {
+                        Ok(user) => {
+                            self.members.forget(user.id);
+                            self.set_me(user);
+                        }
+                        Err(e) => {
+                            log::warn!("профиль: не сохранилось поле {i}: {e}");
+                            self.profile_save_state = crate::autosave::SaveState::Failed;
+                        }
+                    }
+                    if ok && !self.profile_saves.iter_mut().any(|s| s.flush()) {
+                        self.profile_save_state = crate::autosave::SaveState::Saved;
                     }
                 }
                 Msg::Profile(res) => {
@@ -3320,63 +3354,117 @@ impl App {
         self.voice.send(Cmd::RefreshDevices);
     }
 
-/// Настройки → Профиль: аватар и отображаемое имя.
+/// Настройки → Профиль: слева поля (сохраняются сами), справа предпросмотр карточки.
     fn ui_settings_profile(&mut self, ui: &mut Ui, w: f32) {
         let Some(me) = self.me.clone() else { return };
         let busy = self.profile_busy;
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(72.0, 72.0), Sense::hover());
-            self.people.paint(ui.painter(), rect.center(), 36.0, &people::public(&me), 0.0, false);
-            ui.add_space(16.0);
+        let p = t::p();
+        let two = w >= 600.0;
+        let left_w = if two { w - profile_card::CARD_W - 32.0 } else { w };
+        let now = ui.input(|i| i.time);
+        ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
-                ui.add_space(6.0);
-                ui.label(RichText::new(people::public(&me).shown_name()).font(t::bold(16.0)));
-                ui.label(RichText::new(format!("логин: {}", me.name)).size(13.0).color(t::p().text_muted));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if kit::button_ex(ui, kit::ButtonKind::Secondary, "Сменить аватар…", Some(egui_phosphor::fill::IMAGE), !busy).clicked() {
-                        self.pick_profile_image(crate::crop::Shape::Circle);
-                    }
-                    if me.avatar.is_some() && kit::button_ex(ui, kit::ButtonKind::Ghost, "Убрать", None, !busy).clicked() {
-                        self.profile_busy = true;
-                        self.profile_error = None;
-                        let api = self.api.clone();
-                        self.spawn(async move { api.delete_avatar().await.map(Some).map_err(|e| e.message) }, Msg::Profile);
-                    }
-                });
+                ui.set_width(left_w);
+                self.ui_profile_fields(ui, left_w, &me, busy, now);
             });
-        });
-        ui.add_space(12.0);
-        label(ui, "Отображаемое имя");
-        ui.horizontal(|ui| {
-            let r = ui.add_enabled(
-                !busy,
-                kit::text_field(&mut self.profile_name, w - 130.0).hint_text(format!("пусто — показывать логин «{}»", me.name)).char_limit(proto::limits::DISPLAY_NAME_MAX),
-            );
-            let changed = self.profile_name.trim() != me.display_name.as_deref().unwrap_or("");
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (kit::button_ex(ui, kit::ButtonKind::Primary, "Сохранить", None, !busy && changed).clicked() || (enter && changed)) && !busy {
-                self.profile_busy = true;
-                self.profile_error = None;
-                let (api, name) = (self.api.clone(), self.profile_name.trim().to_string());
-                self.spawn(async move { api.update_me(&name).await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+            if two {
+                ui.add_space(32.0);
+                ui.vertical(|ui| self.ui_profile_preview(ui, &me));
             }
         });
-        ui.add_space(14.0);
-        label(ui, "О себе");
-        ui.add_enabled(!busy, kit::text_area(&mut self.profile_about, w).hint_text("пару слов — видно в карточке профиля").char_limit(proto::limits::ABOUT_MAX).desired_rows(2));
-        let about_changed = self.profile_about.trim() != me.about.as_deref().unwrap_or("");
-        if about_changed && kit::button_ex(ui, kit::ButtonKind::Primary, "Сохранить «о себе»", None, !busy).clicked() {
-            self.profile_busy = true;
-            self.profile_error = None;
-            let (api, about) = (self.api.clone(), self.profile_about.trim().to_string());
-            self.spawn(async move { api.update_profile(Some(about), None).await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+        if !two {
+            ui.add_space(16.0);
+            self.ui_profile_preview(ui, &me);
         }
+        self.profile_autosave(now);
+        let _ = p;
+    }
+
+    fn ui_profile_preview(&mut self, ui: &mut Ui, me: &User) {
+        ui.label(RichText::new("ПРЕДПРОСМОТР").font(t::bold(12.0)).color(t::p().text_muted));
+        ui.add_space(6.0);
+        let name = self.profile_name.trim();
+        let mut u = people::public(me);
+        u.display_name = (!name.is_empty()).then(|| name.to_string());
+        let d = profile_card::CardData { user: &u, banner: me.banner.as_deref(), status: Some(self.profile_status.trim()), online: true };
+        let about = self.profile_about.trim().to_string();
+        profile_card::preview(ui, &self.people, &d, Some(&about));
+    }
+
+    fn ui_profile_fields(&mut self, ui: &mut Ui, w: f32, me: &User, busy: bool, now: f64) {
+        let p = t::p();
+        let caps = |ui: &mut Ui, text: &str, count: Option<(usize, usize)>| {
+            ui.horizontal(|ui| {
+                ui.set_width(w);
+                ui.label(RichText::new(text).font(t::bold(12.0)).color(p.text_muted));
+                if let Some((n, max)) = count {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{n}/{max}")).size(12.0).color(if n >= max { p.warning } else { p.text_faint }));
+                    });
+                }
+            });
+        };
+        let hint = |ui: &mut Ui, text: &str| {
+            ui.label(RichText::new(text).size(12.0).color(p.text_faint));
+        };
+        // аватар
+        caps(ui, "АВАТАР", None);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(56.0, 56.0), Sense::hover());
+            self.people.paint_playing(ui.painter(), rect.center(), 28.0, &people::public(me), 0.0, false);
+            ui.add_space(12.0);
+            if kit::button_ex(ui, kit::ButtonKind::Primary, "Сменить…", Some(egui_phosphor::fill::IMAGE), !busy).clicked() {
+                self.pick_profile_image(crate::crop::Shape::Circle);
+            }
+            if me.avatar.is_some() && kit::button_ex(ui, kit::ButtonKind::Secondary, "Убрать", None, !busy).clicked() {
+                self.profile_busy = true;
+                self.profile_error = None;
+                let api = self.api.clone();
+                self.spawn(async move { api.delete_avatar().await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+            }
+        });
+        hint(ui, "PNG, JPG или GIF до 2 МБ · обрежется в круг 256 px");
+        ui.add_space(12.0);
+        // баннер
+        caps(ui, "БАННЕР", None);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(70.0, 28.0), Sense::hover());
+            profile_card::paint_banner(ui.painter(), rect, CornerRadius::same(6), &self.people, &people::public(me), me.banner.as_deref());
+            ui.add_space(12.0);
+            if kit::button_ex(ui, kit::ButtonKind::Primary, "Сменить…", Some(egui_phosphor::fill::IMAGE), !busy).clicked() {
+                self.pick_profile_image(crate::crop::Shape::Banner);
+            }
+            if me.banner.is_some() && kit::button_ex(ui, kit::ButtonKind::Secondary, "Убрать", None, !busy).clicked() {
+                self.profile_busy = true;
+                self.profile_error = None;
+                let api = self.api.clone();
+                self.spawn(async move { api.delete_banner().await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+            }
+        });
+        hint(ui, "5:2, лучше 960×384 · GIF до 4 МБ");
         ui.add_space(14.0);
-        label(ui, "Активность");
+        // имя
+        caps(ui, "ОТОБРАЖАЕМОЕ ИМЯ", Some((self.profile_name.chars().count(), proto::limits::DISPLAY_NAME_MAX)));
+        let r = ui.add(kit::text_field(&mut self.profile_name, w).hint_text(&me.name).char_limit(proto::limits::DISPLAY_NAME_MAX));
+        self.profile_field_events(0, &r, now);
+        hint(ui, "Пусто — показывается логин");
+        ui.add_space(12.0);
+        // статус
+        caps(ui, "СВОЙ СТАТУС", Some((self.profile_status.chars().count(), proto::limits::STATUS_MAX)));
+        let r = ui.add(kit::text_field(&mut self.profile_status, w).hint_text("чем занят — видно в карточке и у друзей").char_limit(proto::limits::STATUS_MAX));
+        self.profile_field_events(1, &r, now);
+        ui.add_space(12.0);
+        // о себе
+        caps(ui, "О СЕБЕ", Some((self.profile_about.chars().count(), proto::limits::ABOUT_MAX)));
+        let r = ui.add(kit::text_area(&mut self.profile_about, w).hint_text("пару слов — видно в карточке профиля").char_limit(proto::limits::ABOUT_MAX).desired_rows(3));
+        self.profile_field_events(2, &r, now);
+        ui.add_space(14.0);
         let mut share = self.settings.share_activity;
         toggle_row(ui, w, |ui| {
-            ui.label("Показывать, во что я играю").on_hover_text("Steam и известные игры по списку процессов, раз в 20 с. На сервер уходит только название игры и время начала. Выключено — друзья видят только «в сети».");
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Показывать, во что я играю").strong());
+                ui.label(RichText::new("Выключите — друзья увидят только «в сети»").size(12.0).color(p.text_muted));
+            });
         }, |ui| {
             kit::switch(ui, &mut share);
         });
@@ -3384,12 +3472,13 @@ impl App {
             self.settings.share_activity = share;
             self.settings.save();
         }
-        ui.add_space(14.0);
-        label(ui, "Личные сообщения");
         let mut open = me.dm_from_servers;
         let mut toggled = false;
         toggle_row(ui, w, |ui| {
-            ui.label("Писать могут и люди с общих серверов").on_hover_text("Выключено — писать и звонить вам могут только друзья");
+            ui.vertical(|ui| {
+                ui.label(RichText::new("ЛС от людей с общих серверов").strong());
+                ui.label(RichText::new("Выключите — писать и звонить смогут только друзья").size(12.0).color(p.text_muted));
+            });
         }, |ui| {
             toggled = ui.add_enabled_ui(!busy, |ui| kit::switch(ui, &mut open).changed()).inner;
         });
@@ -3400,10 +3489,84 @@ impl App {
             self.spawn(async move { api.set_dm_from_servers(open).await.map(Some).map_err(|e| e.message) }, Msg::Profile);
         }
         if busy {
-            ui.label(RichText::new("Сохраняю…").size(13.0).color(t::p().text_muted));
+            ui.label(RichText::new("Сохраняю картинку…").size(13.0).color(p.text_muted));
         }
         if let Some(e) = &self.profile_error {
-            ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
+            ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.0).color(p.danger_text));
+        }
+    }
+
+    fn profile_field_events(&mut self, i: usize, r: &egui::Response, now: f64) {
+        if r.changed() {
+            self.profile_saves[i].edited(now);
+        }
+        if r.lost_focus() {
+            self.profile_saves[i].focus_lost();
+        }
+    }
+
+    /// Отправить поля, которым пора; пока что-то ждёт паузы — перерисовать позже.
+    fn profile_autosave(&mut self, now: f64) {
+        for i in 0..3 {
+            if self.profile_saves[i].due(now) {
+                self.profile_send(i);
+            }
+        }
+        if self.profile_saves.iter().any(|s| s.pending()) {
+            self.ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    /// Отправить поле профиля сейчас.
+    fn profile_send(&mut self, i: usize) {
+        self.profile_saves[i].sent();
+        self.profile_save_state = crate::autosave::SaveState::Saving;
+        let api = self.api.clone();
+        let (name, status, about) = (self.profile_name.trim().to_string(), self.profile_status.trim().to_string(), self.profile_about.trim().to_string());
+        self.spawn(
+            async move {
+                let r = match i {
+                    0 => api.update_me(&name).await,
+                    1 => api.update_profile(None, Some(status)).await,
+                    _ => api.update_profile(Some(about), None).await,
+                };
+                r.map_err(|e| e.message)
+            },
+            move |r| Msg::ProfileField(i, r),
+        );
+    }
+
+    /// Закрытие настроек: дослать несохранённое.
+    fn profile_flush(&mut self) {
+        for i in 0..3 {
+            if self.profile_saves[i].flush() {
+                self.profile_saves[i].retry();
+                self.profile_send(i);
+            }
+        }
+    }
+
+    /// Индикатор сохранения справа от заголовка «Профиль». «Повторить» — отправить несохранённое снова.
+    fn ui_profile_save_indicator(&mut self, ui: &mut Ui, row: Rect) {
+        use crate::autosave::SaveState;
+        let p = t::p();
+        let (text, color) = match self.profile_save_state {
+            SaveState::Idle => return,
+            SaveState::Saving => ("Сохраняем…".to_string(), p.text_muted),
+            SaveState::Saved => (format!("{}  Сохранено", ph::CHECK), p.text_muted),
+            SaveState::Failed => (format!("{}  Не удалось сохранить — повторить", ph::WARNING_CIRCLE), p.danger_text),
+        };
+        let galley = ui.painter().layout_no_wrap(text, t::font(12.5), color);
+        let r = Rect::from_min_size(pos2(row.right() - galley.size().x, row.center().y - galley.size().y / 2.0), galley.size());
+        ui.painter().galley(r.min, galley, color);
+        if self.profile_save_state == SaveState::Failed {
+            let resp = ui.interact(r, Id::new("profile-retry"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                for s in &mut self.profile_saves {
+                    s.retry();
+                }
+                self.profile_save_state = SaveState::Saving;
+            }
         }
     }
 
@@ -3729,7 +3892,12 @@ impl App {
             ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
                 let tab = self.set_tab;
                 let (_, _, title, sub, _) = SET_TABS.iter().find(|t| t.0 == tab).copied().unwrap_or(SET_TABS[0]);
-                ui.label(RichText::new(title).font(t::xbold(24.0)).color(p.text));
+                let title_r = ui.label(RichText::new(title).font(t::xbold(24.0)).color(p.text)).rect;
+                if tab == SetTab::Profile {
+                    let w = ui.available_width().min(680.0);
+                    let left_w = if w >= 600.0 { w - profile_card::CARD_W - 32.0 } else { w };
+                    self.ui_profile_save_indicator(ui, Rect::from_min_size(title_r.min, vec2(left_w, title_r.height())));
+                }
                 ui.add_space(2.0);
                 ui.label(RichText::new(sub).size(14.0).color(p.text_muted));
                 ui.add_space(18.0);
@@ -3757,6 +3925,7 @@ impl App {
             });
         });
         if close {
+            self.profile_flush();
             self.ptt.cancel_capture();
             self.settings_open = false;
             self.set_query.clear();

@@ -57,7 +57,7 @@ pub fn decode_frames(bytes: &[u8], w: u32, h: u32, round: bool) -> Result<(Vec<e
     for f in dec.into_frames().take(proto::limits::GIF_FRAMES_MAX) {
         let f = f.map_err(|e| e.to_string())?;
         let (n, d) = f.delay().numer_denom_ms();
-        delays.push(if d == 0 { 0 } else { n / d });
+        delays.push(n.checked_div(d).unwrap_or(0));
         let img = image::DynamicImage::ImageRgba8(f.into_buffer());
         let mut px = img.resize_to_fill(w, h, image::imageops::FilterType::Triangle).to_rgba8().into_raw();
         if round {

@@ -48,6 +48,11 @@ pub fn server_color(s: &Server) -> Option<Color32> {
 /// Узор: тонкие волны поверх заливки. `seed` сдвигает фазу (у разных серверов разные волны).
 pub fn paint_pattern(painter: &Painter, rect: Rect, name: &str, rounding: CornerRadius, seed: f32) {
     let (bg, line) = pattern_colors(name);
+    paint_waves(painter, rect, rounding, bg, line, seed);
+}
+
+/// Волны своими цветами (карточка профиля без своего баннера — в цвете аватара).
+pub fn paint_waves(painter: &Painter, rect: Rect, rounding: CornerRadius, bg: Color32, line: Color32, seed: f32) {
     painter.rect_filled(rect, rounding, bg);
     let clip = painter.with_clip_rect(rect.shrink(0.5));
     let n = 7;

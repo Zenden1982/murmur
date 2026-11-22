@@ -187,23 +187,18 @@ impl Members {
                 .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(60) })
                 .show(ui, |ui| {
                     ui.set_width(CARD_W);
-                    // мини-баннер: баннер сервера, иначе узор
-                    let (b, _) = ui.allocate_exact_size(vec2(CARD_W, 72.0), Sense::hover());
-                    let round = CornerRadius { nw: kit::R_CARD, ne: kit::R_CARD, sw: 0, se: 0 };
-                    match server.and_then(|s| model.server(s)) {
-                        Some(s) => crate::banner::paint_background(ui.painter(), b, s, people, round),
-                        None => crate::banner::paint_pattern(ui.painter(), b, proto::banner::WAVES, round, (uid % 5) as f32),
-                    }
-                    let av = pos2(b.left() + 50.0, b.bottom() + 4.0);
-                    ui.painter().circle_filled(av, 38.0, p.surface);
-                    people.paint(ui.painter(), av, 34.0, &u, 0.0, false);
                     let online = prof.and_then(|r| r.as_ref().ok()).map(|p| p.online).unwrap_or(false) || uid == me;
-                    crate::friends::status_dot(ui.painter(), av + vec2(25.0, 25.0), online, p.surface);
-                    ui.add_space(40.0);
-                    egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 14 }).show(ui, |ui| {
+                    let pr_ok = prof.and_then(|r| r.as_ref().ok());
+                    let d = crate::profile_card::CardData {
+                        user: &u,
+                        banner: pr_ok.and_then(|p| p.banner.as_deref()),
+                        status: pr_ok.and_then(|p| p.activity.as_ref()).and_then(|a| a.status.as_deref()),
+                        online,
+                    };
+                    crate::profile_card::head(ui, people, &d);
+                    crate::profile_card::body_frame().show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
-                        ui.label(RichText::new(u.shown_name()).font(t::xbold(18.0)).color(p.text));
-                        ui.label(RichText::new(&u.name).size(13.0).color(p.text_muted));
+                        crate::profile_card::identity(ui, &d);
                         match prof {
                             None => {
                                 ui.add_space(4.0);
@@ -213,20 +208,13 @@ impl Members {
                                 ui.label(RichText::new(e).size(12.5).color(p.danger_text));
                             }
                             Some(Ok(pr)) => {
-                                if let Some(a) = &pr.activity {
-                                    if let Some(st) = a.status.as_deref() {
-                                        crate::emoji::paint::label(ui, st, t::font(13.0), p.text, false);
-                                    }
-                                    if let Some(g) = a.game.as_deref() {
-                                        let since = a.since.map(|s| format!(" · {}", crate::activity::elapsed_text(s, now()))).unwrap_or_default();
-                                        ui.label(RichText::new(format!("{}  играет в {g}{since}", ph::GAME_CONTROLLER)).size(13.0).color(p.accent_text));
-                                    }
+                                if let Some(a) = &pr.activity
+                                    && let Some(g) = a.game.as_deref()
+                                {
+                                    let since = a.since.map(|s| format!(" · {}", crate::activity::elapsed_text(s, now()))).unwrap_or_default();
+                                    ui.label(RichText::new(format!("{}  играет в {g}{since}", ph::GAME_CONTROLLER)).size(13.0).color(p.accent_text));
                                 }
-                                if let Some(about) = pr.about.as_deref() {
-                                    ui.add_space(6.0);
-                                    ui.label(RichText::new("О СЕБЕ").font(t::bold(11.5)).color(p.text_muted));
-                                    ui.add(egui::Label::new(RichText::new(about).size(13.0).color(p.text)).wrap());
-                                }
+                                crate::profile_card::about(ui, pr.about.as_deref());
                             }
                         }
                         // роль на сервере
