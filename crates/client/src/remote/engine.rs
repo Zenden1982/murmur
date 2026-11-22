@@ -111,6 +111,8 @@ pub struct RcEngine {
     /// Указки у чужих трансляций: стример → (кто → x, y).
     seen_ptrs: HashMap<String, HashMap<String, (f32, f32)>>,
     seq: u64,
+    /// Последняя указка управляющего у нас (стример): двигаем курсор только при изменении — «пульс» раз в 1 с не отбирает мышь.
+    ctl_ptr_last: Option<(f32, f32)>,
     /// Последняя отправленная указка: (когда, стример, x, y).
     ptr_last: Option<(Instant, String, f32, f32)>,
     focus: bool,
@@ -140,6 +142,7 @@ impl RcEngine {
             seen_states: HashMap::new(),
             seen_ptrs: HashMap::new(),
             seq: 0,
+            ctl_ptr_last: None,
             ptr_last: None,
             focus: true,
             ptt_vk: 0,
@@ -236,6 +239,9 @@ impl RcEngine {
             }
         }
         self.host_ptrs.retain(|w, _| self.host.has_grant(w));
+        if self.host.controller().is_none() {
+            self.ctl_ptr_last = None;
+        }
         self.sync_hooks();
         self.sync_overlay();
         res
@@ -252,7 +258,8 @@ impl RcEngine {
 
     fn move_to(&mut self, x: f32, y: f32) -> Result<(i32, i32), Blocked> {
         let t = self.target.ok_or(Blocked::Outside)?;
-        let rect = inject::target_rect(&t).ok_or(Blocked::Outside)?;
+        // свёрнутое окно (или за пределами экрана) — курсор не трогаем, иначе его утащит в угол
+        let rect = inject::visible_rect(&t).ok_or(Blocked::Outside)?;
         let p = from_norm(rect, x, y);
         self.injector.mouse_to(to_absolute(p.0, p.1, inject::virtual_desk()));
         Ok(p)
@@ -262,7 +269,7 @@ impl RcEngine {
         let t = self.target.ok_or(Blocked::Outside)?;
         match *ev {
             InputEv::Button { b, down: true, x, y } => {
-                let rect = inject::target_rect(&t).ok_or(Blocked::Outside)?;
+                let rect = inject::visible_rect(&t).ok_or(Blocked::Outside)?;
                 let p = from_norm(rect, x, y);
                 inject::check_point(&t, p.0, p.1)?;
                 self.move_to(x, y)?;
@@ -270,13 +277,16 @@ impl RcEngine {
             }
             InputEv::Button { b, down: false, .. } => self.injector.button(b, false),
             InputEv::Wheel { dx, dy, x, y } => {
-                let rect = inject::target_rect(&t).ok_or(Blocked::Outside)?;
+                let rect = inject::visible_rect(&t).ok_or(Blocked::Outside)?;
                 let p = from_norm(rect, x, y);
                 inject::check_point(&t, p.0, p.1)?;
                 self.move_to(x, y)?;
                 self.injector.wheel(dx, dy);
             }
             InputEv::Key { sc, ext, down: true } => {
+                if super::keys::host_forbidden_key(sc, ext) {
+                    return Ok(());
+                }
                 inject::check_keys(&t)?;
                 self.injector.key(sc, ext, true);
             }
@@ -345,7 +355,11 @@ impl RcEngine {
             RcInbound::Ptr(p) => {
                 if self.host.accept_ptr(from, &p.s, now) {
                     self.host_ptrs.insert(from.to_string(), (p.x, p.y));
-                    if self.host.controller() == Some(from) && !self.host.paused(now) {
+                    if self.host.controller() == Some(from)
+                        && !self.host.paused(now)
+                        && self.ctl_ptr_last != Some((p.x, p.y))
+                    {
+                        self.ctl_ptr_last = Some((p.x, p.y));
                         let _ = self.move_to(p.x, p.y);
                     }
                     self.sync_overlay();
@@ -408,9 +422,13 @@ impl RcEngine {
     }
 
     pub fn take(&mut self, streamer: &str, on: bool) -> Vec<Outgoing> {
-        let Some(g) = self.guests.get_mut(streamer) else { return Vec::new() };
-        let m = g.take(on, Instant::now());
         let mut out = Vec::new();
+        // управлять можно только одним: взяли другого — прежнему «вернуть указку»
+        if on && let Some(other) = self.controlled().filter(|o| o != streamer) {
+            out.extend(self.take(&other, false));
+        }
+        let Some(g) = self.guests.get_mut(streamer) else { return out };
+        let m = g.take(on, Instant::now());
         if !on {
             out.extend(self.release_guest(streamer));
         }
@@ -460,6 +478,11 @@ impl RcEngine {
         let Some(s) = g.session().cloned() else { return Vec::new() };
         self.guest_held.apply(&ev);
         vec![self.in_msg(streamer, &s, ev)]
+    }
+
+    /// Перестали смотреть трансляцию — управление ею выключить.
+    pub fn stop_watching(&mut self, streamer: &str) -> Vec<Outgoing> {
+        if self.guests.get(streamer).is_some_and(|g| g.controlling()) { self.take(streamer, false) } else { Vec::new() }
     }
 
     fn controlled(&self) -> Option<String> {

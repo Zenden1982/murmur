@@ -91,6 +91,11 @@ pub fn route_key(vk: u32, ctrl: bool, alt: bool, ptt_vk: u32) -> KeyRoute {
     KeyRoute::Forward
 }
 
+/// Клавиши, которые стример не принимает никогда (даже если чужой клиент их пришлёт): Win слева/справа.
+pub fn host_forbidden_key(sc: u16, ext: bool) -> bool {
+    ext && matches!(sc, 0x5B | 0x5C)
+}
+
 /// Ctrl+Alt+Пробел — у стримера «забрать всё».
 pub fn is_panic_combo(vk: u32, ctrl: bool, alt: bool) -> bool {
     vk == VK_SPACE && ctrl && alt
@@ -137,6 +142,14 @@ mod tests {
         assert!(matches!(route_key(0x20, true, false, PTT), KeyRoute::Forward));
         // рация на кнопке мыши (0x05) не мешает клавиатуре
         assert!(matches!(route_key(0x41, false, false, 0x05), KeyRoute::Forward));
+    }
+
+    #[test]
+    fn host_drops_win_keys() {
+        assert!(host_forbidden_key(0x5B, true));
+        assert!(host_forbidden_key(0x5C, true));
+        assert!(!host_forbidden_key(0x5B, false));
+        assert!(!host_forbidden_key(0x1E, false));
     }
 
     #[test]

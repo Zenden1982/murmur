@@ -936,6 +936,9 @@ impl Engine {
     }
 
     fn drop_room(&mut self) {
+        // кик, бан, обрыв: управление сбросить (зажатое отпустить, хуки снять)
+        self.rc.leave_room();
+        self.publish_rc();
         self.stop_receivers();
         self.mic = None;
         if let Some(st) = &mut self.stream {
@@ -1900,6 +1903,8 @@ impl Engine {
         }
         log::info!("трансляция {identity}: {}", if on { "смотрим" } else { "не смотрим" });
         if !on {
+            let o = self.rc.stop_watching(identity);
+            self.rc_out(o);
             self.stop_receiver(identity);
             self.views.remove(identity);
             self.auto.remove(identity);

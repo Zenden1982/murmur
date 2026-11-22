@@ -269,8 +269,11 @@ impl HostAccess {
             .collect()
     }
 
+    /// Запросы в порядке поступления.
     pub fn pending(&self) -> Vec<(String, Level)> {
-        self.pending.iter().map(|(w, (l, _))| (w.clone(), *l)).collect()
+        let mut v: Vec<(&String, &(Level, Instant))> = self.pending.iter().collect();
+        v.sort_by_key(|(_, (_, at))| *at);
+        v.into_iter().map(|(w, (l, _))| (w.clone(), *l)).collect()
     }
 
     pub fn controller(&self) -> Option<&str> {
@@ -539,6 +542,15 @@ mod tests {
         // чужие Grant/State/Revoke от зрителя игнорируются
         assert!(h.on_rc("x", &RcMsg::Revoke, t0).is_empty());
         assert_eq!(h.controller(), Some("a"));
+    }
+
+    #[test]
+    fn pending_in_arrival_order() {
+        let t0 = Instant::now();
+        let mut h = HostAccess::default();
+        h.on_rc("zed", &RcMsg::Request { level: Level::Pointer }, t0);
+        h.on_rc("abe", &RcMsg::Request { level: Level::Pointer }, ms(t0, 10));
+        assert_eq!(h.pending()[0].0, "zed", "первым — кто раньше попросил, не по алфавиту");
     }
 
     #[test]

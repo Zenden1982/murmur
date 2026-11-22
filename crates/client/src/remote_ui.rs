@@ -246,6 +246,20 @@ pub fn guest_layer(ui: &mut Ui, rect: Rect, vr: Rect, streamer: &str, vs: &Voice
 pub fn host_dialog(ctx: &egui::Context, vs: &VoiceState, voice: &VoiceHandle) {
     let Some((who, level)) = vs.rc_host.pending.first().cloned() else { return };
     let name = name_of(vs, &who);
+    // кнопки оживают через 0,5 с после смены запроса — чтобы клик, начатый для другого запроса, не ответил этому
+    let seen_id = Id::new("rc-ask-seen");
+    let now = ctx.input(|i| i.time);
+    let shown_at = match ctx.data(|d| d.get_temp::<(String, f64)>(seen_id)) {
+        Some((w, at)) if w == who => at,
+        _ => {
+            ctx.data_mut(|d| d.insert_temp(seen_id, (who.clone(), now)));
+            now
+        }
+    };
+    let armed = now - shown_at >= 0.5;
+    if !armed {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
     egui::Area::new(Id::new("rc-ask"))
         .order(egui::Order::Foreground)
         .anchor(Align2::CENTER_TOP, vec2(0.0, 84.0))
@@ -278,7 +292,7 @@ pub fn host_dialog(ctx: &egui::Context, vs: &VoiceState, voice: &VoiceHandle) {
                         if kit::button(ui, ButtonKind::Ghost, "Отказать", None).clicked() {
                             answer = Some(None);
                         }
-                        if let Some(grant) = answer {
+                        if let Some(grant) = answer.filter(|_| armed) {
                             voice.send(Cmd::RcRespond { identity: who.clone(), grant });
                         }
                     });

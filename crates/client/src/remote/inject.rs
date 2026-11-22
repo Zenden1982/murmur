@@ -17,7 +17,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GW_OWNER, GetAncestor, GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowThreadProcessId, IsWindow,
+    GA_ROOT, GW_OWNER, GetAncestor, GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WindowFromPoint,
 };
 
@@ -96,6 +96,19 @@ pub fn target_rect(t: &Target) -> Option<ScreenRect> {
             (hr >= 0 && r.right > r.left && r.bottom > r.top).then(|| rect(r))
         }
     }
+}
+
+/// Как `target_rect`, но None для свёрнутого окна и для прямоугольника вне рабочего стола.
+pub fn visible_rect(t: &Target) -> Option<ScreenRect> {
+    if let Target::Window(h) = *t
+        && unsafe { IsIconic(h as HWND) } != 0
+    {
+        return None;
+    }
+    let r = target_rect(t)?;
+    let d = virtual_desk();
+    let overlaps = r.left < d.left + d.width && r.left + r.width > d.left && r.top < d.top + d.height && r.top + r.height > d.top;
+    overlaps.then_some(r)
 }
 
 fn pid_of(h: HWND) -> u32 {

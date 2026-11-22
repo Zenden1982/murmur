@@ -129,6 +129,30 @@ pub fn record_key(k: &Kbd) {
     }
 }
 
+fn foreground_is_ours() -> bool {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let w = unsafe { GetForegroundWindow() };
+    if w.is_null() {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(w, &mut pid) };
+    pid == unsafe { GetCurrentProcessId() }
+}
+
+/// Перед тем как следить за стримером: состояние клавиш — с нуля, по системе (до любого удалённого ввода),
+/// иначе рация могла бы «залипнуть» по старому состоянию.
+fn refresh_real_down() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    for (vk, slot) in REAL_DOWN.iter().enumerate() {
+        let down = vk != 0 && unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0;
+        slot.store(down, Ordering::Relaxed);
+    }
+    CTRL.store(REAL_DOWN[0x11].load(Ordering::Relaxed), Ordering::Relaxed);
+    ALT.store(REAL_DOWN[0x12].load(Ordering::Relaxed), Ordering::Relaxed);
+}
+
 /// Нажата ли клавиша/кнопка мыши по-настоящему (для рации, пока у стримера кто-то управляет).
 pub fn real_key_down(vk: u32) -> bool {
     REAL_DOWN.get(vk as usize).is_some_and(|s| s.load(Ordering::Relaxed))
@@ -151,7 +175,8 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         };
         let mods = Mods { ctrl: CTRL.load(Ordering::Relaxed), alt: ALT.load(Ordering::Relaxed) };
         record_key(&k);
-        let guest = GUEST_ON.load(Ordering::Relaxed).then(|| GUEST_PTT.load(Ordering::Relaxed));
+        // клавиши управляющего перехватываем, только пока в фокусе своё окно (флаг фокуса из интерфейса может опаздывать)
+        let guest = (GUEST_ON.load(Ordering::Relaxed) && foreground_is_ours()).then(|| GUEST_PTT.load(Ordering::Relaxed));
         let (ev, swallow) = classify_key(&k, mods, HOST_WATCH.load(Ordering::Relaxed), guest);
         if let Some(ev) = ev {
             emit(ev);
@@ -236,6 +261,8 @@ impl Hooks {
     pub fn set_host_watch(&self, on: bool) {
         if !on {
             LAST_MOUSE.store(i64::MIN, Ordering::Relaxed);
+        } else if !HOST_WATCH.load(Ordering::Relaxed) {
+            refresh_real_down();
         }
         HOST_WATCH.store(on, Ordering::Relaxed);
     }

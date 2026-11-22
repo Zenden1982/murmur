@@ -6,6 +6,8 @@ use super::proto::{Level, RcMsg, Session};
 
 /// Сколько ждать ответа стримера (у него тайм-аут 30 с).
 pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(35);
+/// Сколько после своего Take не верить State «не управляешь».
+pub const TAKE_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestPhase {
@@ -22,13 +24,15 @@ pub struct GuestAccess {
     /// Попросили управление кнопкой «Взять управление»: после разрешения сразу взять.
     want_take: bool,
     take_now: bool,
+    /// Когда сами взяли управление: `State`, отправленный стримером раньше, чем он получил Take, не выключает.
+    took_at: Option<Instant>,
     paused: bool,
     layout: String,
 }
 
 impl Default for GuestAccess {
     fn default() -> Self {
-        Self { phase: GuestPhase::Idle, asked_at: None, want_take: false, take_now: false, paused: false, layout: String::new() }
+        Self { phase: GuestPhase::Idle, asked_at: None, want_take: false, take_now: false, took_at: None, paused: false, layout: String::new() }
     }
 }
 
@@ -45,7 +49,13 @@ impl GuestAccess {
 
     /// Сообщение от стримера. Возвращает текст для уведомления.
     pub fn on_rc(&mut self, msg: &RcMsg, me: &str) -> Option<String> {
+        self.on_rc_at(msg, me, Instant::now())
+    }
+
+    pub fn on_rc_at(&mut self, msg: &RcMsg, me: &str, now: Instant) -> Option<String> {
         match msg {
+            // Разрешение — только на свой запрос (иначе чужой клиент «назначил» бы нам управление и читал клавиатуру).
+            RcMsg::Grant { .. } if !matches!(self.phase, GuestPhase::Requested { .. }) && self.asked_at.is_none() => None,
             RcMsg::Grant { level, session } => {
                 self.asked_at = None;
                 self.phase = GuestPhase::Granted { level: *level, session: session.clone(), controlling: false };
@@ -78,7 +88,12 @@ impl GuestAccess {
                     match entries.iter().find(|e| e.who == me) {
                         Some(e) => {
                             *level = e.level;
-                            *controlling = e.controlling;
+                            // State может только выключить управление (включает его лишь своё «Взять управление»);
+                            // сразу после Take — не выключает: это State, отправленный раньше, чем стример получил Take.
+                            let fresh_take = self.took_at.is_some_and(|t| now.duration_since(t) < TAKE_GRACE);
+                            if !e.controlling && !fresh_take {
+                                *controlling = false;
+                            }
                             self.paused = e.paused;
                         }
                         None => {
@@ -113,6 +128,7 @@ impl GuestAccess {
             return None;
         }
         *controlling = on;
+        self.took_at = on.then_some(now);
         Some(RcMsg::Take { session: session.clone(), on })
     }
 
@@ -264,7 +280,39 @@ mod tests {
         g.request(Level::Control, t0);
         g.on_rc(&RcMsg::Grant { level: Level::Control, session: s(1) }, "me");
         g.take(true, t0);
-        g.on_rc(&state("me", Level::Control, false), "me");
+        g.on_rc_at(&state("me", Level::Control, false), "me", t0 + Duration::from_secs(3));
+        assert!(!g.controlling());
+    }
+
+    #[test]
+    fn unrequested_grant_ignored() {
+        let mut g = GuestAccess::default();
+        g.on_rc(&RcMsg::Grant { level: Level::Control, session: s(1) }, "me");
+        assert_eq!(g.phase(), &GuestPhase::Idle);
+        assert_eq!(g.session(), None);
+    }
+
+    #[test]
+    fn state_cannot_start_control() {
+        let t0 = Instant::now();
+        let mut g = GuestAccess::default();
+        g.request(Level::Control, t0);
+        g.on_rc(&RcMsg::Grant { level: Level::Control, session: s(1) }, "me");
+        g.on_rc(&state("me", Level::Control, true), "me");
+        assert!(!g.controlling(), "только своё «Взять управление» включает управление");
+    }
+
+    #[test]
+    fn stale_state_after_take_ignored_briefly() {
+        let t0 = Instant::now();
+        let mut g = GuestAccess::default();
+        g.request(Level::Control, t0);
+        g.on_rc(&RcMsg::Grant { level: Level::Control, session: s(1) }, "me");
+        g.take(true, t0);
+        // State, отправленный до того, как стример получил Take, — не выключает
+        g.on_rc_at(&state("me", Level::Control, false), "me", t0 + Duration::from_millis(500));
+        assert!(g.controlling());
+        g.on_rc_at(&state("me", Level::Control, false), "me", t0 + Duration::from_millis(2500));
         assert!(!g.controlling());
     }
 
