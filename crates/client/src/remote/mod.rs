@@ -5,6 +5,8 @@
 // Временно: подключается к voice/app в задачах 8–9 — тогда убрать.
 #![allow(dead_code)]
 
+#[cfg(windows)]
+pub mod engine;
 pub mod geom;
 pub mod guest;
 pub mod host;

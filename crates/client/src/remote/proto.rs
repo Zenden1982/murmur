@@ -51,6 +51,8 @@ pub enum RcMsg {
     Revoke,
     Take { session: Session, on: bool },
     State { entries: Vec<StateEntry>, layout: String },
+    /// Стример → управляющему: почему ввод не выполнен («кликни в окно», «окно от администратора»).
+    Notice { text: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -153,6 +155,7 @@ mod tests {
                 entries: vec![StateEntry { who: "a".into(), level: Level::Control, controlling: true, paused: false }],
                 layout: "RU".into(),
             },
+            RcMsg::Notice { text: "кликни в окно".into() },
         ]
     }
 

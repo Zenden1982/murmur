@@ -23,6 +23,9 @@ use crate::layers::{self, AutoLayer, Layer, Quality};
 use crate::sounds::{self, Sound};
 use crate::stream::{self, CaptureEvent, Preset};
 use crate::video::VideoHub;
+use crate::remote::engine::{Outgoing, RcEngine, RcGuestView, RcHostView, RcPointerView};
+use crate::remote::hooks::HookEvent;
+use crate::remote::proto::{InputEv, Level};
 
 /// Задержка отпускания рации: хвост слова не обрезается.
 const PTT_RELEASE_DELAY: Duration = Duration::from_millis(180);
@@ -92,6 +95,24 @@ pub enum Cmd {
     Metrics(bool),
     /// Вся сырая статистика WebRTC — в лог (один раз, на следующем опросе).
     DumpStats,
+    /// Зритель: попросить у стримера указку/управление.
+    RcRequest { identity: String, level: Level },
+    /// Стример: ответ на запрос (None — отказ).
+    RcRespond { identity: String, grant: Option<Level> },
+    /// Стример: «Забрать» — весь доступ к своей трансляции.
+    RcRevokeAll,
+    /// Зритель: взять управление / вернуть указку.
+    RcTake { identity: String, on: bool },
+    /// Зритель: указка над трансляцией (0..1).
+    RcPointer { identity: String, x: f32, y: f32 },
+    /// Зритель в режиме управления: кнопка мыши/колесо над трансляцией.
+    RcInput { identity: String, ev: InputEv },
+    /// Окно Murmur в фокусе (клавиатура управляющего уходит другу только в фокусе).
+    RcGuestFocus(bool),
+    /// Клавиша рации (не пересылается при управлении).
+    RcPttKey(u32),
+    /// Событие хуков ввода (внутреннее).
+    RcHook(HookEvent),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +178,14 @@ pub struct VoiceState {
     pub stream_paused: HashMap<String, StreamPause>,
     /// Слои трансляций, которые смотрим (identity → выбор, текущий слой).
     pub stream_layers: HashMap<String, LayerInfo>,
+    /// Управление своей трансляцией: запросы, кто управляет.
+    pub rc_host: RcHostView,
+    /// Наш доступ к чужим трансляциям (стример → состояние).
+    pub rc_guest: HashMap<String, RcGuestView>,
+    /// Указки зрителей поверх чужих трансляций (стример → указки).
+    pub rc_pointers: HashMap<String, Vec<RcPointerView>>,
+    /// Уведомление об управлении («Друг отказал», «кликни в окно»).
+    pub rc_notice: Option<String>,
 }
 
 /// Качество просматриваемой трансляции (для интерфейса).
@@ -224,6 +253,10 @@ impl Default for VoiceState {
             metrics: None,
             stream_paused: HashMap::new(),
             stream_layers: HashMap::new(),
+            rc_host: RcHostView::default(),
+            rc_guest: HashMap::new(),
+            rc_pointers: HashMap::new(),
+            rc_notice: None,
         }
     }
 }
@@ -276,6 +309,16 @@ pub fn spawn(
     let (tx, rx) = mpsc::unbounded_channel();
     let (cap_tx, cap_rx) = mpsc::unbounded_channel();
     let state: Shared = Arc::new(Mutex::new(VoiceState { ptt_enabled: prefs.ptt_enabled, ..Default::default() }));
+    // Хуки ввода живут в своём потоке — их события приходят командами в тот же движок.
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel::<HookEvent>();
+    let fwd = tx.clone();
+    rt.spawn(async move {
+        while let Some(ev) = hook_rx.recv().await {
+            if fwd.send(Cmd::RcHook(ev)).is_err() {
+                break;
+            }
+        }
+    });
     let engine = Engine {
         api,
         state: state.clone(),
@@ -314,6 +357,7 @@ pub fn spawn(
         force_relay: std::env::var("AMADEUS_FORCE_RELAY").is_ok_and(|v| v == "1"),
         pause_sent: None,
         viewers: HashSet::new(),
+        rc: RcEngine::new(hook_tx),
     };
     rt.spawn(engine.run(rx, cap_rx));
     VoiceHandle { tx, state }
@@ -381,6 +425,8 @@ struct Engine {
     pause_sent: Option<(Option<StreamPause>, Instant)>,
     /// Кто смотрит свою трансляцию (по сообщениям зрителей).
     viewers: HashSet<String>,
+    /// Указка и управление трансляцией.
+    rc: RcEngine,
 }
 
 /// Идущая трансляция. Захват и источник живут дольше публикации: при переподключении
@@ -707,6 +753,39 @@ impl Engine {
                 }
             }
             Cmd::DumpStats => self.dump_stats = true,
+            Cmd::RcRequest { identity, level } => {
+                let o = self.rc.request(&identity, level);
+                self.rc_out(o);
+            }
+            Cmd::RcRespond { identity, grant } => {
+                let o = self.rc.respond(&identity, grant, &self.viewers);
+                self.rc_out(o);
+            }
+            Cmd::RcRevokeAll => {
+                let o = self.rc.revoke_all(&self.viewers);
+                self.rc_out(o);
+            }
+            Cmd::RcTake { identity, on } => {
+                let o = self.rc.take(&identity, on);
+                self.rc_out(o);
+            }
+            Cmd::RcPointer { identity, x, y } => {
+                let o = self.rc.pointer(&identity, x, y);
+                self.rc_out(o);
+            }
+            Cmd::RcInput { identity, ev } => {
+                let o = self.rc.input(&identity, ev);
+                self.rc_out(o);
+            }
+            Cmd::RcGuestFocus(f) => {
+                let o = self.rc.set_focus(f);
+                self.rc_out(o);
+            }
+            Cmd::RcPttKey(vk) => self.rc.set_ptt_key(vk),
+            Cmd::RcHook(ev) => {
+                let o = self.rc.hook(ev, &self.viewers);
+                self.rc_out(o);
+            }
             Cmd::Watch { identity, on } => self.set_watching(&identity, on),
             Cmd::SetStreamQuality { identity, quality } => {
                 log::info!("трансляция {identity}: качество {}", quality.label());
@@ -888,6 +967,8 @@ impl Engine {
             });
         }
         log::info!("выход: закрытие комнаты запущено");
+        self.rc.leave_room();
+        self.publish_rc();
         self.last_peers.clear();
         self.counters = Default::default();
         self.metrics_at = None;
@@ -930,6 +1011,16 @@ impl Engine {
                     self.pause_sent = None;
                     self.send_stream_state().await;
                 }
+            }
+            RoomEvent::DataReceived { payload, topic, participant, .. }
+                if crate::remote::engine::is_rc_topic(topic.as_deref()) =>
+            {
+                let (Some(p), Some(msg)) = (participant, crate::remote::engine::parse_inbound(topic.as_deref(), &payload)) else {
+                    return;
+                };
+                let me = self.my_identity();
+                let o = self.rc.inbound(p.identity().as_str(), &me, msg, &self.viewers);
+                self.rc_out(o);
             }
             RoomEvent::DataReceived { payload, topic, participant, .. }
                 if topic.as_deref() == Some(WATCH_TOPIC) =>
@@ -978,6 +1069,8 @@ impl Engine {
                     self.publish_viewers();
                 }
                 self.set_watching(p.identity().as_str(), false);
+                let o = self.rc.left(p.identity().as_str(), &self.viewers);
+                self.rc_out(o);
                 self.play(Sound::LeaveOther);
                 self.refresh_peers(false);
             }
@@ -1105,6 +1198,14 @@ impl Engine {
                 self.join(ch, attempt).await;
             }
         if self.room.is_some() {
+            let target = self.stream.as_ref().map(|s| match s.source_id {
+                SourceId::Monitor(h) => crate::remote::inject::Target::Monitor(h),
+                SourceId::Window(h) => crate::remote::inject::Target::Window(h),
+            });
+            let mut o = self.rc.set_target(target, &self.viewers);
+            self.rc.set_names(&self.last_peers);
+            o.extend(self.rc.tick(&self.viewers));
+            self.rc_out(o);
             self.refresh_peers(true);
             if self.pause_sent.is_some_and(|(p, at)| p.is_some() && at.elapsed() >= STREAM_STATE_RESEND) {
                 self.send_stream_state().await;
@@ -1806,6 +1907,48 @@ impl Engine {
                 if let Err(e) = lp.publish_data(packet).await {
                     log::warn!("сообщение стримеру: {e}");
                 }
+            });
+        }
+    }
+
+    fn my_identity(&self) -> String {
+        self.room.as_ref().map(|(r, _)| r.local_participant().identity().as_str().to_string()).unwrap_or_default()
+    }
+
+    /// Отправить сообщения управления и обновить вид в интерфейсе.
+    fn rc_out(&self, outs: Vec<Outgoing>) {
+        if let Some((room, _)) = &self.room {
+            for o in outs {
+                let lp = room.local_participant();
+                let packet = livekit::DataPacket {
+                    payload: o.payload,
+                    topic: Some(o.topic.into()),
+                    reliable: o.reliable,
+                    destination_identities: o.to.into_iter().map(Into::into).collect(),
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = lp.publish_data(packet).await {
+                        log::warn!("управление: отправка: {e}");
+                    }
+                });
+            }
+        }
+        self.publish_rc();
+    }
+
+    fn publish_rc(&self) {
+        let (host, guest, ptrs) = (self.rc.host_view(), self.rc.guest_views(), self.rc.pointer_views());
+        let notice = self.rc.notice.as_ref().map(|(t, _)| t.clone());
+        let changed = {
+            let s = self.state.lock().unwrap();
+            s.rc_host != host || s.rc_guest != guest || s.rc_pointers != ptrs || s.rc_notice != notice
+        };
+        if changed {
+            self.set(|s| {
+                s.rc_host = host;
+                s.rc_guest = guest;
+                s.rc_pointers = ptrs;
+                s.rc_notice = notice;
             });
         }
     }
