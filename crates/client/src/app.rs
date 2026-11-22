@@ -47,6 +47,8 @@ enum Msg {
     Preview(String, Result<InvitePreview, String>),
     /// Профиль сохранён (`Ok(None)` — выбор файла отменён).
     Profile(Result<Option<User>, String>),
+    /// Аватар/баннер сохранён; подпись — если видео пришлось урезать.
+    ProfileImage(Result<Option<User>, String>, Option<String>),
     /// Картинка для аватара выбрана — открыть обрезку.
     /// Поле профиля сохранено (0 — имя, 1 — статус, 2 — о себе).
     ProfileField(usize, Result<User, String>),
@@ -250,6 +252,10 @@ pub struct App {
     profile_save_state: crate::autosave::SaveState,
     profile_busy: bool,
     profile_error: Option<String>,
+    /// Под картинками профиля: «Взяты первые 5 с…» (после видео).
+    profile_note: Option<String>,
+    /// Идёт сборка GIF из видео (другая подпись вместо «Сохраняю картинку…»).
+    profile_video: bool,
     view: View,
     /// Окно (HWND) — прятать в трей и показывать.
     window: Window,
@@ -426,6 +432,8 @@ impl App {
             profile_save_state: Default::default(),
             profile_busy: false,
             profile_error: None,
+            profile_note: None,
+            profile_video: false,
             view: View::Voice,
             window,
             rc_asked: 0,
@@ -720,11 +728,25 @@ impl App {
                         self.profile_save_state = crate::autosave::SaveState::Saved;
                     }
                 }
+                Msg::ProfileImage(res, note) => {
+                    self.profile_busy = false;
+                    self.profile_video = false;
+                    match res {
+                        Ok(Some(user)) => {
+                            self.profile_error = None;
+                            self.profile_note = note;
+                            self.set_me(user);
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.profile_error = Some(e),
+                    }
+                }
                 Msg::Profile(res) => {
                     self.profile_busy = false;
                     match res {
                         Ok(Some(user)) => {
                             self.profile_error = None;
+                            self.profile_note = None;
                             self.set_me(user);
                         }
                         Ok(None) => {}
@@ -3430,7 +3452,7 @@ impl App {
                 self.spawn(async move { api.delete_avatar().await.map(Some).map_err(|e| e.message) }, Msg::Profile);
             }
         });
-        hint(ui, "PNG, JPG или GIF до 2 МБ · обрежется в круг 256 px");
+        hint(ui, "PNG, JPG, GIF или видео · итог до 2 МБ · обрежется в круг 256 px");
         ui.add_space(12.0);
         // баннер
         caps(ui, "БАННЕР", None);
@@ -3448,7 +3470,7 @@ impl App {
                 self.spawn(async move { api.delete_banner().await.map(Some).map_err(|e| e.message) }, Msg::Profile);
             }
         });
-        hint(ui, "5:2, лучше 960×384 · GIF до 4 МБ");
+        hint(ui, "5:2, лучше 960×384 · GIF или видео · итог до 4 МБ");
         ui.add_space(14.0);
         // имя
         caps(ui, "ОТОБРАЖАЕМОЕ ИМЯ", Some((self.profile_name.chars().count(), proto::limits::DISPLAY_NAME_MAX)));
@@ -3496,7 +3518,10 @@ impl App {
             self.spawn(async move { api.set_dm_from_servers(open).await.map(Some).map_err(|e| e.message) }, Msg::Profile);
         }
         if busy {
-            ui.label(RichText::new("Сохраняю картинку…").size(13.0).color(p.text_muted));
+            let text = if self.profile_video { "Собираю GIF из видео…" } else { "Сохраняю картинку…" };
+            ui.label(RichText::new(text).size(13.0).color(p.text_muted));
+        } else if let Some(n) = &self.profile_note {
+            ui.label(RichText::new(format!("{}  {n}", ph::INFO)).size(13.0).color(p.text_muted));
         }
         if let Some(e) = &self.profile_error {
             ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.0).color(p.danger_text));
@@ -3581,6 +3606,7 @@ impl App {
     fn pick_profile_image(&mut self, shape: crate::crop::Shape) {
         self.profile_busy = true;
         self.profile_error = None;
+        self.profile_note = None;
         let title = if shape == crate::crop::Shape::Banner { "Баннер" } else { "Аватар" };
         self.spawn(
             async move { tokio::task::spawn_blocking(move || servers_ui::pick_source(title)).await.map_err(|e| e.to_string())? },
@@ -3602,15 +3628,19 @@ impl App {
             }
             crate::crop::CropResult::Render(job) => {
                 self.avatar_crop = None;
+                self.profile_video = job.src.video.is_some();
                 let api = self.api.clone();
                 self.spawn(
                     async move {
                         let shape = job.shape;
-                        let bytes = tokio::task::spawn_blocking(move || crate::crop::render(&job)).await.map_err(|e| e.to_string())??;
-                        let res = if shape == crate::crop::Shape::Banner { api.put_banner(bytes).await } else { api.put_avatar(bytes).await };
-                        res.map(Some).map_err(|e| e.message)
+                        let r = match tokio::task::spawn_blocking(move || crate::crop::render(&job)).await.map_err(|e| e.to_string()).and_then(|r| r) {
+                            Ok(r) => r,
+                            Err(e) => return (Err(e), None),
+                        };
+                        let res = if shape == crate::crop::Shape::Banner { api.put_banner(r.bytes).await } else { api.put_avatar(r.bytes).await };
+                        (res.map(Some).map_err(|e| e.message), r.note)
                     },
-                    Msg::Profile,
+                    |(res, note)| Msg::ProfileImage(res, note),
                 );
             }
         }

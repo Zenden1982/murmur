@@ -64,6 +64,8 @@ pub struct Source {
     pub bytes: std::sync::Arc<Vec<u8>>,
     pub first: DynamicImage,
     pub frames: usize,
+    /// Видео (читается с диска при сборке; `bytes` пустые).
+    pub video: Option<std::path::PathBuf>,
 }
 
 /// Что собрать после «Готово» (тяжело — в фоне).
@@ -97,10 +99,87 @@ pub fn load_source(bytes: Vec<u8>) -> Result<Source, String> {
         }
         let first = gif_frames(&bytes)?.next().ok_or("GIF пустой.")?.map_err(|_| "GIF повреждён.".to_string())?;
         let first = shrink(DynamicImage::ImageRgba8(first.into_buffer()));
-        return Ok(Source { bytes: std::sync::Arc::new(bytes), first, frames });
+        return Ok(Source { bytes: std::sync::Arc::new(bytes), first, frames, video: None });
     }
     let first = load(&bytes)?;
-    Ok(Source { bytes: std::sync::Arc::new(bytes), first, frames: 1 })
+    Ok(Source { bytes: std::sync::Arc::new(bytes), first, frames: 1, video: None })
+}
+
+/// Видео → исходник для окна обрезки: первый кадр (сам ролик перечитывается при сборке). Блокирует.
+#[cfg(windows)]
+pub fn load_video(path: std::path::PathBuf) -> Result<Source, String> {
+    let len = std::fs::metadata(&path).map(|m| m.len()).map_err(|e| format!("Не читается файл: {e}"))?;
+    if len > crate::clip::VIDEO_SOURCE_MAX_BYTES {
+        return Err(format!("Видео больше {} МБ.", crate::clip::VIDEO_SOURCE_MAX_BYTES / 1024 / 1024));
+    }
+    let first = shrink(DynamicImage::ImageRgba8(crate::clip::first_frame(&path)?));
+    Ok(Source { bytes: std::sync::Arc::new(Vec::new()), first, frames: 2, video: Some(path) })
+}
+
+/// Итог сборки: байты для сервера и подпись, если видео пришлось урезать.
+pub struct Rendered {
+    pub bytes: Vec<u8>,
+    pub note: Option<String>,
+}
+
+/// Ступени подгонки видео под лимит (кадр/с, секунд) — от лучшего качества; первая, что влезла.
+pub const VIDEO_LADDER: [(f64, f64); 7] = [(15.0, 10.0), (10.0, 10.0), (7.0, 10.0), (10.0, 5.0), (10.0, 2.5), (7.0, 2.5), (5.0, 2.0)];
+
+/// Писатель с потолком: перевалил `max` — ошибка (сборка бросается сразу, а не после всех кадров).
+struct Capped {
+    out: Vec<u8>,
+    max: usize,
+    over: std::rc::Rc<std::cell::Cell<bool>>,
+}
+impl std::io::Write for Capped {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.out.len() + b.len() > self.max {
+            self.over.set(true);
+            return Err(std::io::Error::other("больше лимита"));
+        }
+        self.out.extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Одна попытка: видео → GIF с частотой `fps` не дольше `max_s`. None — не влезло в лимит.
+#[cfg(windows)]
+fn render_video_try(path: &std::path::Path, job: &RenderJob, fps: f64, max_s: f64, max: usize) -> Result<Option<(Vec<u8>, crate::clip::Walk)>, String> {
+    let over = std::rc::Rc::new(std::cell::Cell::new(false));
+    let mut cap = Capped { out: Vec::new(), max, over: over.clone() };
+    let walk = {
+        let mut enc = image::codecs::gif::GifEncoder::new_with_speed(&mut cap, 10);
+        enc.set_repeat(image::codecs::gif::Repeat::Infinite).map_err(|e| e.to_string())?;
+        let r = crate::clip::walk(path, fps, max_s, |img, ms| {
+            let frame = image::Frame::from_parts(cut(&shrink(DynamicImage::ImageRgba8(img)), &job.st, job.shape), 0, 0, image::Delay::from_numer_denom_ms(ms, 1));
+            match enc.encode_frame(frame) {
+                Ok(()) => Ok(true),
+                Err(_) if over.get() => Ok(false),
+                Err(e) => Err(e.to_string()),
+            }
+        })?;
+        drop(enc);
+        r
+    };
+    if over.get() {
+        return Ok(None);
+    }
+    Ok(Some((cap.out, walk)))
+}
+
+/// Подпись, если взято не всё видео или с меньшей частотой.
+fn video_note(fps: f64, max_s: f64, cut: bool, max_bytes: usize) -> Option<String> {
+    let secs = format!("{max_s:.1}").replace(".0", "").replace('.', ",");
+    let mb = max_bytes / 1024 / 1024;
+    match (fps >= 15.0, cut) {
+        (true, false) => None,
+        (true, true) => Some(format!("Взяты первые {secs} с ролика.")),
+        (false, false) => Some(format!("{fps} кадр/с — чтобы уложиться в {mb} МБ.")),
+        (false, true) => Some(format!("Взяты первые {secs} с, {fps} кадр/с — чтобы уложиться в {mb} МБ.")),
+    }
 }
 
 fn gif_frames(bytes: &[u8]) -> Result<image::Frames<'_>, String> {
@@ -182,13 +261,22 @@ pub fn render_step(job: &RenderJob, step: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Собрать итог в пределах лимита: шаг 1, если тяжело — 2, потом 4; иначе ошибка.
-pub fn render(job: &RenderJob) -> Result<Vec<u8>, String> {
+/// Собрать итог в пределах лимита: шаг 1, если тяжело — 2, потом 4; иначе ошибка. Видео — по ступеням VIDEO_LADDER.
+pub fn render(job: &RenderJob) -> Result<Rendered, String> {
     let (_, _, max) = job.shape.out();
+    #[cfg(windows)]
+    if let Some(path) = &job.src.video {
+        for (fps, max_s) in VIDEO_LADDER {
+            if let Some((bytes, w)) = render_video_try(path, job, fps, max_s, max)? {
+                return Ok(Rendered { bytes, note: video_note(fps, max_s, w.cut, max) });
+            }
+        }
+        return Err("Видео слишком тяжёлое — возьмите короче или меньше.".into());
+    }
     for step in [1, 2, 4] {
         let out = render_step(job, step)?;
         if out.len() <= max {
-            return Ok(out);
+            return Ok(Rendered { bytes: out, note: None });
         }
         if job.src.frames <= 1 {
             break;
@@ -298,6 +386,9 @@ impl CropDialog {
                     ui.label(RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS_PLUS).color(t::p().text_muted));
                 });
                 ui.label(RichText::new("Перетащите картинку, колесо — масштаб").size(12.5).color(t::p().text_muted));
+                if self.src.as_ref().is_some_and(|s| s.video.is_some()) {
+                    ui.label(RichText::new("Видео станет GIF (без звука)").size(12.5).color(t::p().text_muted));
+                }
             });
             ui.add_space(14.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -402,7 +493,7 @@ mod tests {
 
     #[test]
     fn gif_three_frames_to_avatar() {
-        let out = render(&job(gif_bytes(400, 300, &[5, 10, 15]), Shape::Circle)).unwrap();
+        let out = render(&job(gif_bytes(400, 300, &[5, 10, 15]), Shape::Circle)).unwrap().bytes;
         assert!(out.starts_with(b"GIF89a"));
         assert_eq!(imagesize::blob_size(&out).map(|d| (d.width, d.height)).unwrap(), (256, 256));
         assert_eq!(delays_of(&out), vec![5, 10, 15]);
@@ -412,7 +503,7 @@ mod tests {
     fn static_to_banner_png() {
         let mut png = std::io::Cursor::new(Vec::new());
         DynamicImage::ImageRgba8(RgbaImage::new(2000, 1000)).write_to(&mut png, image::ImageFormat::Png).unwrap();
-        let out = render(&job(png.into_inner(), Shape::Banner)).unwrap();
+        let out = render(&job(png.into_inner(), Shape::Banner)).unwrap().bytes;
         assert!(out.starts_with(b"\x89PNG"));
         assert_eq!(imagesize::blob_size(&out).map(|d| (d.width, d.height)).unwrap(), (960, 384));
     }
@@ -440,6 +531,60 @@ mod tests {
     fn source_too_big() {
         let e = load_source(vec![0; proto::limits::PROFILE_SOURCE_MAX_BYTES + 1]).err().unwrap();
         assert!(e.contains("20 МБ"), "{e}");
+    }
+
+    fn clip() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testdata/clip.mp4")
+    }
+
+    #[test]
+    fn video_to_avatar_gif() {
+        let src = load_video(clip()).unwrap();
+        assert_eq!((src.first.width(), src.first.height()), (320, 180));
+        let r = render(&RenderJob { src: std::sync::Arc::new(src), st: CropState::default(), shape: Shape::Circle }).unwrap();
+        assert!(r.bytes.starts_with(b"GIF89a"));
+        assert!(r.bytes.len() <= proto::limits::AVATAR_MAX_BYTES);
+        assert_eq!(imagesize::blob_size(&r.bytes).map(|d| (d.width, d.height)).unwrap(), (256, 256));
+        let d = delays_of(&r.bytes);
+        assert!((59..=61).contains(&d.len()), "4 с × 15 кадр/с: {}", d.len());
+        assert_eq!(r.note, None, "короткий лёгкий ролик — без подписи");
+    }
+
+    #[test]
+    fn video_over_limit_stops_early() {
+        let src = std::sync::Arc::new(load_video(clip()).unwrap());
+        let job = RenderJob { src, st: CropState::default(), shape: Shape::Banner };
+        let path = job.src.video.clone().unwrap();
+        // 20 КБ не хватит на 960×384 — None (обрыв), а не ошибка
+        assert!(render_video_try(&path, &job, 10.0, 10.0, 20 * 1024).unwrap().is_none());
+        let r = render_video_try(&path, &job, 10.0, 10.0, proto::limits::USER_BANNER_MAX_BYTES).unwrap().unwrap();
+        assert_eq!(imagesize::blob_size(&r.0).map(|d| (d.width, d.height)).unwrap(), (960, 384));
+        let e = load_video(std::env::temp_dir().join("нет-такого.mp4")).err().unwrap();
+        assert!(e.contains("Не читается"), "{e}");
+    }
+
+    /// Ручная проверка: VIDEO=путь cargo test -p client --release dump_video -- --ignored → %TEMP%/murmur-video-{avatar,banner}.gif
+    #[test]
+    #[ignore]
+    fn dump_video() {
+        let path = std::path::PathBuf::from(std::env::var("VIDEO").unwrap());
+        for (shape, name) in [(Shape::Circle, "avatar"), (Shape::Banner, "banner")] {
+            let src = std::sync::Arc::new(load_video(path.clone()).unwrap());
+            let t = std::time::Instant::now();
+            let r = render(&RenderJob { src, st: CropState::default(), shape });
+            let Ok(r) = r else { println!("{name}: {:?}, {:?}", r.err(), t.elapsed()); continue };
+            println!("{name}: {} КБ, {:?}, {:?}", r.bytes.len() / 1024, r.note, t.elapsed());
+            std::fs::write(std::env::temp_dir().join(format!("murmur-video-{name}.gif")), &r.bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn note_text() {
+        assert_eq!(video_note(15.0, 10.0, false, 2 << 20), None);
+        assert_eq!(video_note(15.0, 10.0, true, 2 << 20).unwrap(), "Взяты первые 10 с ролика.");
+        assert_eq!(video_note(10.0, 2.5, true, 4 << 20).unwrap(), "Взяты первые 2,5 с, 10 кадр/с — чтобы уложиться в 4 МБ.");
+        assert_eq!(video_note(7.0, 10.0, false, 4 << 20).unwrap(), "7 кадр/с — чтобы уложиться в 4 МБ.");
+        assert!(VIDEO_LADDER.iter().all(|(f, s)| (f * s) as usize <= proto::limits::GIF_FRAMES_MAX));
     }
 
     #[test]

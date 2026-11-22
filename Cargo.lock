@@ -1101,6 +1101,7 @@ dependencies = [
  "twemoji-assets",
  "unicode-segmentation",
  "webrtc-sys",
+ "windows",
  "windows-sys 0.61.2",
  "winresource",
 ]

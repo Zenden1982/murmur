@@ -135,11 +135,15 @@ pub fn pick_source(title: &str) -> Result<Option<crop::Source>, String> {
     let Some(path) = rfd::FileDialog::new()
         .set_title(title)
         .set_parent(&crate::desktop::main_window())
-        .add_filter("Картинки", &["png", "jpg", "jpeg", "gif", "webp"])
+        .add_filter("Картинки и видео", &["png", "jpg", "jpeg", "gif", "webp", "mp4", "m4v", "mov", "wmv", "webm"])
         .pick_file()
     else {
         return Ok(None);
     };
+    #[cfg(windows)]
+    if crate::clip::is_video(&path) {
+        return crop::load_video(path).map(Some);
+    }
     let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     if len > proto::limits::PROFILE_SOURCE_MAX_BYTES as u64 {
         return Err(format!("Файл больше {} МБ.", proto::limits::PROFILE_SOURCE_MAX_BYTES / 1024 / 1024));

@@ -130,6 +130,8 @@ unicode-segmentation = "1"
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.26"
+# Видео → GIF для профиля (Media Foundation; та же версия, что в capture-win).
+windows = { version = "0.62.2", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_Input_KeyboardAndMouse",

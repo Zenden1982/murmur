@@ -10,6 +10,8 @@ mod app;
 mod autosave;
 mod channels_ui;
 mod chat;
+#[cfg(windows)]
+mod clip;
 mod config;
 mod crash;
 mod crop;
