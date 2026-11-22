@@ -427,12 +427,19 @@ impl App {
             edited_at: None,
             reply_to: None,
             attachments: Vec::new(),
+            reactions: if id == 2 { vec![proto::Reaction { name: "fire".into(), users: vec![1, 2] }, proto::Reaction { name: "+1".into(), users: vec![3] }] } else { Vec::new() },
+            sticker: None,
         };
         self.chat.demo_seed(3, vec![
             msg(1, (2, "mayuri"), "Туттуру! Кто сегодня в катку?", 42),
             msg(2, (3, "kurisu"), "Я после пар, часов в восемь.", 40),
             msg(3, (1, "tester"), "Го в катку через 5 минут?", 2),
+            proto::Message { sticker: Some("cat-hello".into()), ..msg(4, (2, "mayuri"), "[стикер: Кот машет]", 1) },
         ]);
+        // Отладка (скриншоты): AMADEUS_OPEN_STICKERS=1 — открыть выбор стикеров.
+        if std::env::var_os("AMADEUS_OPEN_STICKERS").is_some() {
+            self.chat.debug_open_stickers();
+        }
         self.chat.demo_seed(4, Vec::new());
         if let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
             self.view = View::Text(id);
@@ -553,6 +560,7 @@ impl App {
         self.profile_name = user.display_name.clone().unwrap_or_default();
         self.profile_about = user.about.clone().unwrap_or_default();
         self.model.me = Some(user.id);
+        self.chat.set_me(user.id);
         self.me = Some(user);
     }
 

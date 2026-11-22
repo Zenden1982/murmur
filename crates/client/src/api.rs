@@ -310,6 +310,12 @@ impl Api {
         self.call::<(), _>(Method::POST, &format!("/friends/{id}/accept"), None).await
     }
 
+    /// Поставить/убрать свою реакцию на сообщение.
+    pub async fn react(&self, message_id: i64, name: &str, on: bool) -> ApiResult<()> {
+        let m = if on { Method::PUT } else { Method::DELETE };
+        self.call::<(), _>(m, &format!("/messages/{message_id}/reactions/{name}"), None).await
+    }
+
     /// Удалить из друзей / отклонить / отменить заявку.
     pub async fn remove_friend(&self, id: i64) -> ApiResult<()> {
         self.call::<(), _>(Method::DELETE, &format!("/friends/{id}"), None).await

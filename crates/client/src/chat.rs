@@ -70,6 +70,7 @@ enum OutState {
 struct Outgoing {
     local: u64,
     content: String,
+    sticker: Option<String>,
     images: Vec<PendingImage>,
     state: OutState,
 }
@@ -132,6 +133,12 @@ pub struct Chat {
     events_out: Vec<ServerEvent>,
     /// Высота нижней панели с полем ввода, измеренная в прошлом кадре (панель egui сама не сжимается).
     composer_h: f32,
+    /// Мой id (своя реакция подсвечена).
+    me_id: i64,
+    /// Открыт выбор реакции для сообщения.
+    react_menu: Option<i64>,
+    /// Открыт выбор стикера.
+    sticker_menu: bool,
     /// Отладка: шаги AMADEUS_CHAT_SCRIPT и время последнего шага.
     #[cfg(debug_assertions)]
     script: (std::collections::VecDeque<String>, f64),
@@ -162,6 +169,9 @@ impl Chat {
             users_in: Vec::new(),
             events_out: Vec::new(),
             composer_h: 64.0,
+            me_id: 0,
+            react_menu: None,
+            sticker_menu: false,
             #[cfg(debug_assertions)]
             script: (
                 std::env::var("AMADEUS_CHAT_SCRIPT").map(|s| s.split('|').map(str::to_string).collect()).unwrap_or_default(),
@@ -436,6 +446,11 @@ impl Chat {
                     merge(&mut log.msgs, vec![message]);
                 }
             }
+            ServerEvent::ReactionsChanged { channel_id, message_id, reactions } => {
+                if let Some(m) = self.logs.get_mut(&channel_id).and_then(|l| l.msgs.iter_mut().find(|m| m.id == message_id)) {
+                    m.reactions = reactions;
+                }
+            }
             ServerEvent::UserUpdated { user } => self.users_in.push(user),
             ServerEvent::MemberUpserted { member, .. } => self.users_in.push(member.user),
             // серверы, каналы, голос — забирает модель (take_events)
@@ -458,6 +473,7 @@ impl Chat {
         let out = Outgoing {
             local: self.next_local,
             content,
+            sticker: None,
             images: std::mem::take(&mut d.images),
             state: OutState::Sending,
         };
@@ -473,6 +489,7 @@ impl Chat {
     fn spawn_send(&self, channel: i64, out: &Outgoing) {
         let api = self.api.clone();
         let content = out.content.clone();
+        let sticker = out.sticker.clone();
         let files: Vec<Arc<Vec<u8>>> = out.images.iter().map(|i| i.bytes.clone()).collect();
         let local = out.local;
         self.spawn(
@@ -481,10 +498,44 @@ impl Chat {
                 for f in files {
                     attachments.push(api.upload((*f).clone()).await?.id);
                 }
-                api.send_message(channel, &SendMessageRequest { content, attachments }).await
+                api.send_message(channel, &SendMessageRequest { content, attachments, sticker }).await
             },
             move |res| Ev::Sent { channel, local, res },
         );
+    }
+
+    /// Отправить стикер (подпись — для старых клиентов).
+    fn send_sticker(&mut self, channel: i64, id: &str) {
+        let out = Outgoing { local: self.next_local, content: crate::reactions::fallback(id), sticker: Some(id.to_string()), images: Vec::new(), state: OutState::Sending };
+        self.next_local += 1;
+        self.spawn_send(channel, &out);
+        let log = self.logs.entry(channel).or_default();
+        log.outbox.push(out);
+        log.scroll_to_bottom = true;
+    }
+
+    pub fn debug_open_stickers(&mut self) {
+        self.sticker_menu = true;
+    }
+
+    pub fn set_me(&mut self, id: i64) {
+        self.me_id = id;
+    }
+
+    /// Своя реакция: сразу на экране, потом запрос (сервер пришлёт точный список событием).
+    fn react(&mut self, channel: i64, mid: i64, name: String, on: bool) {
+        if let Some(m) = self.logs.get_mut(&channel).and_then(|l| l.msgs.iter_mut().find(|m| m.id == mid)) {
+            crate::reactions::toggle(&mut m.reactions, &name, self.me_id, on);
+        }
+        let api = self.api.clone();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        self.rt.spawn(async move {
+            if let Err(e) = api.react(mid, &name, on).await {
+                let _ = tx.send(Ev::Notice(format!("Реакция не сохранилась: {}", err_text(&e))));
+                ctx.request_repaint();
+            }
+        });
     }
 
     fn retry(&mut self, channel: i64, local: u64) {
@@ -808,6 +859,10 @@ impl Chat {
             FeedAct::ReloadImage(id) => {
                 self.images.remove(&id);
             }
+            FeedAct::React { mid, name, on } => {
+                self.react_menu = None;
+                self.react(ch.id, mid, name, on);
+            }
         }
     }
 
@@ -834,13 +889,32 @@ impl Chat {
                         ui.label(RichText::new(time_label(m.created_at, true)).size(12.0).color(t::p().text_muted));
                     });
                 }
-                if !m.content.is_empty() {
+                let sticker = m.sticker.as_deref().and_then(crate::reactions::sticker_cat);
+                if !m.content.is_empty() && !(sticker.is_some() && crate::reactions::is_fallback(&m.content)) {
                     ui.add(egui::Label::new(RichText::new(&m.content).size(15.0).color(t::p().text)).wrap().selectable(true));
+                }
+                if let Some(cat) = sticker {
+                    let (r, _) = ui.allocate_exact_size(vec2(STICKER, STICKER), Sense::hover());
+                    kit::cat_figure(ui.painter(), r, cat);
                 }
                 for a in &m.attachments {
                     if let Some(x) = self.attachment_view(ui, a) {
                         act = Some(x);
                     }
+                }
+                if !m.reactions.is_empty() {
+                    ui.add_space(2.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+                        for r in &m.reactions {
+                            let Some(e) = crate::reactions::emoji(&r.name) else { continue };
+                            let mine = crate::reactions::mine(r, self.me_id);
+                            let who: Vec<String> = r.users.iter().map(|u| people.by_identity(&u.to_string()).map(|p| p.shown_name().to_string()).unwrap_or_else(|| format!("#{u}"))).collect();
+                            if reaction_chip(ui, e, r.users.len(), mine).on_hover_text(who.join(", ")).clicked() {
+                                act = Some(FeedAct::React { mid: m.id, name: r.name.clone(), on: !mine });
+                            }
+                        }
+                    });
                 }
             });
         });
@@ -848,6 +922,48 @@ impl Chat {
         let hovered = ui.rect_contains_pointer(row);
         if hovered {
             ui.painter().set(bg_idx, egui::Shape::rect_filled(row, CornerRadius::same(kit::R_ROW), t::p().row_hover));
+        }
+        // «добавить реакцию» — при наведении, справа сверху строки
+        let menu_open = self.react_menu == Some(m.id);
+        if hovered || menu_open {
+            let br = Rect::from_center_size(pos2(row.right() - 22.0, row.top() + 14.0), vec2(30.0, 24.0));
+            let resp = ui.interact(br, Id::new(("react-btn", m.id)), Sense::click());
+            ui.painter().rect_filled(br, CornerRadius::same(8), if resp.hovered() || menu_open { t::p().surface_2 } else { t::p().surface });
+            ui.painter().rect_stroke(br, CornerRadius::same(8), Stroke::new(1.0, t::p().border), StrokeKind::Inside);
+            ui.painter().text(br.center(), Align2::CENTER_CENTER, ph::SMILEY, t::font(16.0), if resp.hovered() { t::p().text } else { t::p().text_muted });
+            if resp.on_hover_text("Реакция").clicked() {
+                self.react_menu = if menu_open { None } else { Some(m.id) };
+            }
+            if self.react_menu == Some(m.id) {
+                let mine: Vec<&str> = m.reactions.iter().filter(|r| crate::reactions::mine(r, self.me_id)).map(|r| r.name.as_str()).collect();
+                let area = egui::Area::new(Id::new(("react-menu", m.id)))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(pos2(br.right() - 8.0 * 34.0 - 16.0, br.bottom() + 4.0))
+                    .show(ui.ctx(), |ui| {
+                        Frame::new().fill(t::p().surface).stroke(Stroke::new(1.0, t::p().border)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                            egui::Grid::new(("react-grid", m.id)).spacing(vec2(2.0, 2.0)).show(ui, |ui| {
+                                for (i, (name, e)) in proto::REACTIONS.iter().enumerate() {
+                                    let on = !mine.contains(name);
+                                    let (r, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+                                    if resp.hovered() || !on {
+                                        ui.painter().rect_filled(r, CornerRadius::same(6), if on { t::p().row_hover } else { t::p().accent_soft });
+                                    }
+                                    ui.painter().text(r.center(), Align2::CENTER_CENTER, *e, t::font(20.0), t::p().text);
+                                    if resp.clicked() {
+                                        act = Some(FeedAct::React { mid: m.id, name: name.to_string(), on });
+                                    }
+                                    if i % 8 == 7 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                        });
+                    });
+                // клик мимо — закрыть
+                if ui.input(|i| i.pointer.any_click()) && !area.response.hovered() && !ui.rect_contains_pointer(br) {
+                    self.react_menu = None;
+                }
+            }
         }
         let p = ui.painter();
         if !grouped {
@@ -912,6 +1028,10 @@ impl Chat {
     fn ui_composer(&mut self, ui: &mut Ui, ch: &Channel, id: Id) {
         let mut send = false;
         let mut pick = false;
+        let sticker_open = self.sticker_menu;
+        let mut toggle_stickers = false;
+        let mut sticker_anchor: Option<Rect> = None;
+        let mut sticker_pick: Option<&'static str> = None;
         let mut remove = None;
         let d = self.drafts.entry(ch.id).or_default();
         if let Some(e) = &d.error {
@@ -954,6 +1074,11 @@ impl Chat {
                     if kit::icon_button(ui, ph::PLUS_CIRCLE, kit::IconState::Normal, "Прикрепить картинку (или Ctrl+V, перетаскивание)").clicked() {
                         pick = true;
                     }
+                    let st = kit::icon_button(ui, ph::STICKER, if sticker_open { kit::IconState::Active } else { kit::IconState::Normal }, "Стикеры");
+                    if st.clicked() {
+                        toggle_stickers = true;
+                    }
+                    sticker_anchor = Some(st.rect);
                     let can_send = !d.text.trim().is_empty() || !d.images.is_empty();
                     let w = ui.available_width() - 40.0;
                     // Enter — отправить, Shift+Enter — новая строка
@@ -991,6 +1116,44 @@ impl Chat {
         if let Some(local) = remove {
             d.images.retain(|i| i.local != local);
             d.error = None;
+        }
+        if toggle_stickers {
+            self.sticker_menu = !self.sticker_menu;
+        }
+        if self.sticker_menu && let Some(a) = sticker_anchor {
+            let area = egui::Area::new(Id::new("sticker-menu"))
+                .order(egui::Order::Foreground)
+                .pivot(Align2::LEFT_BOTTOM)
+                .fixed_pos(pos2(a.left(), a.top() - 8.0))
+                .show(ui.ctx(), |ui| {
+                    Frame::new().fill(t::p().surface).stroke(Stroke::new(1.0, t::p().border)).corner_radius(CornerRadius::same(12)).inner_margin(Margin::same(8)).show(ui, |ui| {
+                        ui.label(RichText::new("Стикеры").font(t::semibold(13.0)).color(t::p().text_muted));
+                        ui.add_space(4.0);
+                        egui::Grid::new("sticker-grid").spacing(vec2(4.0, 4.0)).show(ui, |ui| {
+                            for (i, (sid, name)) in proto::STICKERS.iter().enumerate() {
+                                let Some(cat) = crate::reactions::sticker_cat(sid) else { continue };
+                                let (r, resp) = ui.allocate_exact_size(vec2(76.0, 76.0), Sense::click());
+                                if resp.hovered() {
+                                    ui.painter().rect_filled(r, CornerRadius::same(8), t::p().row_hover);
+                                }
+                                kit::cat_figure(ui.painter(), r.shrink(6.0), cat);
+                                if resp.on_hover_text(*name).clicked() {
+                                    sticker_pick = Some(sid);
+                                }
+                                if i % 4 == 3 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    });
+                });
+            if !toggle_stickers && ui.input(|i| i.pointer.any_click()) && !area.response.hovered() && !a.contains(ui.ctx().pointer_hover_pos().unwrap_or_default()) {
+                self.sticker_menu = false;
+            }
+        }
+        if let Some(sid) = sticker_pick {
+            self.sticker_menu = false;
+            self.send_sticker(ch.id, sid);
         }
         if pick {
             self.pick_files(ch.id);
@@ -1078,6 +1241,21 @@ enum FeedAct {
     Copy(i64),
     Save(Attachment),
     ReloadImage(i64),
+    React { mid: i64, name: String, on: bool },
+}
+
+/// Размер стикера в ленте.
+const STICKER: f32 = 120.0;
+
+/// Значок реакции под сообщением: эмодзи и сколько; своя — подсвечена.
+fn reaction_chip(ui: &mut Ui, emoji: &str, n: usize, mine: bool) -> egui::Response {
+    let text = format!("{emoji} {n}");
+    let g = ui.painter().layout_no_wrap(text, t::font(14.0), if mine { t::p().accent } else { t::p().text });
+    let (r, resp) = ui.allocate_exact_size(g.size() + vec2(16.0, 8.0), Sense::click());
+    let (fill, stroke) = if mine { (t::p().accent_soft, t::p().accent) } else if resp.hovered() { (t::p().row_hover, t::p().text_muted) } else { (t::p().surface_2, t::p().border) };
+    ui.painter().rect(r, CornerRadius::same(255), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+    ui.painter().galley(r.min + vec2(8.0, 4.0), g, t::p().text);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn outgoing_row(ui: &mut Ui, o: &Outgoing) -> Option<FeedAct> {
@@ -1455,6 +1633,8 @@ mod tests {
             edited_at: None,
             reply_to: None,
             attachments: vec![],
+            reactions: Vec::new(),
+            sticker: None,
         }
     }
 

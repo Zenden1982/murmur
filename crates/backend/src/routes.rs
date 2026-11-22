@@ -57,6 +57,7 @@ pub fn router(state: AppState) -> Router {
             post(chat::upload).layer(DefaultBodyLimit::max(limits::IMAGE_MAX_BYTES + 64 * 1024)),
         )
         .route("/attachments/{id}", get(chat::get_attachment))
+        .route("/messages/{id}/reactions/{name}", axum::routing::put(chat::put_reaction).delete(chat::delete_reaction))
         .route("/events", get(events::events))
         .route("/friends", get(friends::get))
         .route("/friends/requests", post(friends::request))

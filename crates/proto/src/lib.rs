@@ -565,7 +565,52 @@ pub struct Message {
     pub reply_to: Option<i64>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// Реакции в порядке появления (у старого бэкенда — пусто).
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
+    /// Стикер (id из `STICKERS`); `content` тогда — подпись для старых клиентов.
+    #[serde(default)]
+    pub sticker: Option<String>,
 }
+
+/// Реакция на сообщение: имя из `REACTIONS` и кто поставил.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reaction {
+    pub name: String,
+    pub users: Vec<i64>,
+}
+
+/// Разрешённые реакции: (имя в API, эмодзи).
+pub const REACTIONS: &[(&str, &str)] = &[
+    ("+1", "👍"),
+    ("heart", "❤"),
+    ("joy", "😂"),
+    ("fire", "🔥"),
+    ("open_mouth", "😮"),
+    ("cry", "😢"),
+    ("rage", "😡"),
+    ("tada", "🎉"),
+    ("eyes", "👀"),
+    ("100", "💯"),
+    ("pray", "🙏"),
+    ("sunglasses", "😎"),
+    ("thinking", "🤔"),
+    ("clap", "👏"),
+    ("check", "✅"),
+    ("x", "❌"),
+];
+
+/// Стикеры (коты Murmur): (id, подпись).
+pub const STICKERS: &[(&str, &str)] = &[
+    ("cat-hello", "Кот машет"),
+    ("cat-sleep", "Кот спит"),
+    ("cat-peek", "Кот выглядывает"),
+    ("cat-success", "Кот доволен"),
+    ("cat-loading", "Кот ждёт"),
+    ("cat-offline", "Кот грустит"),
+    ("cat-notfound", "Кот в недоумении"),
+    ("cat-nomic", "Кот молчит"),
+];
 
 /// `POST /channels/{id}/messages`. Вложения сначала загружаются через `POST /uploads`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -574,6 +619,9 @@ pub struct SendMessageRequest {
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<i64>,
+    /// Стикер из `STICKERS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker: Option<String>,
 }
 
 /// Событие потока `GET /events` (SSE, поле `data` — этот JSON). Незнакомые `type` клиент пропускает.
@@ -585,6 +633,8 @@ pub enum ServerEvent {
     /// Сервер не успел доставить часть событий — перечитать открытые каналы.
     Resync,
     MessageCreated { message: Message },
+    /// Изменились реакции на сообщение — весь список заново.
+    ReactionsChanged { channel_id: i64, message_id: i64, reactions: Vec<Reaction> },
     /// Сервер появился у меня (создал, вступил) или изменился.
     ServerUpserted { server: Server },
     /// Сервер пропал у меня (удалён, вышел, кикнут, забанен).

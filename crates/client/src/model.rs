@@ -238,6 +238,7 @@ impl Model {
                 }
             }
             ServerEvent::MessageCreated { .. }
+            | ServerEvent::ReactionsChanged { .. }
             | ServerEvent::Hello
             | ServerEvent::Resync
             | ServerEvent::FriendsChanged

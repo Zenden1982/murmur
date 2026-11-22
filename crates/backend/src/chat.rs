@@ -12,7 +12,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use proto::{Attachment, Author, Message, SendMessageRequest, ServerEvent, limits};
+use proto::{Attachment, Author, Message, Reaction, SendMessageRequest, ServerEvent, limits};
 use serde::Deserialize;
 
 use crate::{
@@ -33,7 +33,7 @@ const PENDING_MAX: i64 = 20;
 macro_rules! select_messages {
     () => {
         "SELECT m.id, m.channel_id, m.author_id, u.name AS author_name, u.display_name AS author_display, u.avatar_key AS author_avatar, m.content,
-        m.created_at, m.edited_at, m.reply_to
+        m.created_at, m.edited_at, m.reply_to, m.sticker
      FROM messages m JOIN users u ON u.id = m.author_id
      WHERE m.channel_id = ? AND m.deleted_at IS NULL"
     };
@@ -51,6 +51,7 @@ struct MessageRow {
     created_at: i64,
     edited_at: Option<i64>,
     reply_to: Option<i64>,
+    sticker: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -102,6 +103,29 @@ pub(crate) async fn chat_target(state: &AppState, id: i64, user_id: i64) -> AppR
     Ok(ChatTarget { audience: Audience::Server(m.server_id), dm: None })
 }
 
+/// Реакции на сообщения (одним запросом): message_id → реакции в порядке первой постановки.
+async fn load_reactions(db: &sqlx::SqlitePool, ids: &[i64]) -> AppResult<HashMap<i64, Vec<Reaction>>> {
+    let mut out: HashMap<i64, Vec<Reaction>> = HashMap::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT message_id, user_id, name FROM message_reactions WHERE message_id IN (");
+    let mut sep = qb.separated(", ");
+    for id in ids {
+        sep.push_bind(*id);
+    }
+    qb.push(") ORDER BY created_at, rowid");
+    let rows: Vec<(i64, i64, String)> = qb.build_query_as().fetch_all(db).await?;
+    for (mid, uid, name) in rows {
+        let list = out.entry(mid).or_default();
+        match list.iter_mut().find(|r| r.name == name) {
+            Some(r) => r.users.push(uid),
+            None => list.push(Reaction { name, users: vec![uid] }),
+        }
+    }
+    Ok(out)
+}
+
 /// Строки сообщений → `Message` с вложениями (одним запросом на всю страницу).
 async fn with_attachments(state: &AppState, rows: Vec<MessageRow>) -> AppResult<Vec<Message>> {
     let mut by_msg: HashMap<i64, Vec<Attachment>> = HashMap::new();
@@ -121,10 +145,14 @@ async fn with_attachments(state: &AppState, rows: Vec<MessageRow>) -> AppResult<
             }
         }
     }
+    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    let mut reactions = load_reactions(&state.inner.db, &ids).await?;
     Ok(rows
         .into_iter()
         .map(|r| Message {
             attachments: by_msg.remove(&r.id).unwrap_or_default(),
+            reactions: reactions.remove(&r.id).unwrap_or_default(),
+            sticker: r.sticker,
             id: r.id,
             channel_id: r.channel_id,
             author: Author {
@@ -244,18 +272,25 @@ pub async fn send_message(
             limits::ATTACHMENTS_MAX
         )));
     }
-    if content.is_empty() && ids.is_empty() {
+    let sticker = req.sticker.filter(|s| !s.is_empty());
+    if let Some(s) = &sticker
+        && !proto::STICKERS.iter().any(|(id, _)| id == s)
+    {
+        return Err(AppError::Validation("нет такого стикера".into()));
+    }
+    if content.is_empty() && ids.is_empty() && sticker.is_none() {
         return Err(AppError::Validation("пустое сообщение".into()));
     }
 
     let mut tx = state.inner.db.begin().await?;
     let mid = sqlx::query(
-        "INSERT INTO messages (channel_id, author_id, content, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO messages (channel_id, author_id, content, created_at, sticker) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(id)
     .bind(user.id)
     .bind(&content)
     .bind(now())
+    .bind(&sticker)
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
@@ -282,6 +317,62 @@ pub async fn send_message(
     let msg = load_message(&state, id, mid).await?;
     publish(&state, target.audience, ServerEvent::MessageCreated { message: msg.clone() });
     Ok((StatusCode::CREATED, Json(msg)))
+}
+
+/// `PUT /messages/{id}/reactions/{name}` — поставить реакцию (повтор — без ошибки).
+pub async fn put_reaction(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((mid, name)): Path<(i64, String)>,
+) -> AppResult<StatusCode> {
+    react(&state, user.id, mid, &name, true).await
+}
+
+/// `DELETE /messages/{id}/reactions/{name}` — убрать свою реакцию.
+pub async fn delete_reaction(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((mid, name)): Path<(i64, String)>,
+) -> AppResult<StatusCode> {
+    react(&state, user.id, mid, &name, false).await
+}
+
+async fn react(state: &AppState, user_id: i64, mid: i64, name: &str, on: bool) -> AppResult<StatusCode> {
+    if !proto::REACTIONS.iter().any(|(n, _)| *n == name) {
+        return Err(AppError::Validation("нет такой реакции".into()));
+    }
+    let db = &state.inner.db;
+    let channel_id: i64 = sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = ? AND deleted_at IS NULL")
+        .bind(mid)
+        .fetch_optional(db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    // доступ к каналу (чужой — NotFound, как и для истории)
+    let target = chat_target(state, channel_id, user_id).await?;
+    state.inner.chat_limiter.check(user_id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
+    let changed = if on {
+        sqlx::query("INSERT OR IGNORE INTO message_reactions (message_id, user_id, name, created_at) VALUES (?, ?, ?, ?)")
+            .bind(mid)
+            .bind(user_id)
+            .bind(name)
+            .bind(now())
+            .execute(db)
+            .await?
+            .rows_affected()
+    } else {
+        sqlx::query("DELETE FROM message_reactions WHERE message_id = ? AND user_id = ? AND name = ?")
+            .bind(mid)
+            .bind(user_id)
+            .bind(name)
+            .execute(db)
+            .await?
+            .rows_affected()
+    };
+    if changed > 0 {
+        let reactions = load_reactions(db, &[mid]).await?.remove(&mid).unwrap_or_default();
+        publish(state, target.audience, ServerEvent::ReactionsChanged { channel_id, message_id: mid, reactions });
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Тип картинки по сигнатуре (расширению/заголовку клиента не верим).

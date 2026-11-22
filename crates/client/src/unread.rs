@@ -98,6 +98,8 @@ mod tests {
             edited_at: None,
             reply_to: None,
             attachments: Vec::new(),
+            reactions: Vec::new(),
+            sticker: None,
         }
     }
 
