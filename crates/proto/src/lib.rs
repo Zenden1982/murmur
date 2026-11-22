@@ -113,14 +113,27 @@ pub struct ReleaseInfo {
     /// Установщик для новых пользователей.
     #[serde(default)]
     pub installer: Option<String>,
+    /// Минимальная версия сервера (бэкенда), с которой работает этот клиент. Чужой сервер передаёт выпуск
+    /// своим клиентам (обновления с официального), только если сам не старее.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_server: Option<String>,
 }
 
 impl ReleaseInfo {
+    /// Сервер версии `server_version` может отдавать этот выпуск: `min_server` нет или сервер не старее.
+    pub fn server_ok(&self, server_version: &str) -> bool {
+        match self.min_server.as_deref() {
+            None => true,
+            Some(min) => matches!((parse_version(server_version), parse_version(min)), (Some(s), Some(m)) if s >= m),
+        }
+    }
+
     /// Имена файлов безопасны, хэш похож на SHA-256, версия разбирается.
     pub fn is_valid(&self) -> bool {
         parse_version(&self.version).is_some()
             && safe_file_name(&self.file)
             && self.installer.as_deref().is_none_or(safe_file_name)
+            && self.min_server.as_deref().is_none_or(|v| parse_version(v).is_some())
             && self.sha256.len() == 64
             && self.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
@@ -869,6 +882,7 @@ mod tests {
             sha256: "a".repeat(64),
             size: 1,
             installer: Some("amadeus-setup-0.2.0.exe".into()),
+            min_server: None,
         };
         assert!(r.is_valid());
         r.file = "../x.exe".into();
@@ -879,6 +893,49 @@ mod tests {
         assert!(!safe_file_name(".hidden"));
         assert!(!safe_file_name("a/b"));
         assert!(!safe_file_name("a\\b"));
+    }
+
+    fn release(min_server: Option<&str>) -> ReleaseInfo {
+        ReleaseInfo {
+            version: "0.3.13".into(),
+            notes: String::new(),
+            file: "murmur-0.3.13.exe".into(),
+            sha256: "a".repeat(64),
+            size: 1,
+            installer: None,
+            min_server: min_server.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn release_min_server_roundtrip() {
+        let r: ReleaseInfo = serde_json::from_str(
+            r#"{"version":"0.3.13","file":"murmur-0.3.13.exe","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1}"#,
+        )
+        .unwrap();
+        assert_eq!(r.min_server, None);
+        assert!(!serde_json::to_string(&r).unwrap().contains("min_server"));
+        let with: ReleaseInfo = serde_json::from_value(serde_json::json!({
+            "version": "0.3.13", "file": "murmur-0.3.13.exe", "sha256": "a".repeat(64), "size": 1, "min_server": "0.3.13"
+        }))
+        .unwrap();
+        assert_eq!(with.min_server.as_deref(), Some("0.3.13"));
+    }
+
+    #[test]
+    fn release_min_server_invalid() {
+        assert!(release(Some("0.3.13")).is_valid());
+        assert!(!release(Some("abc")).is_valid());
+    }
+
+    #[test]
+    fn release_server_ok() {
+        let r = release(Some("0.3.13"));
+        assert!(!r.server_ok("0.3.12"));
+        assert!(r.server_ok("0.3.13"));
+        assert!(r.server_ok("0.4.0"));
+        assert!(!r.server_ok("x"));
+        assert!(release(None).server_ok("0.1.0"));
     }
 
     #[test]

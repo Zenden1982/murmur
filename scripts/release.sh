@@ -4,6 +4,9 @@
 #   scripts/release.sh "Что нового (одна-две строки)"            — собрать и выложить на домашний сервер
 #   NO_UPLOAD=1 scripts/release.sh "…"                             — только собрать в dist/<версия>/
 #   NO_GITHUB=1 scripts/release.sh "…"                             — без релиза на GitHub (scripts/gh-release.sh)
+#   MIN_SERVER=0.3.13 scripts/release.sh "…"                       — клиенту нужен сервер не старее 0.3.13: чужие серверы
+#                                                                    (обновления с официального) отдадут выпуск, только если
+#                                                                    сами не старее. Без MIN_SERVER — любым серверам.
 #
 # Версия — из [workspace.package] в Cargo.toml (поднять перед выпуском: клиенты обновляются, только если она больше).
 # На сервере: файлы → $REMOTE_DIR (том бэкенда, /data/releases в контейнере), latest.json кладётся последним —
@@ -17,7 +20,9 @@ REMOTE_DIR="${REMOTE_DIR:-/srv/data/amadeus/backend/releases}"
 
 VERSION=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "не понял версию: '$VERSION'"; exit 1; }
-echo "== Murmur $VERSION"
+MIN_SERVER="${MIN_SERVER:-}"
+[[ -z "$MIN_SERVER" || "$MIN_SERVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "MIN_SERVER должен быть x.y.z: '$MIN_SERVER'"; exit 1; }
+echo "== Murmur $VERSION${MIN_SERVER:+ (сервер не старее $MIN_SERVER)}"
 
 # старые установщики этой же версии (в т.ч. amadeus_…) убрать, чтобы ниже взять ровно свежесобранный
 rm -f target/release/*_"${VERSION}"_x64-setup.exe
@@ -37,11 +42,14 @@ gzip -kf9 "$OUT/$EXE"   # сервер отдаёт .gz клиентам с Acce
 
 SHA=$(sha256sum "$OUT/$EXE" | cut -d' ' -f1)
 SIZE=$(stat -c %s "$OUT/$EXE")
-NOTES="$NOTES" VERSION="$VERSION" EXE="$EXE" SETUP="$SETUP" SHA="$SHA" SIZE="$SIZE" python -X utf8 -I -c '
+MIN_SERVER="$MIN_SERVER" NOTES="$NOTES" VERSION="$VERSION" EXE="$EXE" SETUP="$SETUP" SHA="$SHA" SIZE="$SIZE" python -X utf8 -I -c '
 import json, os
 e = os.environ
-print(json.dumps({"version": e["VERSION"], "notes": e["NOTES"], "file": e["EXE"], "sha256": e["SHA"],
-                  "size": int(e["SIZE"]), "installer": e["SETUP"]}, ensure_ascii=False, indent=2))
+info = {"version": e["VERSION"], "notes": e["NOTES"], "file": e["EXE"], "sha256": e["SHA"],
+        "size": int(e["SIZE"]), "installer": e["SETUP"]}
+if e["MIN_SERVER"]:
+    info["min_server"] = e["MIN_SERVER"]
+print(json.dumps(info, ensure_ascii=False, indent=2))
 ' > "$OUT/latest.json"
 cat "$OUT/latest.json"
 ls -la "$OUT"
