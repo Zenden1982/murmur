@@ -79,6 +79,43 @@ enum Tab {
     Invite,
 }
 
+/// Разделы настроек.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SetTab {
+    Profile,
+    Account,
+    Voice,
+    Stream,
+    Hotkeys,
+    Look,
+    Notify,
+}
+
+impl SetTab {
+    fn icon(self) -> &'static str {
+        match self {
+            SetTab::Profile => ph::USER,
+            SetTab::Account => ph::SHIELD,
+            SetTab::Voice => ph::MICROPHONE,
+            SetTab::Stream => ph::MONITOR_ARROW_UP,
+            SetTab::Hotkeys => ph::KEYBOARD,
+            SetTab::Look => ph::PALETTE,
+            SetTab::Notify => ph::BELL,
+        }
+    }
+}
+
+/// (раздел, группа, название, подпись, слова для поиска — строки раздела, в нижнем регистре).
+const SET_TABS: [(SetTab, &str, &str, &str, &str); 7] = [
+    (SetTab::Profile, "ПОЛЬЗОВАТЕЛЬ", "Профиль", "Как вас видят другие", "аватар имя отображаемое о себе активность игра личные сообщения"),
+    (SetTab::Account, "ПОЛЬЗОВАТЕЛЬ", "Аккаунт", "Логин, сервер и вход", "логин сервер пароль сеансы выйти"),
+    (SetTab::Voice, "ПРИЛОЖЕНИЕ", "Голос и видео", "Устройства, микрофон и шумоподавление", "микрофон вывод звука наушники проверка рация шумоподавление эхоподавление громкость"),
+    (SetTab::Stream, "ПРИЛОЖЕНИЕ", "Стрим экрана", "Качество и звук трансляции экрана", "трансляция качество разрешение кадры звук"),
+    (SetTab::Hotkeys, "ПРИЛОЖЕНИЕ", "Горячие клавиши", "Работают, даже когда окно свёрнуто", "клавиша рация сочетание"),
+    (SetTab::Look, "ПРИЛОЖЕНИЕ", "Внешний вид", "Тема, анимации и звуки интерфейса", "тема тёмная светлая анимации индикатор речи пинг плитки кот звуки"),
+    (SetTab::Notify, "ПРИЛОЖЕНИЕ", "Уведомления", "Трей, автозапуск и обновления", "трей автозапуск windows обновления версия"),
+];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ServerState {
     Checking,
@@ -141,6 +178,9 @@ pub struct App {
     channels: Vec<Channel>,
     channels_at: Instant,
     settings_open: bool,
+    /// Раздел настроек и строка поиска в их меню.
+    set_tab: SetTab,
+    set_query: String,
     /// Отладочный оверлей метрик (F3).
     metrics_open: bool,
     metrics_init: bool,
@@ -334,6 +374,8 @@ impl App {
             channels: Vec::new(),
             channels_at: Instant::now(),
             settings_open: false,
+            set_tab: SetTab::Voice,
+            set_query: String::new(),
             metrics_open: false,
             metrics_init: false,
             popup: None,
@@ -406,6 +448,10 @@ impl App {
         #[cfg(debug_assertions)]
         if std::env::var_os("AMADEUS_OPEN_SETTINGS").is_some() {
             app.open_settings();
+            // AMADEUS_SETTINGS_TAB=<номер раздела 0–6> — какой раздел открыть
+            if let Some(i) = std::env::var("AMADEUS_SETTINGS_TAB").ok().and_then(|v| v.parse::<usize>().ok()) {
+                app.set_tab = SET_TABS[i.min(SET_TABS.len() - 1)].0;
+            }
         }
         #[cfg(debug_assertions)]
         if let Ok(tab) = std::env::var("AMADEUS_OPEN_FRIENDS") {
@@ -3094,9 +3140,6 @@ impl App {
 
     /// Раздел настроек «Приложение»: автозапуск, трей, версия и обновления.
     fn ui_settings_app(&mut self, ui: &mut Ui, w: f32) {
-        ui.add_space(18.0);
-        ui.label(RichText::new("Приложение").font(t::bold(15.0)));
-        ui.add_space(4.0);
         let installed = desktop::is_installed();
         let mut autostart = self.settings.autostart;
         toggle_row(ui, w, |ui| {
@@ -3157,9 +3200,6 @@ impl App {
     /// Настройки → «Внешний вид»: тема, анимации, индикатор речи, пинг, плитки, кот, звуки интерфейса.
     fn ui_settings_look(&mut self, ui: &mut Ui, w: f32) {
         use crate::config::{AnimPref, PingDisplay, SpeechIndicator};
-        ui.add_space(22.0);
-        ui.label(RichText::new("Внешний вид").font(t::xbold(20.0)));
-        ui.add_space(10.0);
         let mut changed = false;
 
         let mut theme = self.settings.theme;
@@ -3254,8 +3294,6 @@ impl App {
 /// Настройки → Профиль: аватар и отображаемое имя.
     fn ui_settings_profile(&mut self, ui: &mut Ui, w: f32) {
         let Some(me) = self.me.clone() else { return };
-        ui.label(RichText::new("Профиль").font(t::xbold(20.0)));
-        ui.add_space(12.0);
         let busy = self.profile_busy;
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(vec2(72.0, 72.0), Sense::hover());
@@ -3368,177 +3406,317 @@ impl App {
         }
     }
 
+    /// Настройки → «Голос и видео».
+    fn ui_settings_voice(&mut self, ui: &mut Ui, w: f32, vs: &VoiceState) {
+        if let Some(err) = &vs.audio_error {
+            ui.label(RichText::new(format!("{}  {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
+        }
+
+        label(ui, "Микрофон");
+        let mut input = self.settings.input_device.clone();
+        if device_combo(ui, "in", &mut input, &vs.inputs, w) {
+            self.settings.input_device = input.clone();
+            self.settings.save();
+            self.voice.send(Cmd::SetInputDevice(input));
+        }
+        let level = if self.mic_test.as_ref().is_some_and(|t| t.running()) {
+            Some(f32::from_bits(self.mic_level.load(Ordering::Relaxed)))
+        } else {
+            vs.peers.iter().find(|p| p.is_local).map(|p| p.level)
+        };
+        level_meter(ui, level, w);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let clicked = if self.mic_playback {
+                kit::button(ui, kit::ButtonKind::Primary, "Остановить проверку", Some(egui_phosphor::fill::STOP))
+            } else {
+                kit::button(ui, kit::ButtonKind::Secondary, "Слышать себя", Some(egui_phosphor::fill::HEADPHONES))
+            }
+            .clicked();
+            if clicked {
+                self.mic_playback = !self.mic_playback;
+            }
+            let hint = match &self.mic_test_error {
+                Some(e) => RichText::new(format!("Проверка недоступна: {e}")).color(t::p().danger_text),
+                None if self.mic_playback => RichText::new("Так вас слышат друзья. Наденьте наушники — на колонках будет заводка.").color(t::p().text_muted),
+                None => RichText::new("Голос с шумоподавлением, как в звонке. Лучше в наушниках.").color(t::p().text_muted),
+            };
+            ui.label(hint.size(12.5));
+        });
+        ui.add_space(12.0);
+
+        label(ui, "Вывод звука");
+        let mut output = self.settings.output_device.clone();
+        if device_combo(ui, "out", &mut output, &vs.outputs, w) {
+            self.settings.output_device = output.clone();
+            self.settings.save();
+            self.voice.send(Cmd::SetOutputDevice(output));
+        }
+        ui.add_space(10.0);
+
+        // рация
+        toggle_row(ui, w, |ui| {
+            ui.label("Режим рации — микрофон включён, пока держите клавишу");
+        }, |ui| {
+            let mut on = self.settings.ptt_enabled;
+            if kit::switch(ui, &mut on).changed() {
+                self.settings.ptt_enabled = on;
+                self.settings.save();
+                self.ptt.set_enabled(on);
+                self.voice.send(Cmd::SetPttEnabled(on));
+            }
+            ui.add_space(10.0);
+            if self.ptt.capturing() {
+                if kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked() {
+                    self.ptt.cancel_capture();
+                }
+                ui.label(RichText::new("нажмите клавишу…").color(t::p().accent_text).size(13.0));
+            } else {
+                let r = kit::keycap(ui, &ptt::key_name(self.settings.ptt_key)).interact(Sense::click());
+                if r.on_hover_text("Нажмите, чтобы назначить другую клавишу (можно кнопку мыши)").clicked() {
+                    self.ptt.begin_capture();
+                }
+            }
+        });
+        let mut proc_changed = false;
+        toggle_row(ui, w, |ui| {
+            ui.label("Шумоподавление").on_hover_text(
+                "Нейросеть (DeepFilterNet) убирает шум и шипение (клавиатура, вентилятор, улица) и не режет высокие частоты.\n\
+                 Лёгкая (RNNoise) — дешевле для слабых ПК, но шипение почти не убирает.\n\
+                 Обычное — шумодав WebRTC: голос глуше. Выключено — для хорошего микрофона в тихой комнате.",
+            );
+        }, |ui| {
+            let mut mode = self.settings.noise;
+            egui::ComboBox::from_id_salt("noise-mode").selected_text(mode.label()).width(190.0).show_ui(ui, |ui| {
+                for m in NoiseMode::ALL {
+                    ui.selectable_value(&mut mode, m, m.label());
+                }
+            });
+            if mode != self.settings.noise {
+                self.settings.noise = mode;
+                proc_changed = true;
+            }
+        });
+        for (text, val) in [
+            ("Эхоподавление (выключите в наушниках — звук чище)", &mut self.settings.echo_cancellation),
+            ("Автоматическая громкость микрофона", &mut self.settings.auto_gain),
+        ] {
+            toggle_row(ui, w, |ui| {
+                ui.label(text);
+            }, |ui| {
+                if kit::switch(ui, val).changed() {
+                    proc_changed = true;
+                }
+            });
+        }
+        if proc_changed {
+            self.settings.save();
+            self.voice.send(Cmd::SetProcessing {
+                aec: self.settings.echo_cancellation,
+                noise: self.settings.noise,
+                agc: self.settings.auto_gain,
+            });
+        }
+    }
+
+    /// Настройки → «Стрим экрана» (пока — то, что уже есть: качество и звук по умолчанию).
+    fn ui_settings_stream(&mut self, ui: &mut Ui, w: f32) {
+        let mut preset = self.settings.stream_preset;
+        toggle_row(ui, w, |ui| {
+            ui.label("Качество по умолчанию").on_hover_text("Разрешение и частота кадров; можно сменить при запуске трансляции");
+        }, |ui| {
+            egui::ComboBox::from_id_salt("set-preset").selected_text(preset.label()).width(200.0).show_ui(ui, |ui| {
+                for pr in crate::stream::Preset::ALL {
+                    ui.selectable_value(&mut preset, pr, pr.label());
+                }
+            });
+        });
+        if preset != self.settings.stream_preset {
+            self.settings.stream_preset = preset;
+            self.settings.save();
+        }
+        let mut audio = self.settings.stream_audio;
+        toggle_row(ui, w, |ui| {
+            ui.label("Звук в трансляции").on_hover_text("Звук показываемого окна или всего компьютера");
+        }, |ui| {
+            if kit::switch(ui, &mut audio).changed() {
+                self.settings.stream_audio = audio;
+                self.settings.save();
+            }
+        });
+    }
+
+    /// Настройки → «Горячие клавиши» (пока одна — рация).
+    fn ui_settings_hotkeys(&mut self, ui: &mut Ui, w: f32) {
+        toggle_row(ui, w, |ui| {
+            ui.label("Рация — держать, чтобы говорить").on_hover_text("Работает, даже когда окно свёрнуто или вы в игре");
+        }, |ui| {
+            if self.ptt.capturing() {
+                if kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked() {
+                    self.ptt.cancel_capture();
+                }
+                ui.label(RichText::new("нажмите клавишу…").color(t::p().accent_text).size(13.0));
+            } else {
+                if kit::button(ui, kit::ButtonKind::Secondary, "Изменить", None).clicked() {
+                    self.ptt.begin_capture();
+                }
+                ui.add_space(8.0);
+                kit::keycap(ui, &ptt::key_name(self.settings.ptt_key));
+            }
+        });
+    }
+
+    /// Настройки → «Аккаунт» (пока — логин и сервер).
+    fn ui_settings_account(&mut self, ui: &mut Ui, w: f32) {
+        let me = self.me.clone();
+        let host = self.settings.server_url.trim_start_matches("https://").trim_start_matches("http://").to_string();
+        let login = me.as_ref().map(|u| format!("{}{}", u.name, if u.is_admin { " · администратор" } else { "" })).unwrap_or_default();
+        for (k, v) in [("Логин", login), ("Сервер", host)] {
+            toggle_row(ui, w, |ui| {
+                ui.label(k);
+            }, |ui| {
+                ui.label(RichText::new(v).color(t::p().text_muted));
+            });
+        }
+    }
+
     fn ui_settings(&mut self, ui: &mut Ui, vs: &VoiceState) {
         self.sync_mic_test(vs);
         ui.ctx().request_repaint_after(Duration::from_millis(50)); // живой индикатор уровня
-        let mut close = false;
-        let modal = egui::Modal::new(Id::new("settings"))
-            .backdrop_color(t::p().scrim)
-            .frame(
-                Frame::new()
-                    .fill(t::p().surface)
-                    .stroke(Stroke::new(1.0, t::p().border))
-                    .corner_radius(CornerRadius::same(18))
-                    .inner_margin(Margin::symmetric(30, 26))
-                    .shadow(ui.visuals().window_shadow),
-            )
-            .show(ui.ctx(), |ui| {
-                ui.set_width(556.0);
-                let w = 556.0;
+        let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape)) && !self.ptt.capturing();
+        let full = ui.ctx().content_rect();
+        let top = if self.fullscreen { full.top() } else { full.top() + crate::frame::HEIGHT };
+        let r = Rect::from_min_max(pos2(full.left(), top), full.max);
+        let p = t::p();
+        egui::Area::new(Id::new("settings-screen")).order(egui::Order::Foreground).fixed_pos(r.min).show(ui.ctx(), |ui| {
+            ui.set_min_size(r.size());
+            ui.set_max_size(r.size());
+            let painter = ui.painter().clone();
+            painter.rect_filled(r, CornerRadius::ZERO, p.bg);
+            // меню слева
+            let menu = Rect::from_min_max(r.min, pos2(r.left() + 240.0, r.bottom()));
+            painter.rect_filled(menu, CornerRadius::ZERO, p.surface);
+            painter.vline(menu.right(), menu.y_range(), Stroke::new(1.0, p.border));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(menu.shrink2(vec2(12.0, 16.0))), |ui| {
+                if self.ui_settings_menu(ui) {
+                    close = true;
+                    self.logout();
+                }
+            });
+            // раздел справа
+            let content = Rect::from_min_max(pos2(menu.right() + 1.0, r.top()), r.max);
+            let x = Rect::from_center_size(pos2(content.right() - 44.0, content.top() + 44.0), vec2(36.0, 36.0));
+            let xr = ui.interact(x, Id::new("settings-close"), Sense::click());
+            let lit = ui.ctx().animate_bool_with_time(xr.id, xr.hovered(), kit::HOVER_S);
+            painter.circle(x.center(), 18.0, Color32::TRANSPARENT.lerp_to_gamma(p.row_hover, lit), Stroke::new(1.0, p.border_strong), );
+            painter.text(x.center(), Align2::CENTER_CENTER, ph::X, t::font(18.0), p.text_muted.lerp_to_gamma(p.text, lit));
+            if xr.on_hover_text("Закрыть (Esc)").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                close = true;
+            }
+            let body = Rect::from_min_max(pos2(content.left() + 40.0, content.top() + 28.0), pos2(content.right() - 96.0, content.bottom()));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+                let tab = self.set_tab;
+                let (_, _, title, sub, _) = SET_TABS.iter().find(|t| t.0 == tab).copied().unwrap_or(SET_TABS[0]);
+                ui.label(RichText::new(title).font(t::xbold(24.0)).color(p.text));
+                ui.add_space(2.0);
+                ui.label(RichText::new(sub).size(14.0).color(p.text_muted));
+                ui.add_space(18.0);
                 #[allow(unused_mut)]
-                let mut area = egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() - 140.0);
+                let mut area = egui::ScrollArea::vertical().id_salt(("settings-scroll", tab as u8)).auto_shrink([false, false]);
                 // Отладка: AMADEUS_OPEN_SETTINGS=<px> — открыть настройки прокрученными (скриншоты).
                 #[cfg(debug_assertions)]
                 if let Some(px) = std::env::var("AMADEUS_OPEN_SETTINGS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|px| *px > 1.0) {
                     area = area.vertical_scroll_offset(px);
                 }
                 area.show(ui, |ui| {
-                    self.ui_settings_profile(ui, w);
-                    ui.add_space(22.0);
-                    ui.label(RichText::new("Голос и звук").font(t::xbold(20.0)));
-                    ui.add_space(14.0);
-                    if let Some(err) = &vs.audio_error {
-                        ui.label(RichText::new(format!("{}  {err}", ph::WARNING_CIRCLE)).size(13.0).color(t::p().danger_text));
+                    let w = ui.available_width().min(680.0);
+                    ui.set_max_width(w);
+                    match tab {
+                        SetTab::Profile => self.ui_settings_profile(ui, w),
+                        SetTab::Account => self.ui_settings_account(ui, w),
+                        SetTab::Voice => self.ui_settings_voice(ui, w, vs),
+                        SetTab::Stream => self.ui_settings_stream(ui, w),
+                        SetTab::Hotkeys => self.ui_settings_hotkeys(ui, w),
+                        SetTab::Look => self.ui_settings_look(ui, w),
+                        SetTab::Notify => self.ui_settings_app(ui, w),
                     }
-
-                    label(ui, "Микрофон");
-                    let mut input = self.settings.input_device.clone();
-                    if device_combo(ui, "in", &mut input, &vs.inputs, w) {
-                        self.settings.input_device = input.clone();
-                        self.settings.save();
-                        self.voice.send(Cmd::SetInputDevice(input));
-                    }
-                    let level = if self.mic_test.as_ref().is_some_and(|t| t.running()) {
-                        Some(f32::from_bits(self.mic_level.load(Ordering::Relaxed)))
-                    } else {
-                        vs.peers.iter().find(|p| p.is_local).map(|p| p.level)
-                    };
-                    level_meter(ui, level, w);
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        let clicked = if self.mic_playback {
-                            kit::button(ui, kit::ButtonKind::Primary, "Остановить проверку", Some(egui_phosphor::fill::STOP))
-                        } else {
-                            kit::button(ui, kit::ButtonKind::Secondary, "Слышать себя", Some(egui_phosphor::fill::HEADPHONES))
-                        }
-                        .clicked();
-                        if clicked {
-                            self.mic_playback = !self.mic_playback;
-                        }
-                        let hint = match &self.mic_test_error {
-                            Some(e) => RichText::new(format!("Проверка недоступна: {e}")).color(t::p().danger_text),
-                            None if self.mic_playback => RichText::new("Так вас слышат друзья. Наденьте наушники — на колонках будет заводка.").color(t::p().text_muted),
-                            None => RichText::new("Голос с шумоподавлением, как в звонке. Лучше в наушниках.").color(t::p().text_muted),
-                        };
-                        ui.label(hint.size(12.5));
-                    });
-                    ui.add_space(12.0);
-
-                    label(ui, "Вывод звука");
-                    let mut output = self.settings.output_device.clone();
-                    if device_combo(ui, "out", &mut output, &vs.outputs, w) {
-                        self.settings.output_device = output.clone();
-                        self.settings.save();
-                        self.voice.send(Cmd::SetOutputDevice(output));
-                    }
-                    ui.add_space(10.0);
-
-                    // рация
-                    toggle_row(ui, w, |ui| {
-                        ui.label("Режим рации — микрофон включён, пока держите клавишу");
-                    }, |ui| {
-                        let mut on = self.settings.ptt_enabled;
-                        if kit::switch(ui, &mut on).changed() {
-                            self.settings.ptt_enabled = on;
-                            self.settings.save();
-                            self.ptt.set_enabled(on);
-                            self.voice.send(Cmd::SetPttEnabled(on));
-                        }
-                        ui.add_space(10.0);
-                        if self.ptt.capturing() {
-                            if kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked() {
-                                self.ptt.cancel_capture();
-                            }
-                            ui.label(RichText::new("нажмите клавишу…").color(t::p().accent_text).size(13.0));
-                        } else {
-                            let r = kit::keycap(ui, &ptt::key_name(self.settings.ptt_key)).interact(Sense::click());
-                            if r.on_hover_text("Нажмите, чтобы назначить другую клавишу (можно кнопку мыши)").clicked() {
-                                self.ptt.begin_capture();
-                            }
-                        }
-                    });
-                    let mut proc_changed = false;
-                    toggle_row(ui, w, |ui| {
-                        ui.label("Шумоподавление").on_hover_text(
-                            "Нейросеть (DeepFilterNet) убирает шум и шипение (клавиатура, вентилятор, улица) и не режет высокие частоты.\n\
-                             Лёгкая (RNNoise) — дешевле для слабых ПК, но шипение почти не убирает.\n\
-                             Обычное — шумодав WebRTC: голос глуше. Выключено — для хорошего микрофона в тихой комнате.",
-                        );
-                    }, |ui| {
-                        let mut mode = self.settings.noise;
-                        egui::ComboBox::from_id_salt("noise-mode").selected_text(mode.label()).width(190.0).show_ui(ui, |ui| {
-                            for m in NoiseMode::ALL {
-                                ui.selectable_value(&mut mode, m, m.label());
-                            }
-                        });
-                        if mode != self.settings.noise {
-                            self.settings.noise = mode;
-                            proc_changed = true;
-                        }
-                    });
-                    for (text, val) in [
-                        ("Эхоподавление (выключите в наушниках — звук чище)", &mut self.settings.echo_cancellation),
-                        ("Автоматическая громкость микрофона", &mut self.settings.auto_gain),
-                    ] {
-                        toggle_row(ui, w, |ui| {
-                            ui.label(text);
-                        }, |ui| {
-                            if kit::switch(ui, val).changed() {
-                                proc_changed = true;
-                            }
-                        });
-                    }
-                    if proc_changed {
-                        self.settings.save();
-                        self.voice.send(Cmd::SetProcessing {
-                            aec: self.settings.echo_cancellation,
-                            noise: self.settings.noise,
-                            agc: self.settings.auto_gain,
-                        });
-                    }
-                    self.ui_settings_look(ui, w);
-                    self.ui_settings_app(ui, w);
-
-                    // аккаунт
-                    ui.add_space(18.0);
-                    ui.label(RichText::new("Аккаунт").font(t::bold(15.0)));
-                    ui.add_space(4.0);
-                    let me = self.me.clone();
-                    ui.horizontal(|ui| {
-                        if let Some(u) = &me {
-                            ui.label(RichText::new(format!("{}{}", u.name, if u.is_admin { " · администратор" } else { "" })).color(t::p().text));
-                        }
-                        ui.label(RichText::new(format!("· {}", self.settings.server_url)).size(13.0).color(t::p().text_muted));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if kit::button(ui, kit::ButtonKind::Secondary, "Выйти", Some(egui_phosphor::fill::SIGN_OUT)).clicked() {
-                                close = true;
-                                self.logout();
-                            }
-                        });
-                    });
-                });
-                ui.add_space(20.0);
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if kit::button_wide(ui, kit::ButtonKind::Primary, "Готово", 120.0, true).clicked() {
-                        close = true;
-                    }
+                    ui.add_space(24.0);
                 });
             });
-        if close || modal.should_close() {
+        });
+        if close {
             self.ptt.cancel_capture();
             self.settings_open = false;
+            self.set_query.clear();
             self.stop_mic_test();
         }
+    }
+
+    /// Левое меню настроек: кто я, поиск, разделы, «Выйти» и версия. true — нажали «Выйти».
+    fn ui_settings_menu(&mut self, ui: &mut Ui) -> bool {
+        let p = t::p();
+        let w = ui.available_width();
+        let bottom = ui.max_rect().bottom();
+        // кто я
+        if let Some(me) = self.me.as_ref().map(people::public) {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
+                self.people.paint(ui.painter(), rect.center(), 20.0, &me, 0.0, false);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(me.shown_name()).font(t::bold(15.0)).color(p.text));
+                    let host = self.settings.server_url.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("api.").to_string();
+                    ui.label(RichText::new(host).size(12.5).color(p.text_muted));
+                });
+            });
+            ui.add_space(14.0);
+        }
+        ui.add(kit::text_field(&mut self.set_query, w).hint_text(format!("{}  Поиск настроек", ph::MAGNIFYING_GLASS)).margin(vec2(12.0, 8.0)).font(t::font(14.0)));
+        ui.add_space(12.0);
+        let q = self.set_query.trim().to_lowercase();
+        let visible: Vec<SetTab> = SET_TABS.iter().filter(|t| q.is_empty() || t.2.to_lowercase().contains(&q) || t.4.contains(&q)).map(|t| t.0).collect();
+        if !visible.is_empty() && !visible.contains(&self.set_tab) {
+            self.set_tab = visible[0];
+        }
+        let mut group = "";
+        for &(tab, g, title, _, _) in SET_TABS.iter() {
+            if !visible.contains(&tab) {
+                continue;
+            }
+            if g != group {
+                group = g;
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    kit::group_label(ui, g);
+                });
+                ui.add_space(4.0);
+            }
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, 36.0), Sense::click());
+            let on = self.set_tab == tab;
+            let lit = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), kit::HOVER_S);
+            let bg = if on { p.row_active } else { Color32::TRANSPARENT.lerp_to_gamma(p.row_hover, lit) };
+            ui.painter().rect_filled(rect, CornerRadius::same(kit::R_ROW), bg);
+            let ic = if on { p.accent } else { p.text_muted };
+            ui.painter().text(pos2(rect.left() + 20.0, rect.center().y), Align2::CENTER_CENTER, tab.icon(), t::font(17.0), ic);
+            ui.painter().text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, title, t::semibold(14.0), if on { p.text } else { p.text_muted.lerp_to_gamma(p.text, lit) });
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.set_tab = tab;
+            }
+        }
+        if visible.is_empty() {
+            ui.label(RichText::new("Ничего не нашли").size(13.0).color(p.text_muted));
+        }
+        // внизу: «Выйти» и версия
+        let out = Rect::from_min_size(pos2(ui.max_rect().left(), bottom - 62.0), vec2(w, 34.0));
+        let resp = ui.interact(out, Id::new("settings-logout"), Sense::click());
+        let lit = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), kit::HOVER_S);
+        ui.painter().rect_filled(out, CornerRadius::same(kit::R_ROW), Color32::TRANSPARENT.lerp_to_gamma(p.danger_soft, lit));
+        ui.painter().text(pos2(out.left() + 20.0, out.center().y), Align2::CENTER_CENTER, ph::SIGN_OUT, t::font(17.0), p.danger_text);
+        ui.painter().text(pos2(out.left() + 40.0, out.center().y), Align2::LEFT_CENTER, "Выйти", t::semibold(14.0), p.danger_text);
+        ui.painter().text(pos2(out.left() + 8.0, bottom - 10.0), Align2::LEFT_CENTER, format!("Murmur {} · AGPL-3.0", update::CURRENT), t::font(12.0), p.text_faint);
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
     }
 }
 
