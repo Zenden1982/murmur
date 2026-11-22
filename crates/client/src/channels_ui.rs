@@ -80,6 +80,10 @@ pub fn layout_after(old: &ChannelLayout, req: &LayoutRequest) -> ChannelLayout {
 pub enum Pick {
     Voice(Channel),
     Text(i64),
+    /// ЛКМ по участнику голосового канала — карточка профиля.
+    Profile(i64, egui::Pos2),
+    /// ПКМ по участнику моего звонка — громкость.
+    PeerVolume(String, egui::Pos2),
 }
 
 /// Что нужно списку от окна.
@@ -384,12 +388,23 @@ impl ChannelsUi {
         match cx.my_voice {
             Some((id, peers)) if id == ch.id => {
                 for p in peers {
-                    crate::app::member_row(ui, p, cx.people);
+                    let r = crate::app::member_row(ui, p, cx.people);
+                    let at = r.interact_pointer_pos().unwrap_or(r.rect.center());
+                    if r.clicked()
+                        && let Ok(uid) = p.identity.parse::<i64>()
+                    {
+                        *pick = Some(Pick::Profile(uid, at));
+                    } else if r.secondary_clicked() && !p.is_local {
+                        *pick = Some(Pick::PeerVolume(p.identity.clone(), at));
+                    }
                 }
             }
             _ => {
                 for &uid in roster {
-                    roster_row(ui, cx, uid);
+                    let r = roster_row(ui, cx, uid);
+                    if r.clicked() || r.secondary_clicked() {
+                        *pick = Some(Pick::Profile(uid, r.interact_pointer_pos().unwrap_or(r.rect.center())));
+                    }
                 }
             }
         }
@@ -537,9 +552,10 @@ impl ChannelsUi {
 }
 
 /// Человек в голосовом канале (я там не сижу): аватар 20 px и имя.
-fn roster_row(ui: &mut Ui, cx: &ListCtx, uid: i64) {
+/// ЛКМ/ПКМ — карточка профиля (громкость — только у тех, кто в моём звонке).
+fn roster_row(ui: &mut Ui, cx: &ListCtx, uid: i64) -> egui::Response {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
     let c = pos2(rect.left() + 40.0 + 10.0, rect.center().y);
     let u = cx.people.user(uid).or_else(|| cx.model.user(uid)).cloned().unwrap_or_else(|| proto::PublicUser {
         id: uid,
@@ -549,6 +565,7 @@ fn roster_row(ui: &mut Ui, cx: &ListCtx, uid: i64) {
     });
     cx.people.paint(ui.painter(), c, 10.0, &u, 0.0, false);
     ui.painter().text(pos2(c.x + 18.0, c.y), Align2::LEFT_CENTER, u.shown_name(), t::semibold(13.5), t::p().text_muted);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Линия «вставить сюда» при перетаскивании.

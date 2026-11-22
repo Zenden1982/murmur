@@ -181,6 +181,7 @@ fn open(
     let max_q = (out_rate / 1000 * 120) as usize; // больше 120 мс — сбрасываем (задержка важнее)
     let keep_q = (out_rate / 1000 * 40) as usize;
     let mut smooth = 0.0f32;
+    let mut gate = crate::gate::Gate::new();
     let input_stream = input
         .build_input_stream::<f32, _, _>(
             in_cfg,
@@ -194,6 +195,14 @@ fn open(
                         *d = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                     }
                     let _ = apm.0.process_stream(&mut chunk, APM_RATE as i32, 1);
+                    // Как в звонке: громкость микрофона до шумодава, порог — после.
+                    for (f, &s) in fbuf.iter_mut().zip(chunk.iter()) {
+                        *f = s as f32;
+                    }
+                    crate::gate::apply_gain(&mut fbuf, i16::MAX as f32);
+                    for (s, &f) in chunk.iter_mut().zip(fbuf.iter()) {
+                        *s = f.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                    }
                     // Как в звонке: RNNoise после APM (кадр 10 мс на 48 кГц = кадр RNNoise).
                     if let Some(d) = &mut denoiser {
                         for (f, &s) in fbuf.iter_mut().zip(chunk.iter()) {
@@ -204,9 +213,14 @@ fn open(
                             *s = f.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
                         }
                     }
-                    let rms = (chunk.iter().map(|&s| (s as f32 / i16::MAX as f32).powi(2)).sum::<f32>() / CHUNK as f32).sqrt();
-                    // ~0.25 rms — громкая речь; шкала как у audio_level LiveKit (0..1)
-                    let lvl = (rms * 4.0).min(1.0);
+                    for (f, &s) in fbuf.iter_mut().zip(chunk.iter()) {
+                        *f = s as f32;
+                    }
+                    // Уровень (rms×4, как у audio_level LiveKit) — до порога, чтобы метку было видно и под ней.
+                    let (lvl, _) = gate.process(&mut fbuf, i16::MAX as f32, APM_RATE);
+                    for (s, &f) in chunk.iter_mut().zip(fbuf.iter()) {
+                        *s = f as i16;
+                    }
                     smooth = if lvl > smooth { lvl } else { smooth * 0.85 + lvl * 0.15 };
                     level.store(smooth.to_bits(), Ordering::Relaxed);
                     if playback {

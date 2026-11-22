@@ -73,6 +73,8 @@ pub enum Cmd {
     SetUserVolume(String, f32),
     /// identity → громкость звука его трансляции (1.0 = 100%).
     SetStreamVolume(String, f32),
+    /// Общая громкость звука, 1.0 = 100 %.
+    SetOutputVolume(f32),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
     SetProcessing { aec: bool, noise: NoiseMode, agc: bool },
@@ -296,6 +298,8 @@ pub struct AudioPrefs {
     pub volumes: HashMap<String, f32>,
     /// Громкость звука трансляций по identity.
     pub stream_volumes: HashMap<String, f32>,
+    /// Общая громкость звука (множитель поверх громкости участников), 1.0 = 100 %.
+    pub output_volume: f32,
 }
 
 pub fn spawn(
@@ -732,6 +736,10 @@ impl Engine {
             Cmd::SetStreamVolume(id, v) => {
                 self.prefs.stream_volumes.insert(id.clone(), v);
                 self.apply_volume_for(&id);
+            }
+            Cmd::SetOutputVolume(v) => {
+                self.prefs.output_volume = v;
+                self.apply_volumes();
             }
             Cmd::SetInputDevice(id) => self.apply_input(id),
             Cmd::SetOutputDevice(id) => self.apply_output(id),
@@ -1835,7 +1843,7 @@ impl Engine {
             return 0.0;
         }
         let map = if source == TrackSource::ScreenshareAudio { &self.prefs.stream_volumes } else { &self.prefs.volumes };
-        map.get(identity).copied().unwrap_or(1.0)
+        map.get(identity).copied().unwrap_or(1.0) * self.prefs.output_volume
     }
 
     fn apply_volume_for(&self, identity: &str) {

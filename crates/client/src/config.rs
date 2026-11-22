@@ -164,6 +164,14 @@ pub struct Settings {
     pub members_open: bool,
     /// Недавние эмодзи (панель эмодзи), новые — первыми.
     pub recent_emoji: Vec<String>,
+    /// Громкость микрофона, 1.0 = 100 % (0–2).
+    pub mic_volume: f32,
+    /// Общая громкость звука собеседников и трансляций, 1.0 = 100 % (0–2).
+    pub output_volume: f32,
+    /// Автоматическая чувствительность порога (режим «Голосом»).
+    pub vad_auto: bool,
+    /// Ручной порог микрофона (шкала индикатора 0..1).
+    pub vad_threshold: f32,
 }
 
 impl Default for Settings {
@@ -202,6 +210,10 @@ impl Default for Settings {
             friends_offline_open: false,
             members_open: true,
             recent_emoji: Vec::new(),
+            mic_volume: 1.0,
+            output_volume: 1.0,
+            vad_auto: true,
+            vad_threshold: crate::gate::DEFAULT_THRESHOLD,
         }
     }
 }
@@ -303,6 +315,12 @@ mod tests {
         assert_eq!(s.animations, None);
         assert!(s.pause_anim_in_background && s.live_cat && !s.compact_tiles);
         assert_eq!((s.speech_indicator, s.ping_display, s.sounds_volume), (SpeechIndicator::Wave, PingDisplay::WaveAndMs, 60));
+    }
+
+    #[test]
+    fn old_settings_default_voice() {
+        let s: Settings = serde_json::from_str(r#"{"sounds":true}"#).unwrap();
+        assert_eq!((s.mic_volume, s.output_volume, s.vad_auto, s.vad_threshold), (1.0, 1.0, true, crate::gate::DEFAULT_THRESHOLD));
     }
 
     #[test]

@@ -109,7 +109,7 @@ impl SetTab {
 const SET_TABS: [(SetTab, &str, &str, &str, &str); 7] = [
     (SetTab::Profile, "ПОЛЬЗОВАТЕЛЬ", "Профиль", "Как вас видят другие", "аватар имя отображаемое о себе активность игра личные сообщения"),
     (SetTab::Account, "ПОЛЬЗОВАТЕЛЬ", "Аккаунт", "Логин, сервер и вход", "логин сервер пароль сеансы выйти"),
-    (SetTab::Voice, "ПРИЛОЖЕНИЕ", "Голос и видео", "Устройства, микрофон и шумоподавление", "микрофон вывод звука наушники проверка рация шумоподавление эхоподавление громкость"),
+    (SetTab::Voice, "ПРИЛОЖЕНИЕ", "Голос и видео", "Устройства, микрофон и шумоподавление", "микрофон вывод звука наушники проверка рация голосом порог чувствительность шумоподавление эхоподавление громкость"),
     (SetTab::Stream, "ПРИЛОЖЕНИЕ", "Стрим экрана", "Качество и звук трансляции экрана", "трансляция качество разрешение кадры звук"),
     (SetTab::Hotkeys, "ПРИЛОЖЕНИЕ", "Горячие клавиши", "Работают, даже когда окно свёрнуто", "клавиша рация сочетание"),
     (SetTab::Look, "ПРИЛОЖЕНИЕ", "Внешний вид", "Тема, анимации и звуки интерфейса", "тема тёмная светлая анимации индикатор речи пинг плитки кот звуки"),
@@ -306,7 +306,9 @@ impl App {
             sounds: settings.sounds,
             volumes: settings.user_volume.keys().map(|k| (k.clone(), settings.effective_volume(k))).collect::<HashMap<_, _>>(),
             stream_volumes: settings.stream_volume.clone(),
+            output_volume: settings.output_volume,
         };
+        push_gate(&settings);
         let video = VideoHub::new(&ctx);
         let chat = Chat::new(rt.handle().clone(), ctx.clone(), api.clone());
         let people = People::new(rt.handle().clone(), ctx.clone(), api.clone());
@@ -1716,6 +1718,12 @@ impl App {
                 self.view = View::Voice;
             }
             Some(channels_ui::Pick::Text(id)) => self.view = View::Text(id),
+            Some(channels_ui::Pick::Profile(uid, at)) => self.members.open_card(uid, at, None),
+            Some(channels_ui::Pick::PeerVolume(identity, at)) => {
+                if let Some(p) = vs.peers.iter().find(|p| p.identity == identity).cloned() {
+                    self.open_popup(&p, at);
+                }
+            }
             None => {}
         }
     }
@@ -1752,7 +1760,8 @@ impl App {
             }
             if active {
                 for p in &vs.peers {
-                    member_row(ui, p, &self.people);
+                    let r = member_row(ui, p, &self.people);
+                    self.peer_row_click(&r, p);
                 }
             }
         }
@@ -2356,14 +2365,30 @@ impl App {
                 let resp = ui.interact(rect, Id::new(("tile", &p.identity)), Sense::click());
                 let amp = speech_amp(ui, p);
                 tile(ui, rect, p, amp, &self.people);
-                if resp.clicked() && !p.is_local {
-                    self.open_popup(p, resp.interact_pointer_pos().unwrap_or(rect.center()));
+                let at = resp.interact_pointer_pos().unwrap_or(rect.center());
+                // ЛКМ — карточка профиля, ПКМ — громкость (решение владельца 22.11)
+                if resp.clicked()
+                    && let Ok(uid) = p.identity.parse::<i64>()
+                {
+                    self.members.open_card(uid, at, None);
+                } else if resp.secondary_clicked() && !p.is_local {
+                    self.open_popup(p, at);
                 }
-                if !p.is_local {
-                    resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                }
+                resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             }
             Item::Stream(p) => self.stream_tile(ui, rect, p, vs, big),
+        }
+    }
+
+    /// ЛКМ по строке участника — карточка, ПКМ — громкость.
+    fn peer_row_click(&mut self, r: &egui::Response, p: &Peer) {
+        let at = r.interact_pointer_pos().unwrap_or(r.rect.center());
+        if r.clicked()
+            && let Ok(uid) = p.identity.parse::<i64>()
+        {
+            self.members.open_card(uid, at, None);
+        } else if r.secondary_clicked() && !p.is_local {
+            self.open_popup(p, at);
         }
     }
 
@@ -3419,18 +3444,69 @@ impl App {
             self.settings.save();
             self.voice.send(Cmd::SetInputDevice(input));
         }
+        ui.add_space(8.0);
+        label(ui, "Вывод звука");
+        let mut output = self.settings.output_device.clone();
+        if device_combo(ui, "out", &mut output, &vs.outputs, w) {
+            self.settings.output_device = output.clone();
+            self.settings.save();
+            self.voice.send(Cmd::SetOutputDevice(output));
+        }
+        ui.add_space(6.0);
+
+        // громкости 0–200 %
+        let mut gate_changed = false;
+        let mut mic_vol = self.settings.mic_volume;
+        let mut out_vol = self.settings.output_volume;
+        for (text, hint, val) in [
+            ("Громкость микрофона", "Насколько громко вас слышат. Выше 100 % — усиление тихого микрофона", &mut mic_vol),
+            ("Громкость звука", "Общая громкость собеседников и трансляций (звуки интерфейса — в «Внешнем виде»)", &mut out_vol),
+        ] {
+            toggle_row(ui, w, |ui| {
+                ui.label(text).on_hover_text(hint);
+            }, |ui| {
+                ui.label(RichText::new(format!("{:.0} %", *val * 100.0)).size(13.0).color(t::p().text_muted));
+                let r = kit::slider(ui, val, 0.0..=2.0, 220.0);
+                if r.double_clicked() {
+                    *val = 1.0; // двойной клик — 100 %
+                }
+                // прилипание к 100 %
+                if (*val - 1.0).abs() < 0.03 {
+                    *val = 1.0;
+                }
+            });
+        }
+        if mic_vol != self.settings.mic_volume {
+            self.settings.mic_volume = mic_vol;
+            gate_changed = true;
+        }
+        if out_vol != self.settings.output_volume {
+            self.settings.output_volume = out_vol;
+            self.settings.save();
+            self.voice.send(Cmd::SetOutputVolume(out_vol));
+        }
+
+        // проверка микрофона
+        group_label(ui, "ПРОВЕРКА МИКРОФОНА");
         let level = if self.mic_test.as_ref().is_some_and(|t| t.running()) {
             Some(f32::from_bits(self.mic_level.load(Ordering::Relaxed)))
+        } else if vs.peers.iter().any(|p| p.is_local) {
+            Some(crate::denoise::local_voice().0) // в звонке: уровень до порога
         } else {
-            vs.peers.iter().find(|p| p.is_local).map(|p| p.level)
+            None
         };
-        level_meter(ui, level, w);
-        ui.add_space(4.0);
+        let voice_mode = !self.settings.ptt_enabled;
+        let thr = voice_mode.then(|| (crate::gate::threshold(), !self.settings.vad_auto));
+        if let Some(t) = level_meter(ui, level, w, thr) {
+            self.settings.vad_threshold = t;
+            gate_changed = true;
+        }
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             let clicked = if self.mic_playback {
                 kit::button(ui, kit::ButtonKind::Primary, "Остановить проверку", Some(egui_phosphor::fill::STOP))
             } else {
-                kit::button(ui, kit::ButtonKind::Secondary, "Слышать себя", Some(egui_phosphor::fill::HEADPHONES))
+                kit::button(ui, kit::ButtonKind::Secondary, "Послушать себя", Some(egui_phosphor::fill::HEADPHONES))
             }
             .clicked();
             if clicked {
@@ -3439,33 +3515,24 @@ impl App {
             let hint = match &self.mic_test_error {
                 Some(e) => RichText::new(format!("Проверка недоступна: {e}")).color(t::p().danger_text),
                 None if self.mic_playback => RichText::new("Так вас слышат друзья. Наденьте наушники — на колонках будет заводка.").color(t::p().text_muted),
+                None if voice_mode && self.settings.vad_auto => RichText::new("Белая метка — порог: тише неё микрофон молчит. Сейчас её ставит авточувствительность.").color(t::p().text_muted),
+                None if voice_mode => RichText::new("Тяните белую метку: тише неё микрофон молчит.").color(t::p().text_muted),
                 None => RichText::new("Голос с шумоподавлением, как в звонке. Лучше в наушниках.").color(t::p().text_muted),
             };
             ui.label(hint.size(12.5));
         });
-        ui.add_space(12.0);
+        ui.add_space(6.0);
 
-        label(ui, "Вывод звука");
-        let mut output = self.settings.output_device.clone();
-        if device_combo(ui, "out", &mut output, &vs.outputs, w) {
-            self.settings.output_device = output.clone();
-            self.settings.save();
-            self.voice.send(Cmd::SetOutputDevice(output));
-        }
-        ui.add_space(10.0);
-
-        // рация
+        // режим ввода
+        group_label(ui, "РЕЖИМ ВВОДА");
+        let mut ptt_mode = self.settings.ptt_enabled;
+        let show_key = ptt_mode;
         toggle_row(ui, w, |ui| {
-            ui.label("Режим рации — микрофон включён, пока держите клавишу");
+            kit::segmented(ui, &mut ptt_mode, &[(false, "Голосом"), (true, "Рацией")]);
         }, |ui| {
-            let mut on = self.settings.ptt_enabled;
-            if kit::switch(ui, &mut on).changed() {
-                self.settings.ptt_enabled = on;
-                self.settings.save();
-                self.ptt.set_enabled(on);
-                self.voice.send(Cmd::SetPttEnabled(on));
+            if !show_key {
+                return;
             }
-            ui.add_space(10.0);
             if self.ptt.capturing() {
                 if kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked() {
                     self.ptt.cancel_capture();
@@ -3476,8 +3543,38 @@ impl App {
                 if r.on_hover_text("Нажмите, чтобы назначить другую клавишу (можно кнопку мыши)").clicked() {
                     self.ptt.begin_capture();
                 }
+                ui.label(RichText::new("Клавиша рации").size(13.0).color(t::p().text_muted));
             }
         });
+        if ptt_mode != self.settings.ptt_enabled {
+            self.settings.ptt_enabled = ptt_mode;
+            self.ptt.set_enabled(ptt_mode);
+            self.voice.send(Cmd::SetPttEnabled(ptt_mode));
+            gate_changed = true;
+        }
+        if !self.settings.ptt_enabled {
+            toggle_row(ui, w, |ui| {
+                ui.label("Автоматическая чувствительность")
+                    .on_hover_text("Порог сам подстраивается под шум в комнате. Выключите, чтобы поставить метку вручную");
+            }, |ui| {
+                let mut auto = self.settings.vad_auto;
+                if kit::switch(ui, &mut auto).changed() {
+                    if !auto {
+                        // ручной порог начинается с того места, где была метка
+                        self.settings.vad_threshold = crate::gate::threshold();
+                    }
+                    self.settings.vad_auto = auto;
+                    gate_changed = true;
+                }
+            });
+        }
+        if gate_changed {
+            self.settings.save();
+            push_gate(&self.settings);
+        }
+
+        // обработка
+        group_label(ui, "ОБРАБОТКА ЗВУКА");
         let mut proc_changed = false;
         toggle_row(ui, w, |ui| {
             ui.label("Шумоподавление").on_hover_text(
@@ -4104,9 +4201,13 @@ fn peer_name(people: &People, p: &Peer) -> String {
     peer_user(people, p).shown_name().to_string()
 }
 
-pub(crate) fn member_row(ui: &mut Ui, p: &Peer, people: &People) {
+/// Строка участника моего звонка в списке слева. ЛКМ — карточка профиля, ПКМ — громкость (решение владельца 22.11).
+pub(crate) fn member_row(ui: &mut Ui, p: &Peer, people: &People) -> egui::Response {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 32.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect.shrink2(vec2(28.0, 0.0)).translate(vec2(14.0, 0.0)), CornerRadius::same(kit::R_ROW), t::p().row_hover);
+    }
     let amp = speech_amp(ui, p);
     let phase = wave_phase(ui);
     let painter = ui.painter();
@@ -4135,6 +4236,7 @@ pub(crate) fn member_row(ui: &mut Ui, p: &Peer, people: &People) {
             kit::wave(painter, pos2(left, c.y), 28.0, 1.0 + 4.0 * amp, phase, t::p().speaking, kit::WaveStyle::Solid);
         }
     }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Сглаженная громкость речи участника 0..1 (атака ~30 мс, спад ~200 мс); без анимаций — без сглаживания.
@@ -4331,18 +4433,58 @@ fn device_combo(ui: &mut Ui, salt: &str, selected: &mut Option<String>, devices:
     *selected != before
 }
 
-fn level_meter(ui: &mut Ui, level: Option<f32>, w: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 14.0), Sense::hover());
-    let n = 20;
+/// Громкость микрофона и порог — в колбэк захвата (порог только в режиме «Голосом»).
+fn push_gate(s: &Settings) {
+    crate::gate::set_params(s.mic_volume, !s.ptt_enabled, s.vad_auto, s.vad_threshold);
+}
+
+/// Индикатор уровня микрофона: сегменты (бирюза → жёлтый у пика); ниже порога — тусклые.
+/// `thr` — (порог 0..1, можно тянуть): белая метка. Возвращает новый порог, если метку потянули.
+fn level_meter(ui: &mut Ui, level: Option<f32>, w: f32, thr: Option<(f32, bool)>) -> Option<f32> {
+    const H: f32 = 14.0;
+    let sense = if thr.is_some_and(|(_, drag)| drag) { Sense::click_and_drag() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, H + 8.0), sense);
+    let bar = Rect::from_min_size(rect.min + vec2(0.0, 4.0), vec2(w, H));
+    // шкала индикатора — корень уровня (тихое видно лучше); порог переводим так же
+    let to_x = |l: f32| bar.left() + l.clamp(0.0, 1.0).sqrt() * w;
+    let mut new_thr = None;
+    if let Some((_, true)) = thr
+        && let Some(pos) = resp.interact_pointer_pos()
+        && (resp.dragged() || resp.clicked())
+    {
+        let k = ((pos.x - bar.left()) / w).clamp(0.0, 1.0);
+        new_thr = Some((k * k).clamp(0.005, 1.0));
+    }
+    let n = 24;
     let gap = 3.0;
     let seg = (w - gap * (n - 1) as f32) / n as f32;
-    let lit = level.map(|l| ((l.clamp(0.0, 1.0)).sqrt() * n as f32).round() as usize).unwrap_or(0);
-    let p = ui.painter();
+    let lit = level.map(|l| (l.clamp(0.0, 1.0).sqrt() * n as f32).round() as usize).unwrap_or(0);
+    let thr_now = new_thr.or(thr.map(|(t, _)| t));
+    let p = t::p();
+    let painter = ui.painter();
     for i in 0..n {
-        let r = Rect::from_min_size(rect.min + vec2(i as f32 * (seg + gap), 0.0), vec2(seg, 14.0));
-        let color = if i < lit { t::p().speaking } else { t::p().surface_3 };
-        p.rect_filled(r, CornerRadius::same(255), color);
+        let r = Rect::from_min_size(bar.min + vec2(i as f32 * (seg + gap), 0.0), vec2(seg, H));
+        let color = if i < lit {
+            let c = if i as f32 >= n as f32 * 0.8 { p.warning } else { p.speaking };
+            let below = thr_now.is_some_and(|t| r.right() <= to_x(t));
+            if below { c.gamma_multiply(0.4) } else { c }
+        } else {
+            p.surface_3
+        };
+        painter.rect_filled(r, CornerRadius::same(255), color);
     }
+    if let Some(t) = thr_now {
+        let x = to_x(t);
+        let m = Rect::from_center_size(pos2(x, bar.center().y), vec2(4.0, H + 8.0));
+        // белая метка; в светлой теме белое не видно — цветом текста
+        let mark = if std::ptr::eq(p, &t::LIGHT) { p.text } else { Color32::WHITE };
+        painter.rect_filled(m.translate(vec2(0.0, 1.0)), CornerRadius::same(2), Color32::from_black_alpha(60));
+        painter.rect_filled(m, CornerRadius::same(2), mark);
+        if thr.is_some_and(|(_, drag)| drag) {
+            resp.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        }
+    }
+    new_thr
 }
 
 fn toggle_row(ui: &mut Ui, w: f32, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {

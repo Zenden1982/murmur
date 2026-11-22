@@ -66,19 +66,18 @@ pub fn local_voice() -> (f32, bool) {
     (level, now.saturating_sub(LOUD_AT.load(Ordering::Relaxed)) <= SPEAK_HOLD_MS)
 }
 
-/// Уровень блока (шкала int16) → сглаженный уровень; отмечает речь и будит UI на её начале.
-fn track_level(block: &[f32]) {
-    if block.is_empty() {
-        return;
-    }
-    let rms = (block.iter().map(|s| (s / SCALE).powi(2)).sum::<f32>() / block.len() as f32).sqrt();
-    let lvl = (rms * 4.0).min(1.0);
+/// Порог (noise gate) звонка: только аудиопоток захвата.
+static GATE: Mutex<crate::gate::Gate> = Mutex::new(crate::gate::Gate::new());
+
+/// Уровень блока до порога (0..1) → сглаженный уровень; «говорю» — порог открыт (в режиме рации — громче SPEAK_LEVEL).
+fn track_level(lvl: f32, open: bool) {
+    let loud = if crate::gate::gate_on() { open } else { lvl >= SPEAK_LEVEL };
     let prev = f32::from_bits(LEVEL.load(Ordering::Relaxed));
     let smooth = if lvl > prev { lvl } else { prev * 0.85 + lvl * 0.15 };
     LEVEL.store(smooth.to_bits(), Ordering::Relaxed);
     let now = now_ms();
     BLOCK_AT.store(now, Ordering::Relaxed);
-    if lvl >= SPEAK_LEVEL {
+    if loud {
         LOUD_AT.store(now, Ordering::Relaxed);
         if !SPEAKING.swap(true, Ordering::Relaxed)
             && let Some(ctx) = REPAINT.get()
@@ -239,13 +238,25 @@ unsafe extern "C" fn capture_hook(channels: *const *mut f32, num_channels: usize
     if channels.is_null() || num_channels == 0 {
         return;
     }
-    unsafe { process_block(channels, num_channels, frames, rate) };
-    // Уровень — по тому, что уйдёт в кодер (после шумодава).
-    let first = unsafe { *channels };
-    if !first.is_null() {
-        // SAFETY: WebRTC передаёт num_channels указателей на буферы по frames float, живых на время вызова.
-        track_level(unsafe { std::slice::from_raw_parts(first, frames) });
+    // SAFETY: WebRTC передаёт num_channels указателей на буферы по frames float, живых на время вызова.
+    let ptrs = unsafe { std::slice::from_raw_parts(channels, num_channels) };
+    if ptrs.iter().any(|p| p.is_null()) {
+        return;
     }
+    // Громкость микрофона — до шумодава.
+    for &p in ptrs {
+        crate::gate::apply_gain(unsafe { std::slice::from_raw_parts_mut(p, frames) }, SCALE);
+    }
+    unsafe { process_block(channels, num_channels, frames, rate) };
+    // Порог — после шумодава; уровень для индикатора — до порога.
+    let first = unsafe { std::slice::from_raw_parts_mut(ptrs[0], frames) };
+    let Ok(mut gate) = GATE.try_lock() else { return };
+    let (lvl, open) = gate.process(first, SCALE, rate.max(1) as u32);
+    drop(gate);
+    for &p in &ptrs[1..] {
+        unsafe { std::slice::from_raw_parts_mut(p, frames) }.copy_from_slice(first);
+    }
+    track_level(lvl, open);
 }
 
 unsafe fn process_block(channels: *const *mut f32, num_channels: usize, frames: usize, rate: i32) {
