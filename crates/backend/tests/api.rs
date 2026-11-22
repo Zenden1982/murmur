@@ -1102,6 +1102,44 @@ mod upstream {
     }
 
     #[tokio::test]
+    async fn upstream_hang_parallel_not_queued() {
+        let f = fake().await;
+        f.set(Resp::Json(release("0.3.14", None)));
+        let up = Upstream::new(&f.base, "0.3.13").with_timings(
+            Duration::ZERO,
+            Duration::from_secs(86400),
+            Duration::from_millis(400),
+        );
+        let t = setup_with_upstream(up).await;
+        let (st, _) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        f.set(Resp::Hang);
+        let started = std::time::Instant::now();
+        let mut tasks = Vec::new();
+        for _ in 0..5 {
+            let app = t.app.clone();
+            tasks.push(tokio::spawn(async move {
+                use tower::ServiceExt;
+                let req = axum::http::Request::builder()
+                    .uri("/version")
+                    .header("x-forwarded-for", "203.0.113.1")
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                app.oneshot(req).await.unwrap().status()
+            }));
+        }
+        for t in tasks {
+            assert_eq!(t.await.unwrap(), StatusCode::OK, "старый кеш, а не ошибка");
+        }
+        assert!(started.elapsed() < Duration::from_millis(800), "не в очереди: {:?}", started.elapsed());
+        // после неудачи upstream какое-то время не дёргается
+        let hits = f.hits();
+        let (st, _) = t.call(Method::GET, "/version", None, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(f.hits(), hits, "повтор к зависшему upstream не сразу");
+    }
+
+    #[tokio::test]
     async fn upstream_disabled_keeps_404() {
         let t = setup().await;
         let (st, _, _, _) = t.call_raw(Method::GET, "/download/murmur-9.9.9.exe", None, vec![]).await;

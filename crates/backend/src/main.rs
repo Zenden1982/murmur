@@ -34,7 +34,7 @@ enum Cmd {
         #[arg(long, env = "DATABASE_URL", default_value = "sqlite://data/app.db")]
         database_url: String,
     },
-    /// Есть ли администратор: код выхода 0 — есть, 1 — нет (для установщика).
+    /// Есть ли администратор: код выхода 0 — есть, 2 — нет, 1 — ошибка (для установщика).
     AdminExists {
         #[arg(long, env = "DATABASE_URL", default_value = "sqlite://data/app.db")]
         database_url: String,
@@ -83,10 +83,12 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Cmd::AdminExists { database_url }) => {
-            let pool = backend::connect(&database_url).await?;
-            let yes = backend::admin_exists(&pool).await?;
-            println!("{}", if yes { "есть" } else { "нет" });
-            std::process::exit(if yes { 0 } else { 1 });
+            let r = async { backend::admin_exists(&backend::connect(&database_url).await?).await }.await;
+            match &r {
+                Ok(yes) => println!("{}", if *yes { "есть" } else { "нет" }),
+                Err(e) => eprintln!("ошибка: {e:#}"),
+            }
+            std::process::exit(admin_exit_code(&r));
         }
         Some(Cmd::CreateInvite {
             uses,
@@ -105,6 +107,15 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", inv.code);
             Ok(())
         }
+    }
+}
+
+/// Код выхода `admin-exists`: «нет» отличается от ошибки, чтобы установщик не создал второго админа при сбое.
+fn admin_exit_code(r: &anyhow::Result<bool>) -> i32 {
+    match r {
+        Ok(true) => 0,
+        Ok(false) => 2,
+        Err(_) => 1,
     }
 }
 
@@ -186,4 +197,16 @@ async fn shutdown(state: AppState) {
     tokio::select! { _ = ctrl_c => {}, _ = term => {} }
     tracing::info!("shutting down");
     state.close_streams();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admin_exit_code;
+
+    #[test]
+    fn admin_exists_exit_codes() {
+        assert_eq!(admin_exit_code(&Ok(true)), 0);
+        assert_eq!(admin_exit_code(&Ok(false)), 2, "«нет» — отдельный код, не как ошибка");
+        assert_eq!(admin_exit_code(&Err(anyhow::anyhow!("база занята"))), 1);
+    }
 }

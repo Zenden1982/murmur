@@ -79,7 +79,17 @@ pub struct Upstream {
     http: reqwest::Client,
     fresh: Duration,
     stale_max: Duration,
-    cache: tokio::sync::Mutex<Option<(Instant, ReleaseInfo)>>,
+    /// После неудачи upstream не дёргаем столько времени (отдаём старый кеш или «обновлений нет»).
+    retry_after: Duration,
+    state: std::sync::Mutex<CacheState>,
+    /// Один запрос к upstream за раз; остальные в это время не ждут, а берут кеш.
+    fetching: tokio::sync::Mutex<()>,
+}
+
+#[derive(Default)]
+struct CacheState {
+    ok: Option<(Instant, ReleaseInfo)>,
+    failed_at: Option<Instant>,
 }
 
 impl Upstream {
@@ -91,7 +101,9 @@ impl Upstream {
             http: client(Duration::from_secs(5)),
             fresh: Duration::from_secs(5 * 60),
             stale_max: Duration::from_secs(24 * 3600),
-            cache: tokio::sync::Mutex::new(None),
+            retry_after: Duration::from_secs(60),
+            state: std::sync::Mutex::new(CacheState::default()),
+            fetching: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -111,29 +123,41 @@ impl Upstream {
         &self.base
     }
 
-    /// Последний выпуск, который можно отдать клиентам этого сервера.
+    /// Последний выпуск, который можно отдать клиентам этого сервера. Никогда не ждёт чужой запрос к upstream.
     async fn latest(&self) -> Option<ReleaseInfo> {
-        let mut cache = self.cache.lock().await;
-        if let Some((at, info)) = cache.as_ref()
-            && at.elapsed() < self.fresh
-        {
-            return Some(info.clone());
-        }
-        match self.fetch().await {
+        let stale = {
+            let s = self.state.lock().expect("upstream state");
+            if let Some((at, info)) = &s.ok
+                && at.elapsed() < self.fresh
+            {
+                return Some(info.clone());
+            }
+            let stale = s.ok.as_ref().filter(|(at, _)| at.elapsed() < self.stale_max).map(|(_, i)| i.clone());
+            if s.failed_at.is_some_and(|t| t.elapsed() < self.retry_after) {
+                return stale;
+            }
+            stale
+        };
+        let Ok(_guard) = self.fetching.try_lock() else {
+            return stale;
+        };
+        let res = self.fetch().await;
+        let mut s = self.state.lock().expect("upstream state");
+        match res {
             Ok(Some(info)) => {
-                *cache = Some((Instant::now(), info.clone()));
+                s.ok = Some((Instant::now(), info.clone()));
+                s.failed_at = None;
                 Some(info)
             }
             Ok(None) => {
-                *cache = None;
+                s.ok = None;
+                s.failed_at = None;
                 None
             }
             Err(e) => {
                 tracing::warn!(upstream = %self.base, "обновления с официального сервера: {e}");
-                cache
-                    .as_ref()
-                    .filter(|(at, _)| at.elapsed() < self.stale_max)
-                    .map(|(_, info)| info.clone())
+                s.failed_at = Some(Instant::now());
+                stale
             }
         }
     }

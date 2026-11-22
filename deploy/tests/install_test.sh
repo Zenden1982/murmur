@@ -83,5 +83,54 @@ lib() { MURMUR_LIB=1 . "$INSTALL"; }
   rm -rf "$T"
   exit $FAILS ) || FAILS=$((FAILS+1))
 
+# ── почта, версия (то, что попадает в .env — он исполняется как shell)
+( lib
+  check "valid_email принимает" 'valid_email admin@example.com && valid_email "A.B+tag@Mail.Example.ru"'
+  for b in " a@b.ru" "a@b" "a b@c.ru" 'a$(id)@b.ru' "@b.ru" "a@" "a@@b.ru" ""; do
+    check "valid_email отвергает '$b'" '! valid_email "$b"'
+  done
+  check "valid_version" 'valid_version 0.3.13 && valid_version 0.0.0-test && ! valid_version "0.3" && ! valid_version "1.2.3;rm" && ! valid_version latest'
+  exit $FAILS ) || FAILS=$((FAILS+1))
+
+# ── is_installed: прерванная запись .env — не установка
+( lib
+  T=$(mktemp -d)
+  check "is_installed: нет .env" '! is_installed "$T"'
+  printf 'COMPOSE_PROFILES=media\n' > "$T/.env"
+  check "is_installed: обрывок .env" '! is_installed "$T"'
+  printf 'LIVEKIT_API_SECRET=x\nAPI_DOMAIN=api.a.b\n' >> "$T/.env"
+  check "is_installed: полный" 'is_installed "$T"'
+  rm -rf "$T"
+  exit $FAILS ) || FAILS=$((FAILS+1))
+
+# ── admin_state: «нет» (2) ≠ ошибка
+( lib
+  dc() { return "$DC_CODE"; }
+  check "admin_state есть" '[ "$(DC_CODE=0 admin_state)" = yes ]'
+  check "admin_state нет" '[ "$(DC_CODE=2 admin_state)" = no ]'
+  check "admin_state ошибка" '[ "$(DC_CODE=1 admin_state)" = error ]'
+  exit $FAILS ) || FAILS=$((FAILS+1))
+
+# ── murmur update без терминала: вопросов нет — tty не нужен
+( lib
+  T=$(mktemp -d)
+  printf 'LIVEKIT_API_SECRET=x\nAPI_DOMAIN=api.a.b\n' > "$T/.env"
+  id() { echo 1000; }
+  out=$(MURMUR_DIR="$T" MURMUR_TTY=/nonexistent main update 2>&1); code=$?
+  check "update без tty: доходит до проверки root" '[ $code -ne 0 ] && printf "%s" "$out" | grep -q root && ! printf "%s" "$out" | grep -q -- --yes'
+  rm -rf "$T"
+  exit $FAILS ) || FAILS=$((FAILS+1))
+
+# ── занятый 8080 ловится до изменений
+( lib
+  T=$(mktemp -d)
+  id() { echo 0; }
+  uname() { echo x86_64; }
+  ss() { case "$*" in *8080*) echo 'LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:* users:(("java",pid=9,fd=3))';; esac; }
+  out=$(MURMUR_DIR="$T/m" MURMUR_TTY=/nonexistent main --yes --admin a --admin-password-file /dev/null 2>&1); code=$?
+  check "busy_8080: стоп с сообщением" '[ $code -ne 0 ] && printf "%s" "$out" | grep -q 8080 && [ ! -e "$T/m" ]'
+  rm -rf "$T"
+  exit $FAILS ) || FAILS=$((FAILS+1))
+
 echo "итого: ошибок $FAILS"
 [ "$FAILS" -eq 0 ] && echo PASS

@@ -46,6 +46,16 @@ valid_domain() {
   esac
 }
 
+valid_email() {
+  case "${1:-}" in ''|*[!A-Za-z0-9._%+@-]*|@*|*@|*@*@*) return 1 ;; *@*) ;; *) return 1 ;; esac
+  valid_domain "$(printf '%s' "${1#*@}" | tr '[:upper:]' '[:lower:]')"
+}
+
+valid_version() { printf '%s' "${1:-}" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9]+)?'; }
+
+# установка уже есть (а не обрывок .env после прерванного первого запуска)
+is_installed() { [ -n "$(env_get "$1/.env" LIVEKIT_API_SECRET)" ] && [ -n "$(env_get "$1/.env" API_DOMAIN)" ]; }
+
 sslip_base() { printf '%s.sslip.io' "$(printf '%s' "$1" | tr . -)"; }
 
 # ───────────────────────────── .env
@@ -86,8 +96,8 @@ port_busy_by_other() {
   if [ "$1" = udp ]; then _l=$(ss -lunpH "sport = :$2" 2>/dev/null || true)
   else _l=$(ss -ltnpH "sport = :$2" 2>/dev/null || true); fi
   [ -n "$_l" ] || return 1
-  # наша же установка (повторный запуск): caddy / livekit-server из /opt/murmur
-  if [ -f "$MURMUR_DIR/.env" ]; then
+  # наша же установка (повторный запуск): caddy / livekit-server / проброс порта бэкенда
+  if is_installed "$MURMUR_DIR"; then
     case "$_l" in *'"caddy"'*|*'"livekit-server"'*|*'"docker-proxy"'*) return 1 ;; esac
   fi
   return 0
@@ -155,6 +165,14 @@ wait_backend() {
   return 1
 }
 
+# admin_state → yes | no | error (ошибка проверки ≠ «админа нет»: иначе при сбое создали бы второго)
+admin_state() {
+  if dc exec -T backend backend admin-exists >/dev/null 2>&1; then echo yes
+  else
+    case $? in 2) echo no ;; *) echo error ;; esac
+  fi
+}
+
 # ───────────────────────────── файлы
 fetch_files() { # fetch_files VERSION
   mkdir -p "$MURMUR_DIR"
@@ -213,20 +231,28 @@ cmd_install() {
     shift
   done
   ENV="$MURMUR_DIR/.env"
-  UPDATE=""; [ -f "$ENV" ] && UPDATE=1
+  UPDATE=""; is_installed "$MURMUR_DIR" && UPDATE=1
 
   # 1. проверки — до любых изменений системы
-  if [ -z "$YES" ] && ! have_tty; then
+  # вопросы задаются только при первой установке (при обновлении — лишь если админа нет)
+  if [ -z "$YES" ] && [ -z "$UPDATE" ] && ! have_tty; then
     die "нет терминала для вопросов. Запустите без вопросов:
   ... | sudo sh -s -- --yes --admin <ник> --admin-password-file <файл с паролем> [--domain <домен>]"
   fi
   [ "$(id -u)" = 0 ] || die "нужны права root. Запустите так: curl -fsSL https://raw.githubusercontent.com/$MURMUR_REPO/main/deploy/install.sh | sudo sh"
   [ "$(uname -m)" = x86_64 ] || die "поддерживается только x86-64 (у вас $(uname -m))"
-  for _p in tcp:443 tcp:7881 udp:7882 udp:3478; do
+  if [ -n "$VERSION" ]; then valid_version "$VERSION" || die "версия должна быть вида 0.3.13: '$VERSION'"; fi
+  if [ -n "$EMAIL" ]; then
+    EMAIL=$(printf '%s' "$EMAIL" | tr -d ' \t\r')
+    valid_email "$EMAIL" || die "не похоже на почту: '$EMAIL'"
+  fi
+  command -v ss >/dev/null 2>&1 || warn "нет команды ss (iproute2) — занятость портов не проверяю"
+  # наружу: 443, 7881, 7882/udp, 3478/udp; на этом сервере: 8080 (бэкенд), 7880 и 5349 (LiveKit)
+  for _p in tcp:443 tcp:7881 udp:7882 udp:3478 tcp:8080 tcp:7880 tcp:5349; do
     if port_busy_by_other "${_p%%:*}" "${_p#*:}"; then
       die "порт ${_p#*:}/${_p%%:*} уже занят другой программой:
 $(ss -lntupH "sport = :${_p#*:}" 2>/dev/null | head -n 3)
-Murmur нужен свободный 443 (и 7881, 7882/udp, 3478/udp). Если 443 занят вашим nginx/HAProxy —
+Murmur нужны свободные порты 443, 7881, 7882/udp, 3478/udp и локальные 8080, 7880, 5349. Если 443 занят вашим nginx/HAProxy —
 установите вручную в режиме «за SNI-прокси»: https://github.com/$MURMUR_REPO/blob/main/deploy/README.md"
     fi
   done
@@ -242,7 +268,7 @@ Murmur нужен свободный 443 (и 7881, 7882/udp, 3478/udp). Если
 
   # 3. версия и файлы
   [ -n "$VERSION" ] || VERSION=$(latest_version)
-  [ -n "$VERSION" ] || die "не узнал последнюю версию с GitHub — укажите явно: --version X.Y.Z"
+  valid_version "$VERSION" || die "не узнал последнюю версию с GitHub — укажите явно: --version X.Y.Z"
   step "Murmur $VERSION → $MURMUR_DIR"
   fetch_files "$VERSION"
 
@@ -291,13 +317,18 @@ Murmur нужен свободный 443 (и 7881, 7882/udp, 3478/udp). Если
   fi
 
   if [ -z "$UPDATE" ] && [ -z "$EMAIL" ] && [ -z "$YES" ]; then
-    EMAIL=$(ask "Почта для Let's Encrypt (необязательно, Enter — пропустить)")
+    while :; do
+      EMAIL=$(ask "Почта для Let's Encrypt (необязательно, Enter — пропустить)" | tr -d ' \t\r')
+      [ -z "$EMAIL" ] || valid_email "$EMAIL" && break
+      say "Не похоже на почту — ещё раз (или Enter, чтобы пропустить)."
+    done
   fi
 
-  # 5. .env
+  # 5. .env — собирается во временном файле и подменяется целиком (обрыв посередине не оставит «полуустановку»)
   LK_TAG=$(livekit_tag); [ -n "$LK_TAG" ] || die "в docker-compose.yml нет версии LiveKit"
   umask 077
-  if [ -z "$UPDATE" ]; then
+  REAL_ENV="$ENV"; ENV="$REAL_ENV.new"
+  if [ -n "$UPDATE" ]; then cp "$REAL_ENV" "$ENV"; else
     : > "$ENV"
     env_set "$ENV" COMPOSE_PROFILES media,caddy,backend
     env_set "$ENV" CADDY_SERVE_API 1
@@ -334,6 +365,9 @@ Murmur нужен свободный 443 (и 7881, 7882/udp, 3478/udp). Если
   env_set "$ENV" LIVEKIT_PUBLIC_URL "wss://$LK"
   # вебхук «вошёл/вышел» — через Caddy: бэкенд в этом режиме принимает только соединения с заголовком PROXY
   env_set "$ENV" LK_WEBHOOK_URL "https://$API/livekit/webhook"
+  chmod 600 "$ENV"
+  mv "$ENV" "$REAL_ENV"
+  ENV="$REAL_ENV"
 
   # 6. firewall
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -356,10 +390,15 @@ Murmur нужен свободный 443 (и 7881, 7882/udp, 3478/udp). Если
 
   # 8. администратор и инвайт
   INVITE=""
-  if ! dc exec -T backend backend admin-exists >/dev/null 2>&1; then
+  _adm=$(admin_state)
+  [ "$_adm" != error ] || die "не смог проверить, есть ли администратор (бэкенд не отвечает?). Журнал: murmur logs backend"
+  if [ "$_adm" = no ]; then
     step "Администратор"
     if [ -n "$YES" ] && { [ -z "$ADMIN" ] || [ -z "$PWFILE" ]; }; then
       die "администратора ещё нет — с --yes нужны --admin <ник> и --admin-password-file <файл>"
+    fi
+    if [ -z "$YES" ] && ! have_tty; then
+      die "администратора ещё нет, а спросить ник и пароль негде (нет терминала). Запустите с --admin <ник> --admin-password-file <файл>"
     fi
     if [ -z "$ADMIN" ]; then ADMIN=$(ask "Ник администратора (2–32 символа)"); fi
     if [ -n "$PWFILE" ]; then ADMIN_PASSWORD=$(cat "$PWFILE")
