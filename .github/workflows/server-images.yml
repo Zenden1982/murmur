@@ -1,0 +1,87 @@
+# Образы сервера Murmur на ghcr.io — для установки одной командой (deploy/install.sh) и ручного docker compose.
+# Запускается при публикации релиза vX.Y.Z (его создаёт scripts/gh-release.sh) или вручную с номером версии
+# (выпуск только сервера). После самого первого запуска владелец один раз делает три пакета публичными:
+# github.com/Zenden1982?tab=packages → пакет → Package settings → Change visibility → Public.
+name: server-images
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Версия x.y.z (тег образов)"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: server-images
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io/zenden1982
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+
+      - name: Версия
+        id: v
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          V="${INPUT_VERSION:-${TAG#v}}"
+          echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "плохая версия: $V"; exit 1; }
+          LK=$(grep -o 'livekit/livekit-server:v[0-9.]*' deploy/docker-compose.yml | head -1 | cut -d: -f2)
+          [ -n "$LK" ] || { echo "не нашёл версию LiveKit в deploy/docker-compose.yml"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "livekit=$LK" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Бэкенд
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/backend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/murmur-backend:${{ steps.v.outputs.version }}
+            ${{ env.REGISTRY }}/murmur-backend:latest
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Caddy (layer4)
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/caddy
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/murmur-caddy:${{ steps.v.outputs.version }}
+            ${{ env.REGISTRY }}/murmur-caddy:latest
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=caddy
+          cache-to: type=gha,mode=max,scope=caddy
+
+      - name: Копия LiveKit (Docker Hub с российских VPS бывает недоступен)
+        run: |
+          docker buildx imagetools create \
+            -t "$REGISTRY/murmur-livekit:${{ steps.v.outputs.livekit }}" \
+            "livekit/livekit-server:${{ steps.v.outputs.livekit }}"
