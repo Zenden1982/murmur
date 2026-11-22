@@ -8,5 +8,7 @@
 pub mod geom;
 pub mod guest;
 pub mod host;
+#[cfg(windows)]
+pub mod inject;
 pub mod keys;
 pub mod proto;
