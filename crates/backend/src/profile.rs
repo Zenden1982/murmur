@@ -17,14 +17,14 @@ use crate::{
 };
 
 pub(crate) async fn load_user(db: &sqlx::SqlitePool, id: i64) -> AppResult<User> {
-    type Row = (i64, String, bool, Option<String>, Option<String>, bool, Option<String>, Option<String>);
-    let (id, name, is_admin, display_name, avatar, dm_from_servers, about, status): Row = sqlx::query_as(
-        "SELECT id, name, is_admin, display_name, avatar_key, dm_from_servers, about, status FROM users WHERE id = ?",
+    type Row = (i64, String, bool, Option<String>, Option<String>, bool, Option<String>, Option<String>, Option<String>);
+    let (id, name, is_admin, display_name, avatar, dm_from_servers, about, status, banner): Row = sqlx::query_as(
+        "SELECT id, name, is_admin, display_name, avatar_key, dm_from_servers, about, status, banner_key FROM users WHERE id = ?",
     )
     .bind(id)
     .fetch_one(db)
     .await?;
-    Ok(User { id, name, is_admin, display_name, avatar, dm_from_servers, about, status, banner: None })
+    Ok(User { id, name, is_admin, display_name, avatar, dm_from_servers, about, status, banner })
 }
 
 /// Все, кто делит с человеком хоть один сервер (и он сам).
@@ -148,24 +148,50 @@ pub async fn update(State(state): State<AppState>, user: AuthUser, ApiJson(req):
     changed(&state, user.id).await
 }
 
-async fn set_avatar(state: &AppState, id: i64, key: Option<String>) -> AppResult<()> {
-    let old: Option<String> = sqlx::query_scalar("SELECT avatar_key FROM users WHERE id = ?").bind(id).fetch_one(&state.inner.db).await?;
-    sqlx::query("UPDATE users SET avatar_key = ? WHERE id = ?").bind(&key).bind(id).execute(&state.inner.db).await?;
-    if let Some(old) = old {
-        images::remove(state, &old).await;
+#[derive(Clone, Copy)]
+enum Slot {
+    Avatar,
+    Banner,
+}
+
+/// Записать новый ключ картинки; старый файл — убрать, если он больше никому не нужен.
+async fn set_image(state: &AppState, id: i64, slot: Slot, key: Option<String>) -> AppResult<()> {
+    let (get, set) = match slot {
+        Slot::Avatar => ("SELECT avatar_key FROM users WHERE id = ?", "UPDATE users SET avatar_key = ? WHERE id = ?"),
+        Slot::Banner => ("SELECT banner_key FROM users WHERE id = ?", "UPDATE users SET banner_key = ? WHERE id = ?"),
+    };
+    let old: Option<String> = sqlx::query_scalar(get).bind(id).fetch_one(&state.inner.db).await?;
+    sqlx::query(set).bind(&key).bind(id).execute(&state.inner.db).await?;
+    if let Some(old) = old
+        && Some(&old) != key.as_ref()
+    {
+        images::release(state, &old).await;
     }
     Ok(())
 }
 
-/// `PUT /me/avatar` — тело: квадратная картинка.
+/// PUT /me/avatar — тело: картинка 256×256 (PNG/JPEG/WebP/GIF, до 2 МБ).
 pub async fn put_avatar(State(state): State<AppState>, user: AuthUser, body: Bytes) -> AppResult<Json<User>> {
-    let key = images::store_profile_image(&state, &body).await?;
-    set_avatar(&state, user.id, Some(key)).await?;
+    let key = images::store_profile_media(&state, crate::media::Kind::Avatar, body).await?;
+    set_image(&state, user.id, Slot::Avatar, Some(key)).await?;
     changed(&state, user.id).await
 }
 
-/// `DELETE /me/avatar`
+/// DELETE /me/avatar
 pub async fn delete_avatar(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<User>> {
-    set_avatar(&state, user.id, None).await?;
+    set_image(&state, user.id, Slot::Avatar, None).await?;
+    changed(&state, user.id).await
+}
+
+/// PUT /me/banner — тело: картинка 960×384 (PNG/JPEG/WebP/GIF, до 4 МБ).
+pub async fn put_banner(State(state): State<AppState>, user: AuthUser, body: Bytes) -> AppResult<Json<User>> {
+    let key = images::store_profile_media(&state, crate::media::Kind::UserBanner, body).await?;
+    set_image(&state, user.id, Slot::Banner, Some(key)).await?;
+    changed(&state, user.id).await
+}
+
+/// DELETE /me/banner
+pub async fn delete_banner(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<User>> {
+    set_image(&state, user.id, Slot::Banner, None).await?;
     changed(&state, user.id).await
 }

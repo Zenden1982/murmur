@@ -12,14 +12,29 @@ use proto::{ChannelLayout, JoinResponse, Message, ServerEvent, User};
 use serde_json::json;
 use tower::ServiceExt;
 
-fn fake_png(w: u32, h: u32) -> Vec<u8> {
-    let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
-    v.extend_from_slice(&13u32.to_be_bytes());
-    v.extend_from_slice(b"IHDR");
-    v.extend_from_slice(&w.to_be_bytes());
-    v.extend_from_slice(&h.to_be_bytes());
-    v.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
-    v
+/// Настоящий PNG w×h; seed меняет содержимое (другой хеш).
+fn png(w: u32, h: u32, seed: u8) -> Vec<u8> {
+    use image::ImageEncoder;
+    let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x % 256) as u8, (y % 256) as u8, seed, 255]));
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out).write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8).unwrap();
+    out
+}
+
+fn gif2(w: u16, h: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut enc = gif::Encoder::new(&mut out, w, h, &[0, 0, 0, 255, 255, 255]).unwrap();
+        for i in 0..2u8 {
+            let f = gif::Frame { width: w, height: h, delay: 10, buffer: std::borrow::Cow::Owned(vec![i; w as usize * h as usize]), ..Default::default() };
+            enc.write_frame(&f).unwrap();
+        }
+    }
+    out
+}
+
+fn is_hash(k: &str) -> bool {
+    k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 async fn me(t: &T, tok: &str) -> User {
@@ -55,13 +70,13 @@ async fn display_name_too_long() {
 async fn avatar_upload_replace_delete() {
     let t = setup().await;
     let (tok, _) = t.user("okabe").await;
-    let (s, v, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&tok), fake_png(200, 100)).await;
+    let (s, v, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&tok), png(200, 100, 1)).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
-    let (s, v, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&tok), fake_png(256, 256)).await;
+    let (s, v, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&tok), png(256, 256, 1)).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     let k1 = serde_json::from_value::<User>(v).unwrap().avatar.unwrap();
     assert!(t.uploads.join(&k1).exists());
-    let (_, v, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&tok), fake_png(128, 128)).await;
+    let (_, v, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&tok), png(256, 256, 2)).await;
     let k2 = serde_json::from_value::<User>(v).unwrap().avatar.unwrap();
     assert!(!t.uploads.join(&k1).exists());
     assert_eq!(me(&t, &tok).await.avatar.as_deref(), Some(k2.as_str()));
@@ -77,7 +92,7 @@ async fn author_and_token_use_display_name() {
     let (tok, _) = t.user("okabe").await;
     let srv = t.create_server(&tok, "Лаб").await;
     t.call(Method::PATCH, "/me", Some(&tok), Some(json!({"display_name": "Окабэ"}))).await;
-    t.call_raw(Method::PUT, "/me/avatar", Some(&tok), fake_png(64, 64)).await;
+    t.call_raw(Method::PUT, "/me/avatar", Some(&tok), png(256, 256, 3)).await;
     let (_, v) = t.call(Method::GET, &format!("/servers/{}/channels", srv.id), Some(&tok), None).await;
     let l: ChannelLayout = serde_json::from_value(v).unwrap();
     let text = l.channels.iter().find(|c| c.kind == proto::ChannelKind::Text).unwrap().id;
@@ -124,4 +139,91 @@ async fn user_updated_goes_to_shared_servers_only() {
         ServerEvent::ServerUpserted { server } => assert_eq!(server.id, own.id),
         e => panic!("чужому пришло {e:?}"),
     }
+}
+
+#[tokio::test]
+async fn avatar_gif_upload() {
+    let t = setup().await;
+    let (tok, _) = t.user("okabe").await;
+    let (s, v, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&tok), gif2(256, 256)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let k = serde_json::from_value::<User>(v).unwrap().avatar.unwrap();
+    assert!(is_hash(&k), "{k}");
+    let (s, _, h, body) = t.call_raw(Method::GET, &format!("/images/{k}"), Some(&tok), vec![]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(h[header::CONTENT_TYPE], "image/gif");
+    assert!(body.starts_with(b"GIF89a"));
+}
+
+#[tokio::test]
+async fn banner_upload_and_delete() {
+    let t = setup().await;
+    let (a, _) = t.user("okabe").await;
+    let (b, bid) = t.user("kurisu").await;
+    let srv = t.create_server(&b, "Лаб").await;
+    let aid = me(&t, &a).await.id;
+    t.add_member(srv.id, aid, 0).await;
+    let (s, v, _, _) = t.call_raw(Method::PUT, "/me/banner", Some(&a), png(960, 384, 1)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let k = serde_json::from_value::<User>(v).unwrap().banner.unwrap();
+    assert!(is_hash(&k));
+    assert_eq!(me(&t, &a).await.banner.as_deref(), Some(k.as_str()));
+    let (s, v) = t.call(Method::GET, &format!("/users/{aid}"), Some(&b), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["banner"], k.as_str());
+    let (s, _, _, _) = t.call_raw(Method::GET, &format!("/images/{k}"), Some(&b), vec![]).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, v) = t.call(Method::DELETE, "/me/banner", Some(&a), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(me(&t, &a).await.banner, None);
+    assert!(!t.uploads.join(&k).exists());
+    let _ = bid;
+}
+
+#[tokio::test]
+async fn banner_wrong_size() {
+    let t = setup().await;
+    let (tok, _) = t.user("okabe").await;
+    let (s, _, _, _) = t.call_raw(Method::PUT, "/me/banner", Some(&tok), png(960, 480, 1)).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn shared_key_not_deleted() {
+    let t = setup().await;
+    let (a, _) = t.user("okabe").await;
+    let (b, _) = t.user("kurisu").await;
+    let (_, va, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&a), png(256, 256, 7)).await;
+    let (_, vb, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&b), png(256, 256, 7)).await;
+    let ka = serde_json::from_value::<User>(va).unwrap().avatar.unwrap();
+    let kb = serde_json::from_value::<User>(vb).unwrap().avatar.unwrap();
+    assert_eq!(ka, kb);
+    let (s, _) = t.call(Method::DELETE, "/me/avatar", Some(&a), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(t.uploads.join(&kb).exists());
+    let (s, _, _, _) = t.call_raw(Method::GET, &format!("/images/{kb}"), Some(&b), vec![]).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn same_file_twice_keeps_file() {
+    let t = setup().await;
+    let (a, _) = t.user("okabe").await;
+    t.call_raw(Method::PUT, "/me/avatar", Some(&a), png(256, 256, 9)).await;
+    let (s, v, _, _) = t.call_raw(Method::PUT, "/me/avatar", Some(&a), png(256, 256, 9)).await;
+    assert_eq!(s, StatusCode::OK);
+    let k = serde_json::from_value::<User>(v).unwrap().avatar.unwrap();
+    assert!(t.uploads.join(&k).exists());
+}
+
+#[tokio::test]
+async fn old_random_avatar_still_served() {
+    let t = setup().await;
+    let (a, aid) = t.user("okabe").await;
+    let key = "oldrandomtoken0123456789abcdefABCDEF";
+    std::fs::create_dir_all(&t.uploads).unwrap();
+    std::fs::write(t.uploads.join(key), png(256, 256, 1)).unwrap();
+    sqlx::query("UPDATE users SET avatar_key = ? WHERE id = ?").bind(key).bind(aid).execute(&t.pool).await.unwrap();
+    let (s, _, _, _) = t.call_raw(Method::GET, &format!("/images/{key}"), Some(&a), vec![]).await;
+    assert_eq!(s, StatusCode::OK);
 }

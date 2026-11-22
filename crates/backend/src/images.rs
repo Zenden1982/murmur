@@ -60,6 +60,36 @@ pub async fn store_banner_image(state: &AppState, body: &[u8]) -> AppResult<Stri
     Ok(key)
 }
 
+/// Картинка профиля пользователя (аватар/баннер): строгая проверка и очистка (media::sanitize), ключ = sha256 итога.
+pub async fn store_profile_media(state: &AppState, kind: crate::media::Kind, body: Bytes) -> AppResult<String> {
+    let clean = tokio::task::spawn_blocking(move || crate::media::sanitize(kind, &body))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("проверка картинки: {e}")))?
+        .map_err(AppError::Validation)?;
+    use sha2::Digest;
+    let key: String = sha2::Sha256::digest(&clean).iter().map(|b| format!("{b:02x}")).collect();
+    let path = storage_path(state, &key);
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        write_atomic(&path, &clean).await.map_err(|e| AppError::Internal(anyhow::anyhow!("запись файла: {e}")))?;
+    }
+    Ok(key)
+}
+
+/// Удалить файл картинки, если на него больше никто не ссылается (ключи-хеши бывают общими).
+pub async fn release(state: &AppState, key: &str) {
+    let used: Result<i64, _> = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM users WHERE avatar_key = ?1 OR banner_key = ?1) + (SELECT COUNT(*) FROM servers WHERE icon_key = ?1 OR banner_key = ?1)",
+    )
+    .bind(key)
+    .fetch_one(&state.inner.db)
+    .await;
+    match used {
+        Ok(0) => remove(state, key).await,
+        Ok(_) => {}
+        Err(e) => tracing::warn!(key, error = %e, "не удалось проверить ссылки на картинку"),
+    }
+}
+
 pub async fn remove(state: &AppState, key: &str) {
     crate::chat::remove_files(state, &[key.to_string()]).await;
 }
@@ -75,7 +105,7 @@ pub async fn get_image(State(state): State<AppState>, _user: AuthUser, Path(key)
         return Err(AppError::NotFound);
     }
     let known: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM users WHERE avatar_key = ?1) + (SELECT COUNT(*) FROM servers WHERE icon_key = ?1 OR banner_key = ?1)",
+        "SELECT (SELECT COUNT(*) FROM users WHERE avatar_key = ?1 OR banner_key = ?1) + (SELECT COUNT(*) FROM servers WHERE icon_key = ?1 OR banner_key = ?1)",
     )
     .bind(&key)
     .fetch_one(&state.inner.db)

@@ -32,7 +32,13 @@ pub fn router(state: AppState) -> Router {
             "/me/avatar",
             axum::routing::put(profile::put_avatar)
                 .delete(profile::delete_avatar)
-                .layer(DefaultBodyLimit::max(limits::IMAGE_PROFILE_MAX_BYTES + 64 * 1024)),
+                .layer(DefaultBodyLimit::max(limits::AVATAR_MAX_BYTES + 64 * 1024)),
+        )
+        .route(
+            "/me/banner",
+            axum::routing::put(profile::put_banner)
+                .delete(profile::delete_banner)
+                .layer(DefaultBodyLimit::max(limits::USER_BANNER_MAX_BYTES + 64 * 1024)),
         )
         .route("/channels", get(channels::legacy_list).post(channels::legacy_create))
         .route("/channels/{id}", axum::routing::patch(channels::update).delete(channels::delete))
