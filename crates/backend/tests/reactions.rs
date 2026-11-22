@@ -86,6 +86,35 @@ async fn reaction_unknown_name_or_message_rejected() {
 }
 
 #[tokio::test]
+async fn unicode_reaction_roundtrip() {
+    let c = setup_chat().await;
+    let (_, v) = c.say(&c.user, json!({"content": "x"})).await;
+    let m: Message = serde_json::from_value(v).unwrap();
+    assert_eq!(c.react(&c.user, Method::PUT, m.id, "%F0%9F%A6%86").await, StatusCode::NO_CONTENT);
+    assert_eq!(c.history(&c.user).await[0].reactions[0].name, "🦆");
+    // c: — зарезервировано под свои эмодзи сервера
+    assert_eq!(c.react(&c.user, Method::PUT, m.id, "c:1").await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(c.react(&c.user, Method::DELETE, m.id, "%F0%9F%A6%86").await, StatusCode::NO_CONTENT);
+    assert!(c.history(&c.user).await[0].reactions.is_empty());
+}
+
+#[tokio::test]
+async fn too_many_distinct_reactions() {
+    let c = setup_chat().await;
+    let (_, v) = c.say(&c.user, json!({"content": "x"})).await;
+    let m: Message = serde_json::from_value(v).unwrap();
+    let all: Vec<&str> = vec!["😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😊", "😇", "🙂", "🙃", "😉", "😌", "😍", "🥰", "😘", "😗", "😙", "😚", "😋", "😛"];
+    let enc = |e: &str| e.bytes().map(|b| format!("%{b:02X}")).collect::<String>();
+    for (i, e) in all.iter().enumerate() {
+        let tok = if i % 2 == 0 { &c.user } else { &c.admin };
+        let want = if i < proto::REACTIONS_PER_MESSAGE_MAX { StatusCode::NO_CONTENT } else { StatusCode::UNPROCESSABLE_ENTITY };
+        assert_eq!(c.react(tok, Method::PUT, m.id, &enc(e)).await, want, "{i} {e}");
+    }
+    // уже стоящую — можно поставить ещё одному человеку
+    assert_eq!(c.react(&c.admin, Method::PUT, m.id, &enc(all[0])).await, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn reaction_event_published() {
     let c = setup_chat().await;
     let (_, v) = c.say(&c.user, json!({"content": "x"})).await;

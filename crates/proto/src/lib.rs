@@ -573,7 +573,7 @@ pub struct Message {
     pub sticker: Option<String>,
 }
 
-/// Реакция на сообщение: имя из `REACTIONS` и кто поставил.
+/// Реакция на сообщение: имя (из `REACTIONS` или сам Unicode-эмодзи, см. `reaction_valid`) и кто поставил.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reaction {
     pub name: String,
@@ -599,6 +599,33 @@ pub const REACTIONS: &[(&str, &str)] = &[
     ("check", "✅"),
     ("x", "❌"),
 ];
+
+/// Сколько разных реакций может быть на одном сообщении.
+pub const REACTIONS_PER_MESSAGE_MAX: usize = 20;
+
+fn unicode_emoji(s: &str) -> bool {
+    emojis::get(s).is_some() || emojis::get(&s.replace('\u{FE0F}', "")).is_some()
+}
+
+/// Допустимое имя реакции: одно из `REACTIONS` или один Unicode-эмодзи.
+/// Префикс `c:` зарезервирован под свои эмодзи сервера.
+pub fn reaction_valid(name: &str) -> bool {
+    name.len() <= 32 && !name.starts_with("c:") && (REACTIONS.iter().any(|(n, _)| *n == name) || unicode_emoji(name))
+}
+
+/// Что показать для реакции: эмодзи из `REACTIONS` или само имя, если это эмодзи.
+pub fn reaction_emoji(name: &str) -> Option<&str> {
+    if let Some((_, e)) = REACTIONS.iter().find(|(n, _)| *n == name) {
+        return Some(e);
+    }
+    (name.len() <= 32 && unicode_emoji(name)).then_some(name)
+}
+
+/// Имя реакции для эмодзи: из 16 быстрых — старое имя (их понимают старые клиенты), иначе сам эмодзи.
+pub fn reaction_name(emoji: &str) -> String {
+    let bare = emoji.replace('\u{FE0F}', "");
+    REACTIONS.iter().find(|(_, e)| e.replace('\u{FE0F}', "") == bare).map_or_else(|| emoji.to_string(), |(n, _)| n.to_string())
+}
 
 /// Стикеры (коты Murmur): (id, подпись).
 pub const STICKERS: &[(&str, &str)] = &[
@@ -862,6 +889,23 @@ mod tests {
         roundtrip(ServerEvent::LayoutChanged { server_id: 3, layout }, "layout_changed");
         roundtrip(ServerEvent::Voice { server_id: 3, roster: VoiceRoster { channel_id: 5, user_ids: vec![2] } }, "voice");
         roundtrip(ServerEvent::UserUpdated { user }, "user_updated");
+    }
+
+    #[test]
+    fn reactions_any_emoji() {
+        assert!(reaction_valid("fire"));
+        assert!(reaction_valid("🦆"));
+        assert!(reaction_valid("❤️"));
+        assert!(!reaction_valid("nope"));
+        assert!(!reaction_valid("c:42"));
+        assert!(!reaction_valid("a🦆"));
+        assert!(!reaction_valid(&"x".repeat(40)));
+        assert_eq!(reaction_name("🔥"), "fire");
+        assert_eq!(reaction_name("❤️"), "heart");
+        assert_eq!(reaction_name("🦆"), "🦆");
+        assert_eq!(reaction_emoji("fire"), Some("🔥"));
+        assert_eq!(reaction_emoji("🦆"), Some("🦆"));
+        assert_eq!(reaction_emoji("zzz"), None);
     }
 
     #[test]

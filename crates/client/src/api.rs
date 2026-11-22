@@ -313,7 +313,7 @@ impl Api {
     /// Поставить/убрать свою реакцию на сообщение.
     pub async fn react(&self, message_id: i64, name: &str, on: bool) -> ApiResult<()> {
         let m = if on { Method::PUT } else { Method::DELETE };
-        self.call::<(), _>(m, &format!("/messages/{message_id}/reactions/{name}"), None).await
+        self.call::<(), _>(m, &format!("/messages/{message_id}/reactions/{}", path_segment(name)), None).await
     }
 
     /// Удалить из друзей / отклонить / отменить заявку.
@@ -517,5 +517,22 @@ mod tests {
         assert!(e.message.contains("не потрачено"));
         let e = humanize(StatusCode::BAD_GATEWAY, None);
         assert_eq!(e.code, "http_502");
+    }
+}
+
+/// Кусок пути URL: всё, кроме [A-Za-z0-9_.-], — %XX (эмодзи-реакции вроде #️⃣ содержат «#»).
+fn path_segment(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"_.-".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
+}
+
+#[cfg(test)]
+mod path_tests {
+    #[test]
+    fn path_segment_escapes() {
+        assert_eq!(super::path_segment("fire"), "fire");
+        assert_eq!(super::path_segment("+1"), "%2B1");
+        assert_eq!(super::path_segment("#\u{FE0F}\u{20E3}"), "%23%EF%B8%8F%E2%83%A3");
     }
 }

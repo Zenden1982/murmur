@@ -338,7 +338,7 @@ pub async fn delete_reaction(
 }
 
 async fn react(state: &AppState, user_id: i64, mid: i64, name: &str, on: bool) -> AppResult<StatusCode> {
-    if !proto::REACTIONS.iter().any(|(n, _)| *n == name) {
+    if !proto::reaction_valid(name) {
         return Err(AppError::Validation("нет такой реакции".into()));
     }
     let db = &state.inner.db;
@@ -351,6 +351,17 @@ async fn react(state: &AppState, user_id: i64, mid: i64, name: &str, on: bool) -
     let target = chat_target(state, channel_id, user_id).await?;
     state.inner.chat_limiter.check(user_id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
     let changed = if on {
+        // новый вид реакции — только пока их меньше лимита
+        let (distinct, has): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(DISTINCT name), COALESCE(SUM(name = ?), 0) FROM message_reactions WHERE message_id = ?",
+        )
+        .bind(name)
+        .bind(mid)
+        .fetch_one(db)
+        .await?;
+        if has == 0 && distinct >= proto::REACTIONS_PER_MESSAGE_MAX as i64 {
+            return Err(AppError::Validation("слишком много разных реакций".into()));
+        }
         sqlx::query("INSERT OR IGNORE INTO message_reactions (message_id, user_id, name, created_at) VALUES (?, ?, ?, ?)")
             .bind(mid)
             .bind(user_id)
