@@ -219,11 +219,14 @@ pub fn install(ctx: &egui::Context) {
     add(&mut fonts, XBOLD, include_bytes!("../assets/fonts/Nunito-ExtraBold.ttf"));
     add(&mut fonts, "phosphor", egui_phosphor::Variant::Regular.font_bytes());
     add(&mut fonts, PH_FILL, egui_phosphor::Variant::Fill.font_bytes());
+    // Иконки бренда Murmur (scripts/icons): те же коды, что у phosphor, — стоят раньше и заменяют их там, где есть пара.
+    add(&mut fonts, "murmur-icons", include_bytes!("../assets/fonts/murmur-icons.ttf"));
+    add(&mut fonts, "murmur-icons-fill", include_bytes!("../assets/fonts/murmur-icons-fill.ttf"));
 
     // Стандартные шрифты egui остаются запасными (символы, которых нет в Manrope).
     let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let family = |first: &str, icons: &str| {
-        let mut v = vec![first.to_string(), icons.to_string()];
+        let mut v = vec![first.to_string(), "murmur-icons".to_string(), icons.to_string()];
         v.extend(fallback.iter().cloned());
         v
     };
@@ -231,7 +234,7 @@ pub fn install(ctx: &egui::Context) {
     for name in [SEMIBOLD, BOLD, XBOLD] {
         fonts.families.insert(FontFamily::Name(name.into()), family(name, "phosphor"));
     }
-    fonts.families.insert(FontFamily::Name(PH_FILL.into()), family(PH_FILL, "nunito"));
+    fonts.families.insert(FontFamily::Name(PH_FILL.into()), vec!["murmur-icons-fill".into(), PH_FILL.into(), "nunito".into()]);
     ctx.set_fonts(fonts);
 
     set_theme(ctx, crate::config::ThemePref::System);

@@ -2659,7 +2659,7 @@ impl App {
                     }
                     ui.add_space(4.0);
                     let (icon, text) = if muted {
-                        (egui_phosphor::fill::SPEAKER_HIGH, "Включить для себя")
+                        (egui_phosphor::fill::SPEAKER_SIMPLE_HIGH, "Включить для себя")
                     } else {
                         (egui_phosphor::fill::SPEAKER_SLASH, "Заглушить для себя")
                     };

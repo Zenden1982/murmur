@@ -1,0 +1,11 @@
+[package]
+name = "icontool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+usvg = "0.45"
+tiny-skia-path = "0.11"
+
+# отдельный инструмент, не часть workspace
+[workspace]

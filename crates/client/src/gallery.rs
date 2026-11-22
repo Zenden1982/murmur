@@ -134,7 +134,7 @@ pub fn ui(ui: &mut Ui, s: &mut GalleryState, theme: &mut ThemePref) {
                     ui.add_space(30.0);
                     ui.vertical(|ui| {
                         ui.set_width(220.0);
-                        kit::menu_item(ui, egui_phosphor::fill::SPEAKER_HIGH, "Громкость", false);
+                        kit::menu_item(ui, egui_phosphor::fill::SPEAKER_SIMPLE_HIGH, "Громкость", false);
                         kit::menu_item(ui, egui_phosphor::fill::USER, "Профиль", false);
                         kit::menu_item(ui, egui_phosphor::fill::PROHIBIT, "Выгнать", true);
                     });
