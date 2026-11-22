@@ -330,6 +330,20 @@ impl Api {
         self.call::<(), _>(Method::DELETE, "/me/avatar", None).await
     }
 
+    /// Свой баннер: 960×384 (PNG или GIF).
+    pub async fn put_banner(&self, bytes: Vec<u8>) -> ApiResult<User> {
+        let req = self
+            .request(Method::PUT, "/me/banner")
+            .timeout(UPLOAD_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes);
+        Self::decode(req.send().await.map_err(ApiError::network)?).await
+    }
+
+    pub async fn delete_banner(&self) -> ApiResult<User> {
+        self.call::<(), _>(Method::DELETE, "/me/banner", None).await
+    }
+
     /// Картинка профиля/сервера по ключу.
     pub async fn image(&self, key: &str) -> ApiResult<Vec<u8>> {
         let resp = self.request(Method::GET, &format!("/images/{key}")).send().await.map_err(ApiError::network)?;

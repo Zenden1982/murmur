@@ -47,7 +47,8 @@ enum Msg {
     /// Профиль сохранён (`Ok(None)` — выбор файла отменён).
     Profile(Result<Option<User>, String>),
     /// Картинка для аватара выбрана — открыть обрезку.
-    AvatarPicked(Result<Option<image::DynamicImage>, String>),
+    /// Картинка профиля выбрана: исходник и форма (аватар/баннер).
+    AvatarPicked(Result<Option<crate::crop::Source>, String>, crate::crop::Shape),
     /// Установщик Murmur скачан (переход со старой установки).
     Legacy(Result<std::path::PathBuf, String>),
     /// Установщик для тихой переустановки как murmur.exe.
@@ -726,8 +727,11 @@ impl App {
                         self.login.server_state = if ok { ServerState::Up } else { ServerState::Down };
                     }
                 }
-                Msg::AvatarPicked(res) => match res {
-                    Ok(Some(img)) => self.avatar_crop = Some(crate::crop::CropDialog::new(&self.ctx, "Аватар", img)),
+                Msg::AvatarPicked(res, shape) => match res {
+                    Ok(Some(src)) => {
+                        let title = if shape == crate::crop::Shape::Banner { "Баннер" } else { "Аватар" };
+                        self.avatar_crop = Some(crate::crop::CropDialog::new_profile(&self.ctx, title, src, shape));
+                    }
                     Ok(None) => self.profile_busy = false,
                     Err(e) => {
                         self.profile_busy = false;
@@ -3331,7 +3335,7 @@ impl App {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if kit::button_ex(ui, kit::ButtonKind::Secondary, "Сменить аватар…", Some(egui_phosphor::fill::IMAGE), !busy).clicked() {
-                        self.pick_avatar();
+                        self.pick_profile_image(crate::crop::Shape::Circle);
                     }
                     if me.avatar.is_some() && kit::button_ex(ui, kit::ButtonKind::Ghost, "Убрать", None, !busy).clicked() {
                         self.profile_busy = true;
@@ -3403,15 +3407,14 @@ impl App {
         }
     }
 
-    /// Выбрать картинку → окно обрезки → 256 px PNG → `PUT /me/avatar`.
-    fn pick_avatar(&mut self) {
+    /// Выбрать картинку → окно обрезки → в фоне собрать (GIF — все кадры) → `PUT /me/avatar` / `PUT /me/banner`.
+    fn pick_profile_image(&mut self, shape: crate::crop::Shape) {
         self.profile_busy = true;
         self.profile_error = None;
+        let title = if shape == crate::crop::Shape::Banner { "Баннер" } else { "Аватар" };
         self.spawn(
-            async move {
-                tokio::task::spawn_blocking(|| servers_ui::pick_image("Аватар")).await.map_err(|e| e.to_string())?
-            },
-            Msg::AvatarPicked,
+            async move { tokio::task::spawn_blocking(move || servers_ui::pick_source(title)).await.map_err(|e| e.to_string())? },
+            move |r| Msg::AvatarPicked(r, shape),
         );
     }
 
@@ -3423,10 +3426,22 @@ impl App {
                 self.avatar_crop = None;
                 self.profile_busy = false;
             }
-            crate::crop::CropResult::Done(png) => {
+            crate::crop::CropResult::Done(_) => {
+                self.avatar_crop = None;
+                self.profile_busy = false;
+            }
+            crate::crop::CropResult::Render(job) => {
                 self.avatar_crop = None;
                 let api = self.api.clone();
-                self.spawn(async move { api.put_avatar(png).await.map(Some).map_err(|e| e.message) }, Msg::Profile);
+                self.spawn(
+                    async move {
+                        let shape = job.shape;
+                        let bytes = tokio::task::spawn_blocking(move || crate::crop::render(&job)).await.map_err(|e| e.to_string())??;
+                        let res = if shape == crate::crop::Shape::Banner { api.put_banner(bytes).await } else { api.put_avatar(bytes).await };
+                        res.map(Some).map_err(|e| e.message)
+                    },
+                    Msg::Profile,
+                );
             }
         }
     }

@@ -276,7 +276,7 @@ impl ServerSettings {
         if let Some(c) = self.crop.as_mut() {
             match c.ui(ctx) {
                 crate::crop::CropResult::Open => {}
-                crate::crop::CropResult::Cancel => self.crop = None,
+                crate::crop::CropResult::Cancel | crate::crop::CropResult::Render(_) => self.crop = None,
                 crate::crop::CropResult::Done(png) => {
                     self.crop = None;
                     self.icon_preview = people::round_image(&png, 112)

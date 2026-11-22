@@ -130,6 +130,24 @@ pub fn pick_image(title: &str) -> Result<Option<image::DynamicImage>, String> {
     crop::load(&bytes).map(Some)
 }
 
+/// Картинка профиля (аватар/баннер): исходник целиком (GIF — со всеми кадрами). Блокирует — звать в фоне.
+pub fn pick_source(title: &str) -> Result<Option<crop::Source>, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title(title)
+        .set_parent(&crate::desktop::main_window())
+        .add_filter("Картинки", &["png", "jpg", "jpeg", "gif", "webp"])
+        .pick_file()
+    else {
+        return Ok(None);
+    };
+    let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if len > proto::limits::PROFILE_SOURCE_MAX_BYTES as u64 {
+        return Err(format!("Файл больше {} МБ.", proto::limits::PROFILE_SOURCE_MAX_BYTES / 1024 / 1024));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("Не читается файл: {e}"))?;
+    crop::load_source(bytes).map(Some)
+}
+
 impl ServersUi {
     pub fn new(rt: tokio::runtime::Handle, ctx: egui::Context, api: Api) -> Self {
         let (tx, rx) = std_mpsc::channel();
@@ -287,7 +305,7 @@ impl ServersUi {
         let Some(c) = self.crop.as_mut() else { return };
         match c.ui(ctx) {
             CropResult::Open => {}
-            CropResult::Cancel => self.crop = None,
+            CropResult::Cancel | CropResult::Render(_) => self.crop = None,
             CropResult::Done(png) => {
                 self.crop = None;
                 if let Some(d) = self.add.as_mut() {
