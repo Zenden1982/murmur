@@ -144,6 +144,7 @@ pub async fn open(State(state): State<AppState>, user: AuthUser, ApiJson(req): A
     if !can_write(db, user.id, other, None).await? {
         return Err(not_allowed());
     }
+    state.inner.chat_limiter.check(user.id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
     let mut tx = db.begin().await?;
     let id = sqlx::query("INSERT INTO channels (name, kind, created_at) VALUES ('', 'text', ?)")
         .bind(now())
@@ -323,6 +324,7 @@ async fn callable(state: &AppState, channel_id: i64, me: i64) -> AppResult<()> {
 /// `POST /dms/{id}/call` — позвонить или ответить на звонок: токен LiveKit комнаты звонка.
 pub async fn call(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> AppResult<Json<JoinResponse>> {
     callable(&state, id, user.id).await?;
+    state.inner.chat_limiter.check(user.id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
     let room = dm_room(id);
     let roster = state.inner.presence.roster(&room);
     let new_ring = {
