@@ -265,6 +265,13 @@ impl Default for VoiceState {
 
 pub type Shared = Arc<Mutex<VoiceState>>;
 
+/// Комната закрывается в фоне (leave): при выходе из программы надо дождаться, иначе в канале остаётся «призрак» (V6).
+static ROOM_CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn room_closing() -> bool {
+    ROOM_CLOSING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[derive(Clone)]
 pub struct VoiceHandle {
     tx: mpsc::UnboundedSender<Cmd>,
@@ -1087,6 +1094,7 @@ impl Engine {
         // Закрытие комнаты — в фоне и с таймаутом: если нативная часть зависнет, движок и интерфейс не встанут.
         if let Some((room, events)) = self.room.take() {
             drop(events);
+            ROOM_CLOSING.store(true, std::sync::atomic::Ordering::SeqCst);
             tokio::spawn(async move {
                 match tokio::time::timeout(Duration::from_secs(5), room.close()).await {
                     Ok(Ok(())) => log::info!("выход: комната закрыта"),
@@ -1094,6 +1102,7 @@ impl Engine {
                     Err(_) => log::error!("закрытие комнаты: не завершилось за 5 с"),
                 }
                 drop(room);
+                ROOM_CLOSING.store(false, std::sync::atomic::Ordering::SeqCst);
                 log::info!("выход: объект комнаты освобождён");
             });
         }

@@ -4723,7 +4723,9 @@ impl eframe::App for App {
         log::info!("завершение: выход из канала и остановка");
         self.voice.send(Cmd::Leave);
         let t0 = Instant::now();
-        while t0.elapsed() < Duration::from_millis(800) && !matches!(self.voice.snapshot().conn, Conn::Idle) {
+        // Idle ставится сразу, а само закрытие комнаты идёт в фоне — ждём и его (до 3 с), чтобы не оставить «призрака».
+        let (give_up, idle_up) = (Duration::from_millis(3000), Duration::from_millis(800));
+        while t0.elapsed() < give_up && (crate::voice::room_closing() || (t0.elapsed() < idle_up && !matches!(self.voice.snapshot().conn, Conn::Idle))) {
             std::thread::sleep(Duration::from_millis(20));
         }
         self.tray = None;
