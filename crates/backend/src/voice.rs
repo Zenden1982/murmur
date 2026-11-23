@@ -61,7 +61,7 @@ pub fn parse_room(name: &str) -> Option<(i64, i64)> {
 
 /// Наша комната: голосовой канал сервера или звонок в ЛС.
 pub fn is_ours(name: &str) -> bool {
-    parse_room(name).is_some() || crate::dm::parse_dm_room(name).is_some()
+    parse_room(name).is_some() || crate::dm::parse_dm_room(name).is_some() || crate::groupcalls::parse_room(name).is_some()
 }
 
 /// Присутствие: комната → (user id → sid участника LiveKit; "" — неизвестен, после сверки).
@@ -117,6 +117,10 @@ impl Presence {
 fn broadcast_roster(state: &AppState, room: &str) {
     if let Some(dm) = crate::dm::parse_dm_room(room) {
         crate::dm::room_changed(state, dm);
+        return;
+    }
+    if let Some(call) = crate::groupcalls::parse_room(room) {
+        crate::groupcalls::room_changed(state, call);
         return;
     }
     if let Some((server_id, channel_id)) = parse_room(room) {
@@ -261,6 +265,9 @@ async fn may_be_in_room(state: &AppState, room: &str, user_id: i64) -> bool {
     }
     if let Some(dm) = crate::dm::parse_dm_room(room) {
         return matches!(crate::dm::dm_member(&state.inner.db, dm, user_id).await, Ok(Some(_)));
+    }
+    if let Some(call) = crate::groupcalls::parse_room(room) {
+        return state.inner.group_calls.may_join(call, user_id);
     }
     false
 }

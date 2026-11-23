@@ -12,6 +12,7 @@ mod channels;
 pub mod chat;
 mod db;
 pub mod dm;
+pub mod groupcalls;
 pub mod events;
 mod friends;
 mod images;
@@ -90,6 +91,8 @@ pub struct Inner {
     pub online: friends::Online,
     /// Звонки в ЛС.
     pub calls: dm::Calls,
+    /// Групповые звонки.
+    pub group_calls: groupcalls::GroupCalls,
     /// true — сервис останавливается: потоки SSE закрываются (иначе graceful shutdown ждал бы их вечно).
     pub shutdown: watch::Sender<bool>,
 }
@@ -140,6 +143,7 @@ impl AppState {
                 presence: voice::Presence::default(),
                 online: friends::Online::default(),
                 calls: dm::Calls::default(),
+                group_calls: groupcalls::GroupCalls::default(),
                 shutdown: watch::channel(false).0,
             }),
         }

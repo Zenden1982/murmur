@@ -67,6 +67,8 @@ pub mod limits {
     pub const FRIENDS_MAX: usize = 500;
     /// Сколько звонок в ЛС звонит без ответа, секунд.
     pub const CALL_RING_SECS: u64 = 45;
+    /// Сколько человек (включая звонящих) в групповом звонке.
+    pub const GROUP_CALL_MAX: usize = 8;
 }
 
 /// Права на сервере — битовая маска (`Role::permissions`).
@@ -801,6 +803,8 @@ pub enum ServerEvent {
     ReadState { channel_id: i64, last_read_id: i64 },
     /// Звонок в ЛС начался, изменился или закончился (`call: None`).
     Call { channel_id: i64, call: Option<CallInfo> },
+    /// Групповой звонок: мне звонят / состав изменился / закончился (`call: None`).
+    GroupCall { id: i64, call: Option<GroupCall> },
     /// Активность друга или соседа по серверу (None — ничем не занят / вышел).
     Activity { user_id: i64, activity: Option<Activity> },
     /// Меня зовут в голосовой канал.
@@ -842,6 +846,32 @@ pub struct CallInfo {
     /// Кто сейчас в комнате звонка.
     #[serde(default)]
     pub participants: Vec<i64>,
+}
+
+/// Групповой звонок (комната LiveKit `call-{id}`), не привязанный к ЛС. Живёт, пока в комнате кто-то есть или кому-то звонят.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupCall {
+    pub id: i64,
+    /// Кто начал звонок.
+    pub host_id: i64,
+    pub started_at: i64,
+    /// Кому сейчас звонят (ещё не зашли и не отклонили).
+    pub ringing: Vec<i64>,
+    /// Кто сейчас в комнате.
+    pub participants: Vec<i64>,
+}
+
+/// `POST /calls` и `POST /calls/{id}/invite`: кого позвать (только друзья, всего в звонке не больше `limits::GROUP_CALL_MAX`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CallInviteRequest {
+    pub user_ids: Vec<i64>,
+}
+
+/// Ответ на создание звонка и вход в него.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupCallJoin {
+    pub call: GroupCall,
+    pub join: JoinResponse,
 }
 
 /// Непрочитанное в канале (текстовом или ЛС). `GET /unread` отдаёт только каналы, где что-то есть.
