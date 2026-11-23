@@ -327,7 +327,7 @@ pub fn spawn(
     let (rc_tx, mut rc_rx) = mpsc::unbounded_channel::<(LocalParticipant, livekit::DataPacket)>();
     rt.spawn(async move {
         while let Some((lp, packet)) = rc_rx.recv().await {
-            if let Err(e) = lp.publish_data(packet).await {
+            if let Ok(Err(e)) = tokio::time::timeout(IO_TIMEOUT, lp.publish_data(packet)).await {
                 log::warn!("управление: отправка: {e}");
             }
         }
@@ -372,6 +372,8 @@ pub fn spawn(
         pause_sent: None,
         viewers: HashSet::new(),
         rc: RcEngine::new(hook_tx),
+        rx: None,
+        deferred: Default::default(),
     };
     rt.spawn(engine.run(rx, cap_rx));
     VoiceHandle { tx, state }
@@ -435,6 +437,10 @@ struct Engine {
     dump_stats: bool,
     /// `AMADEUS_FORCE_RELAY=1`: только через TURN (проверка запасного пути).
     force_relay: bool,
+    /// Очередь команд: живёт в движке, чтобы вход в канал мог принимать «Отключиться» (см. `join`).
+    rx: Option<mpsc::UnboundedReceiver<Cmd>>,
+    /// Команды, принятые во время входа, но ещё не выполненные.
+    deferred: std::collections::VecDeque<Cmd>,
     /// Что последним сообщили зрителям о паузе своей трансляции и когда.
     pause_sent: Option<(Option<StreamPause>, Instant)>,
     /// Кто смотрит свою трансляцию (по сообщениям зрителей).
@@ -495,14 +501,34 @@ async fn next_event(room: &mut Option<(Room, mpsc::UnboundedReceiver<RoomEvent>)
     }
 }
 
+/// Ждёт команду; без очереди (ещё не запущен движок) — вечно.
+async fn recv_cmd(rx: &mut Option<mpsc::UnboundedReceiver<Cmd>>) -> Option<Cmd> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Снятие трека, отправка данных, статистика: дольше не ждём (обрыв сети иначе вешает «Стоп»/«Отключиться»).
+const IO_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Дольше этого не ждём ответа LiveKit при входе.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 impl Engine {
-    async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Cmd>, mut cap_rx: mpsc::UnboundedReceiver<CaptureEvent>) {
+    async fn run(mut self, rx: mpsc::UnboundedReceiver<Cmd>, mut cap_rx: mpsc::UnboundedReceiver<CaptureEvent>) {
+        self.rx = Some(rx);
         self.init_audio();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            // команды, пришедшие во время входа в канал (см. join), — по порядку, раньше новых
+            if let Some(cmd) = self.deferred.pop_front() {
+                self.on_cmd(cmd).await;
+                continue;
+            }
             tokio::select! {
-                cmd = rx.recv() => match cmd {
+                cmd = recv_cmd(&mut self.rx) => match cmd {
                     Some(cmd) => self.on_cmd(cmd).await,
                     None => break,
                 },
@@ -638,7 +664,7 @@ impl Engine {
     async fn republish_mic(&mut self) {
         let Some(lp) = self.room.as_ref().map(|(r, _)| r.local_participant()) else { return };
         if let Some(old) = self.mic.take()
-            && let Err(e) = lp.unpublish_track(&old.sid()).await
+            && let Ok(Err(e)) = tokio::time::timeout(IO_TIMEOUT, lp.unpublish_track(&old.sid())).await
         {
             log::warn!("снятие микрофона: {e}");
         }
@@ -849,7 +875,41 @@ impl Engine {
         });
         self.audio_counts = (0, 0);
         self.link.reset();
-        match self.try_join(&ch).await {
+        // Подключение отменяемо: «Отключиться»/другой канал во время входа не ждут ответа сети.
+        let connect = Self::connect_room(self.api.clone(), ch.clone(), self.force_relay);
+        tokio::pin!(connect);
+        let connected = loop {
+            tokio::select! {
+                r = &mut connect => break r,
+                cmd = recv_cmd(&mut self.rx) => match cmd {
+                    Some(Cmd::SetSelfMuted(m)) => {
+                        self.self_muted = m;
+                        if !m && self.deafened {
+                            self.deafened = false;
+                            self.apply_volumes();
+                        }
+                        self.apply_mic();
+                    }
+                    Some(Cmd::SetDeafened(d)) => {
+                        self.deafened = d;
+                        self.apply_volumes();
+                        self.apply_mic();
+                    }
+                    Some(cmd @ (Cmd::Join(_) | Cmd::Leave)) => {
+                        log::info!("вход в канал {} отменён новой командой", ch.id);
+                        self.deferred.push_back(cmd);
+                        return;
+                    }
+                    Some(cmd) => self.deferred.push_back(cmd),
+                    None => return,
+                },
+            }
+        };
+        let joined = match connected {
+            Ok((room, events)) => self.try_join(room, events).await,
+            Err(e) => Err(e),
+        };
+        match joined {
             Ok(()) => {
                 self.rejoin = None;
                 if attempt == 0 {
@@ -895,19 +955,26 @@ impl Engine {
         }
     }
 
-    async fn try_join(&mut self, ch: &Channel) -> anyhow::Result<()> {
-        let join = if crate::dms::is_dm(ch) { self.api.dm_call(ch.id).await? } else { self.api.join(ch.id).await? };
+    /// Подключение к комнате (HTTP за токеном + LiveKit). Не трогает движок — его можно отменить, бросив future.
+    async fn connect_room(api: crate::api::Api, ch: Channel, force_relay: bool) -> anyhow::Result<(Room, mpsc::UnboundedReceiver<livekit::RoomEvent>)> {
+        let join = if crate::dms::is_dm(&ch) { api.dm_call(ch.id).await? } else { api.join(ch.id).await? };
         let mut opts = RoomOptions::default();
         // Подписки — вручную: голос всегда, трансляции (видео + звук) — только по «Смотреть» (канал зрителя не тратится).
         opts.auto_subscribe = false;
         opts.adaptive_stream = true;
         opts.dynacast = true;
-        if self.force_relay {
+        if force_relay {
             log::warn!("AMADEUS_FORCE_RELAY=1: подключение только через TURN");
             opts.rtc_config.ice_transport_type = livekit::webrtc::prelude::IceTransportsType::Relay;
         }
-        let (room, events) = Room::connect(&join.livekit_url, &join.livekit_token, opts).await?;
+        let connect = Room::connect(&join.livekit_url, &join.livekit_token, opts);
+        match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+            Ok(r) => Ok(r?),
+            Err(_) => anyhow::bail!("сервер голоса не отвечает"),
+        }
+    }
 
+    async fn try_join(&mut self, room: Room, events: mpsc::UnboundedReceiver<livekit::RoomEvent>) -> anyhow::Result<()> {
         if self.audio.is_none() {
             self.init_audio();
         } else {
@@ -1250,7 +1317,7 @@ impl Engine {
 
     async fn update_rtt(&mut self) {
         let Some((room, _)) = &self.room else { return };
-        let Ok(stats) = room.get_stats().await else { return };
+        let Ok(Ok(stats)) = tokio::time::timeout(IO_TIMEOUT, room.get_stats()).await else { return };
         self.stats_n += 1;
         if self.dump_stats {
             self.dump_stats = false;
@@ -1467,7 +1534,7 @@ impl Engine {
         if !want {
             if let Some(a) = st.audio.take()
                 && let (Some(p), Some(room)) = (a.publication, room)
-                && let Err(e) = room.local_participant().unpublish_track(&p.sid()).await
+                && let Ok(Err(e)) = tokio::time::timeout(IO_TIMEOUT, room.local_participant().unpublish_track(&p.sid())).await
             {
                 log::warn!("снятие звука трансляции: {e}");
             }
@@ -1521,18 +1588,18 @@ impl Engine {
                 tokio::task::block_in_place(|| c.stop());
             }
             if let (Some(p), Some((room, _))) = (a.publication.take(), &self.room)
-                && let Err(e) = room.local_participant().unpublish_track(&p.sid()).await
+                && let Ok(Err(e)) = tokio::time::timeout(IO_TIMEOUT, room.local_participant().unpublish_track(&p.sid())).await
             {
                 log::warn!("снятие звука трансляции: {e}");
             }
         }
         if let (Some((_, Some(p))), Some((room, _))) = (st.low.take(), &self.room)
-            && let Err(e) = room.local_participant().unpublish_track(&p.sid()).await
+            && let Ok(Err(e)) = tokio::time::timeout(IO_TIMEOUT, room.local_participant().unpublish_track(&p.sid())).await
         {
             log::warn!("снятие экономного слоя: {e}");
         }
         if let (Some(p), Some((room, _))) = (st.publication.take(), &self.room)
-            && let Err(e) = room.local_participant().unpublish_track(&p.sid()).await {
+            && let Ok(Err(e)) = tokio::time::timeout(IO_TIMEOUT, room.local_participant().unpublish_track(&p.sid())).await {
                 log::warn!("снятие трансляции: {e}");
             }
         self.generation += 1; // события остановленного захвата больше не нужны
@@ -1653,7 +1720,7 @@ impl Engine {
             reliable: true,
             ..Default::default()
         };
-        if let Err(e) = room.local_participant().publish_data(packet).await {
+        if let Ok(Err(e)) = tokio::time::timeout(IO_TIMEOUT, room.local_participant().publish_data(packet)).await {
             log::warn!("состояние трансляции зрителям: {e}");
         }
     }
@@ -1946,7 +2013,7 @@ impl Engine {
                 destination_identities: vec![identity.to_string().into()],
             };
             tokio::spawn(async move {
-                if let Err(e) = lp.publish_data(packet).await {
+                if let Ok(Err(e)) = tokio::time::timeout(IO_TIMEOUT, lp.publish_data(packet)).await {
                     log::warn!("сообщение стримеру: {e}");
                 }
             });
