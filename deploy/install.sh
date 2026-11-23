@@ -5,7 +5,7 @@
 #
 # Повторный запуск (или «murmur update») — обновление: настройки, ключи и база сохраняются.
 # Без вопросов: ... | sudo sh -s -- --yes --admin <ник> --admin-password-file <файл> [--domain <домен>] [--email <почта>]
-# Команда после установки: murmur update | invite | backup | logs | status
+# Команда после установки: murmur update | invite | backup | restore | logs | status
 #
 # Что делает: ставит Docker (если нет), спрашивает домен (Enter — бесплатные имена по IP через sslip.io),
 # создаёт ключи, открывает порты в ufw, поднимает LiveKit + Caddy + бэкенд из готовых образов (ghcr.io),
@@ -196,7 +196,7 @@ livekit_tag() { grep -o 'livekit/livekit-server:v[0-9.]*' "$MURMUR_DIR/docker-co
 install_command() {
   cat > /usr/local/bin/murmur <<EOF
 #!/bin/sh
-# Команда сервера Murmur: murmur update | invite | backup | logs | status
+# Команда сервера Murmur: murmur update | invite | backup | restore | logs | status
 MURMUR_DIR="$MURMUR_DIR" exec sh "$MURMUR_DIR/install.sh" "\$@"
 EOF
   chmod 755 /usr/local/bin/murmur
@@ -208,7 +208,8 @@ usage() {
 Murmur — свой сервер.
   murmur update [--version X.Y.Z] [--domain ДОМЕН]   обновить (или сменить домен; старый адрес продолжит работать)
   murmur invite [--uses N] [--hours H]               новый инвайт для друзей (по умолчанию 10 раз, 7 дней)
-  murmur backup                                      копия базы
+  murmur backup                                      копия базы и картинок (архив, хранится последних 7)
+  murmur restore ФАЙЛ.tar.gz                         восстановить из такого архива
   murmur logs                                        журналы (Ctrl+C — выход)
   murmur status                                      состояние и проверка обновлений
 EOF
@@ -464,12 +465,63 @@ cmd_invite() {
   say "Адрес сервера: https://$(env_get "$MURMUR_DIR/.env" API_DOMAIN)"
 }
 
+# Сколько архивов murmur backup хранить (и в томе, и на хосте).
+BACKUP_KEEP=7
+
 cmd_backup() {
-  _b="/data/backup/app-$(date +%Y%m%d-%H%M%S).db"
-  dc exec -T backend backend backup "$_b" >/dev/null || die "копия не удалась"
-  say "Копия базы: $_b (внутри тома бэкенда). Забрать на этот сервер:"
-  say "  docker compose --project-directory $MURMUR_DIR cp backend:$_b ./"
-  say "Картинки чата и аватары — в /data/uploads того же тома (копируются отдельно)."
+  _ts=$(date +%Y%m%d-%H%M%S)
+  _name="murmur-$_ts.tar.gz"
+  _keep="$BACKUP_KEEP"
+  # Архив: app.db (согласованный снимок) + uploads/ (картинки чата, аватары). Делается внутри контейнера бэкенда (там tar, sh).
+  dc exec -T backend sh -c "set -e
+    mkdir -p /data/backup /data/uploads
+    backend backup /data/backup/.snap.db >/dev/null
+    tar czf /data/backup/$_name --transform 's|^\\.snap\\.db|app.db|' -C /data/backup .snap.db -C /data uploads
+    rm -f /data/backup/.snap.db
+    ls -1t /data/backup/murmur-*.tar.gz | tail -n +$((_keep + 1)) | xargs -r rm -f" || die "копия не удалась"
+  # Копия на хост — вне тома данных (том может пропасть вместе с контейнером).
+  _host="$MURMUR_DIR/backups"
+  mkdir -p "$_host"
+  dc cp "backend:/data/backup/$_name" "$_host/$_name" >/dev/null || die "не смог скопировать архив из контейнера"
+  # shellcheck disable=SC2012 # имена наши, без пробелов
+  ls -1t "$_host"/murmur-*.tar.gz 2>/dev/null | tail -n +$((_keep + 1)) | xargs -r rm -f
+  say "Копия: $_host/$_name (база + картинки; хранится последних $_keep, копия также в томе: /data/backup/$_name)"
+  say "Восстановить: murmur restore $_host/$_name"
+  say "Положите копию и за пределы этого сервера (scp/rsync) — иначе при потере диска она пропадёт вместе с ним."
+}
+
+cmd_restore() {
+  _file="${1:-}"; _yes="${2:-}"
+  [ -n "$_file" ] || die "укажите архив: murmur restore /путь/murmur-….tar.gz"
+  [ -f "$_file" ] || die "нет файла: $_file"
+  tar tzf "$_file" 2>/dev/null | grep -qx 'app.db' || die "это не архив murmur backup (нет app.db)"
+  _abs=$(cd "$(dirname "$_file")" && pwd)/$(basename "$_file")
+  if [ "$_yes" != "--yes" ]; then
+    warn "Текущие база и картинки будут заменены содержимым архива (старые останутся: app.db.before-restore, uploads.before-restore)."
+    [ "$(ask 'Восстановить? Введите yes' no)" = yes ] || die "отменено"
+  fi
+  step "Останавливаю бэкенд"
+  dc stop backend >/dev/null
+  step "Восстанавливаю из $_abs"
+  dc run --rm --no-deps -T -v "$_abs:/restore.tar.gz:ro" --entrypoint sh backend -c '
+    set -e
+    cd /data
+    rm -rf restore-tmp && mkdir restore-tmp
+    tar xzf /restore.tar.gz -C restore-tmp
+    test -f restore-tmp/app.db
+    rm -f app.db.before-restore && { [ ! -f app.db ] || mv app.db app.db.before-restore; }
+    rm -f app.db-wal app.db-shm
+    mv restore-tmp/app.db app.db
+    if [ -d restore-tmp/uploads ]; then
+      rm -rf uploads.before-restore
+      [ ! -d uploads ] || mv uploads uploads.before-restore
+      mv restore-tmp/uploads uploads
+    fi
+    rm -rf restore-tmp' || die "восстановление не удалось (бэкенд остановлен: murmur update — запустит заново)"
+  step "Запускаю"
+  dc up -d backend >/dev/null 2>&1 || die "не запустил бэкенд"
+  wait_backend || die "бэкенд не ответил за 2 минуты. Журнал: murmur logs"
+  say "Готово: данные восстановлены."
 }
 
 cmd_status() {
@@ -494,6 +546,7 @@ main() {
       update|install) shift; cmd_install "$@"; return ;;
       invite) shift; cmd_invite "$@"; return ;;
       backup) shift; cmd_backup; return ;;
+      restore) shift; cmd_restore "$@"; return ;;
       logs) shift; dc logs -f --tail 100 "$@"; return ;;
       status) shift; cmd_status; return ;;
       help|-h|--help) usage; return ;;
