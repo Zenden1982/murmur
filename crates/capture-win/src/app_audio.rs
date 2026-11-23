@@ -339,6 +339,9 @@ fn activate(target: AudioTarget) -> Result<IAudioClient, String> {
         let op = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, &IAudioClient::IID, Some(&*pv as *const PROPVARIANT), &handler)
             .map_err(|e| format!("ActivateAudioInterfaceAsync: {e}"))?;
         if WaitForSingleObject(done.0, 5000) != WAIT_OBJECT_0 {
+            // Обработчик ещё может сигналить событие позже: дескриптор не закрываем (иначе SetEvent попадёт
+            // в закрытый или переиспользованный дескриптор). Утечка одного события безопаснее.
+            std::mem::forget(done);
             return Err("активация захвата звука не завершилась за 5 с".into());
         }
         let mut hr = HRESULT(0);
