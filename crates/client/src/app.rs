@@ -5021,9 +5021,9 @@ fn stream_pill(ui: &mut Ui, s: &voice::StreamInfo) {
                         .on_hover_text("Сколько человек смотрят");
                 }
                 if s.minimized {
-                    ui.label(RichText::new("окно свёрнуто").size(12.5).color(t::p().danger_text));
+                    ui.label(RichText::new("окно свёрнуто").size(12.5).color(t::p().warning));
                 } else if s.hidden {
-                    ui.label(RichText::new("окно закрыто другим — у зрителей стоп-кадр").size(12.5).color(t::p().danger_text));
+                    ui.label(RichText::new("окно закрыто другим — у зрителей стоп-кадр").size(12.5).color(t::p().warning));
                 } else if s.fps > 0.0 {
                     ui.label(RichText::new(format!("{:.0} к/с · {:.1} Мбит/с", s.fps, s.kbps / 1000.0)).size(12.5).color(t::p().text_muted));
                 }
