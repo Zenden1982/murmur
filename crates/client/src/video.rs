@@ -84,6 +84,13 @@ impl VideoHub {
         self.ctx.request_repaint();
     }
 
+    /// Кладёт локальный кадр (превью своей камеры).
+    pub fn put_i420(&self, key: &str, frame: &capture_win::I420Buffer) {
+        if let Some(image) = to_image(frame) {
+            self.put(key, image, 0.0);
+        }
+    }
+
     /// Задача приёма кадров одной трансляции (остановка — `abort()` хэндла).
     pub fn spawn_receiver(&self, identity: String, track: RemoteVideoTrack) -> tokio::task::JoinHandle<()> {
         let hub = self.clone();

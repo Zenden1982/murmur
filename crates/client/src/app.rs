@@ -1899,6 +1899,10 @@ impl App {
         for id in &vs.watching {
             self.video.put_demo(id, time);
         }
+        // MURMUR_DEMO_CAMS=1 — у mayuri и daru «включена камера» (синтетическая картинка)
+        for p in vs.peers.iter().filter(|p| p.camera) {
+            self.video.put_demo(&crate::camera::hub_key(&p.identity), time);
+        }
         ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
 
@@ -2863,7 +2867,7 @@ impl App {
                 // ширина содержимого — чтобы капсула облегала кнопки
                 const GAP: f32 = 10.0;
                 let measure = |text: &str, font: egui::FontId| ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER).size().x;
-                let icons = 2 + usize::from(streaming || can_stream) + usize::from(streaming);
+                let icons = 2 + usize::from(can_stream) + usize::from(streaming || can_stream) + usize::from(streaming);
                 let mut w = icons as f32 * 46.0 + (icons - 1) as f32 * GAP;
                 if vs.ptt_enabled {
                     w += GAP + measure("Рация", t::font(13.0)) + 6.0 + measure(&key, t::bold(13.0)) + 18.0;
@@ -2874,6 +2878,9 @@ impl App {
                 let cap = Rect::from_center_size(pos2(r.center().x, r.center().y - 4.0), vec2(w + 16.0, 62.0));
                 let p = t::p();
                 let painter = ui.painter();
+                if let Some(n) = &vs.camera_notice {
+                    chip(painter, cap.center_top() - vec2(0.0, 8.0), Align2::CENTER_BOTTOM, &format!("{}  {n}", ph::VIDEO_CAMERA_SLASH), ON_VIDEO);
+                }
                 painter.add(egui::epaint::Shadow { offset: [0, 4], blur: 18, spread: 0, color: Color32::from_black_alpha(36) }.as_shape(cap, CornerRadius::same(30)));
                 painter.rect(cap, CornerRadius::same(30), p.bg, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(cap.shrink2(vec2(8.0, 8.0))), |ui| {
@@ -2884,6 +2891,17 @@ impl App {
                         }
                         if kit::dock_icon(ui, snd_icon, snd_style, snd_tip).clicked() {
                             self.voice.send(Cmd::SetDeafened(!vs.deafened));
+                        }
+                        if can_stream {
+                            let on = vs.camera_on;
+                            let (icon, style, tip) = if on {
+                                (ph::VIDEO_CAMERA, DockStyle::Live, "Выключить камеру")
+                            } else {
+                                (ph::VIDEO_CAMERA_SLASH, DockStyle::Normal, "Включить камеру")
+                            };
+                            if kit::dock_icon(ui, icon, style, tip).clicked() {
+                                self.voice.send(Cmd::SetCamera { on: !on, device: self.settings.camera_device.clone() });
+                            }
                         }
                         if streaming {
                             if kit::dock_icon(ui, ph::MONITOR_ARROW_UP, DockStyle::Live, "Остановить трансляцию").clicked() {
@@ -2979,7 +2997,8 @@ impl App {
         let Some(fi) = focused else {
             if crate::anim::compact_tiles() {
                 // Компактно: трансляции сеткой сверху, люди — плитками 200×68 рядами снизу (или по центру, если трансляций нет).
-                let (streams, people): (Vec<Item>, Vec<Item>) = items.iter().partition(|i| matches!(i, Item::Stream(_)));
+                let (streams, people): (Vec<Item>, Vec<Item>) =
+                    items.iter().partition(|i| matches!(i, Item::Stream(_)) || matches!(i, Item::Person(p) if p.camera));
                 let rects = compact_rects(r, people.len(), 12.0);
                 let block_top = rects.iter().map(|x| x.top()).fold(r.bottom(), f32::min);
                 let rects = if streams.is_empty() {
@@ -2997,7 +3016,7 @@ impl App {
                 }
                 return;
             }
-            let aspect = if items.iter().any(|i| matches!(i, Item::Stream(_))) { 9.0 / 16.0 } else { 0.8 };
+            let aspect = if items.iter().any(|i| matches!(i, Item::Stream(_)) || matches!(i, Item::Person(p) if p.camera)) { 9.0 / 16.0 } else { 0.8 };
             for (item, rect) in items.iter().zip(grid_rects(r, items.len(), aspect, 16.0)) {
                 self.ui_item(ui, rect, *item, vs, false);
             }
@@ -3027,7 +3046,10 @@ impl App {
             Item::Person(p) => {
                 let resp = ui.interact(rect, Id::new(("tile", &p.identity)), Sense::click());
                 let amp = speech_amp(ui, p);
-                tile(ui, rect, p, amp, &self.people);
+                match p.camera.then(|| self.video.frame(&crate::camera::hub_key(&p.identity))).flatten() {
+                    Some(f) => camera_tile(ui, rect, p, &f, amp, &self.people),
+                    None => tile(ui, rect, p, amp, &self.people),
+                }
                 let at = resp.interact_pointer_pos().unwrap_or(rect.center());
                 // ЛКМ — карточка профиля, ПКМ — громкость (решение владельца 22.11)
                 if resp.clicked()
@@ -4326,6 +4348,19 @@ impl App {
             self.voice.send(Cmd::SetInputDevice(input));
         }
         ui.add_space(8.0);
+        label(ui, "Камера");
+        let mut cam = self.settings.camera_device.clone();
+        if device_combo(ui, "cam", &mut cam, &vs.cameras, w) {
+            self.settings.camera_device = cam.clone();
+            self.settings.save();
+            if vs.camera_on {
+                self.voice.send(Cmd::SetCamera { on: true, device: cam });
+            }
+        }
+        if vs.cameras.is_empty() {
+            ui.label(RichText::new("Камеры не найдены").size(12.5).color(t::p().text_muted));
+        }
+        ui.add_space(8.0);
         label(ui, "Вывод звука");
         let mut output = self.settings.output_device.clone();
         if device_combo(ui, "out", &mut output, &vs.outputs, w) {
@@ -5228,6 +5263,7 @@ fn demo_state(time: f64) -> VoiceState {
         level: if speaking { (0.15 + 0.15 * (time * 7.0).sin().abs()) as f32 } else { 0.0 },
         mic_muted: muted,
         streaming: id == "kurisu" || (id == "daru" && std::env::var_os("MURMUR_DEMO_STREAMS").is_some()),
+        camera: std::env::var_os("MURMUR_DEMO_CAMS").is_some() && matches!(id, "mayuri" | "daru"),
     };
     VoiceState {
         conn: if std::env::var_os("MURMUR_DEMO_RECONNECT").is_some() { Conn::Reconnecting } else { Conn::Connected },
@@ -5485,6 +5521,36 @@ fn wave_phase(ui: &Ui) -> Option<f32> {
         return None;
     }
     Some(if crate::anim::important(ui.ctx()) { (ui.input(|i| i.time) * 22.0 % 20.0) as f32 } else { 0.0 })
+}
+
+/// Плитка участника с включённой камерой: видео по размеру плитки (обрезка по краям), кольцо речи, подпись.
+/// Своё видео — зеркально, как в зеркале.
+fn camera_tile(ui: &Ui, rect: Rect, p: &Peer, f: &crate::video::Frame, amp: f32, people: &People) {
+    let radius = CornerRadius::same(kit::R_CARD);
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, radius, Color32::BLACK);
+    let (ta, va) = (rect.width() / rect.height().max(1.0), f.size[0] as f32 / (f.size[1] as f32).max(1.0));
+    let (mut u0, mut u1, mut v0, mut v1) = (0.0f32, 1.0f32, 0.0f32, 1.0f32);
+    if va > ta {
+        u0 = (1.0 - ta / va) / 2.0;
+        u1 = 1.0 - u0;
+    } else {
+        v0 = (1.0 - va / ta) / 2.0;
+        v1 = 1.0 - v0;
+    }
+    if p.is_local {
+        std::mem::swap(&mut u0, &mut u1);
+    }
+    egui::Image::new(egui::load::SizedTexture::new(f.texture, rect.size()))
+        .uv(Rect::from_min_max(pos2(u0, v0), pos2(u1, v1)))
+        .corner_radius(radius)
+        .paint_at(ui, rect);
+    if amp > 0.05 {
+        painter.rect_stroke(rect, radius, Stroke::new(3.0, t::p().accent), egui::StrokeKind::Inside);
+    }
+    let name = peer_user(people, p).shown_name().to_string();
+    let label = if p.mic_muted { format!("{}  {name}", ph::MICROPHONE_SLASH) } else { name };
+    chip(&painter, rect.left_bottom() + vec2(10.0, -10.0), Align2::LEFT_BOTTOM, &label, ON_VIDEO);
 }
 
 fn tile(ui: &Ui, rect: Rect, p: &Peer, amp: f32, people: &People) {

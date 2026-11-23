@@ -8,6 +8,7 @@ mod banner;
 mod api;
 mod app;
 mod autosave;
+mod camera;
 mod channels_ui;
 mod chat;
 #[cfg(windows)]

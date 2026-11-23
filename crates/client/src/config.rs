@@ -110,6 +110,8 @@ pub struct Settings {
     pub last_name: String,
     /// GUID устройства WASAPI; None — системное по умолчанию.
     pub input_device: Option<String>,
+    /// Камера (id из `VoiceState.cameras`); None — первая.
+    pub camera_device: Option<String>,
     pub output_device: Option<String>,
     pub ptt_enabled: bool,
     pub ptt_key: u32,
@@ -205,6 +207,7 @@ impl Default for Settings {
             session_token: None,
             last_name: String::new(),
             input_device: None,
+            camera_device: None,
             output_device: None,
             ptt_enabled: false,
             ptt_key: DEFAULT_PTT_KEY,

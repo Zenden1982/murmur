@@ -18,6 +18,7 @@ use proto::Channel;
 use tokio::sync::mpsc;
 
 use crate::api::Api;
+use crate::camera;
 use crate::config::NoiseMode;
 use crate::layers::{self, AutoLayer, Layer, Quality};
 use crate::sounds::{self, Sound};
@@ -98,6 +99,8 @@ pub enum Cmd {
     /// `audio` — передавать звук окна/системы (фаза 5).
     StartStream { source: SourceId, title: String, width: u32, height: u32, preset: Preset, audio: bool },
     StopStream,
+    /// Камера: включить (device — id из `VoiceState.cameras`, None — первая) или выключить.
+    SetCamera { on: bool, device: Option<String> },
     DismissStreamNotice,
     /// Смотреть / перестать смотреть трансляцию участника (подписка на её видео и звук).
     Watch { identity: String, on: bool },
@@ -149,6 +152,8 @@ pub struct Peer {
     pub mic_muted: bool,
     /// Транслирует экран/окно.
     pub streaming: bool,
+    /// Камера включена.
+    pub camera: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +203,12 @@ pub struct VoiceState {
     pub rc_pointers: HashMap<String, Vec<RcPointerView>>,
     /// Уведомление об управлении («Друг отказал», «кликни в окно»).
     pub rc_notice: Option<String>,
+    /// Своя камера включена.
+    pub camera_on: bool,
+    /// Почему камера не включилась / выключилась сама.
+    pub camera_notice: Option<String>,
+    /// Подключённые камеры (обновляется по `Cmd::RefreshDevices`).
+    pub cameras: Vec<Device>,
 }
 
 /// Качество просматриваемой трансляции (для интерфейса).
@@ -269,6 +280,9 @@ impl Default for VoiceState {
             rc_guest: HashMap::new(),
             rc_pointers: HashMap::new(),
             rc_notice: None,
+            camera_on: false,
+            camera_notice: None,
+            cameras: Vec::new(),
         }
     }
 }
@@ -368,6 +382,8 @@ pub fn spawn(
         last_stats: Instant::now() - STATS_EVERY,
         last_peers: HashMap::new(),
         stream: None,
+        camera: None,
+        cam_receivers: HashMap::new(),
         cap_tx,
         generation: 0,
         last_video_bytes: None,
@@ -404,6 +420,13 @@ struct Rejoin {
     at: Instant,
 }
 
+/// Работающая камера: захват (Drop гасит), источник кадров и публикация.
+struct CamRun {
+    _cam: capture_win::camera::Camera,
+    source: NativeVideoSource,
+    publication: Option<LocalTrackPublication>,
+}
+
 struct Engine {
     api: Api,
     state: Shared,
@@ -421,6 +444,10 @@ struct Engine {
     /// identity → имя: для звуков входа/выхода и сравнения состава.
     last_peers: HashMap<String, String>,
     stream: Option<Streaming>,
+    /// Своя камера (захват + публикация).
+    camera: Option<CamRun>,
+    /// Задачи приёма камер других участников (по identity).
+    cam_receivers: HashMap<String, tokio::task::JoinHandle<()>>,
     cap_tx: mpsc::UnboundedSender<CaptureEvent>,
     /// Поколение захвата: растёт при каждом старте/смене источника.
     generation: u64,
@@ -827,12 +854,16 @@ impl Engine {
                 }
             }
             Cmd::SetSounds(on) => self.prefs.sounds = on,
-            Cmd::RefreshDevices => self.refresh_devices(),
+            Cmd::RefreshDevices => {
+                self.refresh_devices();
+                self.refresh_cameras();
+            }
             Cmd::SetApi(api) => self.api = api,
             Cmd::StartStream { source, title, width, height, preset, audio } => {
                 self.start_stream(source, title, width, height, preset, audio).await
             }
             Cmd::StopStream => self.stop_stream().await,
+            Cmd::SetCamera { on, device } => self.set_camera(on, device).await,
             Cmd::DismissStreamNotice => self.set(|s| s.stream_notice = None),
             Cmd::Metrics(on) => {
                 self.overlay = on;
@@ -1075,6 +1106,20 @@ impl Engine {
                 }
             }
         }
+        // Камера: тот же захват — в новую комнату.
+        if let Some(c) = &mut self.camera {
+            match camera::publish(&room, &c.source).await {
+                Ok(p) => c.publication = Some(p),
+                Err(e) => {
+                    log::error!("повторная публикация камеры: {e}");
+                    self.camera = None;
+                    self.set(|s| {
+                        s.camera_on = false;
+                        s.camera_notice = Some(e);
+                    });
+                }
+            }
+        }
         self.room = Some((room, events));
         if republish_failed {
             // Без видеодорожки трансляция «живая» только на нашем экране — останавливаем честно (V7).
@@ -1113,6 +1158,7 @@ impl Engine {
         log::info!("выход: начало (комната: {})", self.room.is_some());
         self.stop_receivers();
         log::info!("выход: приёмники видео остановлены");
+        self.stop_camera(None).await;
         self.mic = None;
         log::info!("выход: микрофонный трек отпущен");
         if let Some(st) = &mut self.stream {
@@ -1246,6 +1292,7 @@ impl Engine {
                     self.publish_viewers();
                 }
                 self.set_watching(p.identity().as_str(), false);
+                self.drop_cam_receiver(p.identity().as_str());
                 let o = self.rc.left(p.identity().as_str(), &self.viewers);
                 self.rc_out(o);
                 self.play(Sound::LeaveOther);
@@ -1261,7 +1308,12 @@ impl Engine {
                     RemoteTrack::Video(v) => {
                         let id = participant.identity().as_str().to_string();
                         let layer = layer_of(&publication);
-                        if publication.source() == TrackSource::Screenshare
+                        if publication.source() == TrackSource::Camera {
+                            log::info!("видим камеру {id}");
+                            if let Some(old) = self.cam_receivers.insert(id.clone(), self.video.spawn_receiver(camera::hub_key(&id), v)) {
+                                old.abort();
+                            }
+                        } else if publication.source() == TrackSource::Screenshare
                             && self.watching.contains(&id)
                             && layer == self.target_layer(&id)
                         {
@@ -1300,6 +1352,9 @@ impl Engine {
             }
             RoomEvent::TrackUnpublished { publication, participant } => {
                 log::info!("{} снял {:?} «{}»", participant.identity(), publication.source(), publication.name());
+                if publication.source() == TrackSource::Camera {
+                    self.drop_cam_receiver(participant.identity().as_str());
+                }
                 if publication.source() == TrackSource::Screenshare && layer_of(&publication) == Layer::Low {
                     // Экономного слоя больше нет — остаётся исходный.
                     self.sync_subscriptions();
@@ -1660,6 +1715,94 @@ impl Engine {
         });
     }
 
+    fn drop_cam_receiver(&mut self, identity: &str) {
+        if let Some(h) = self.cam_receivers.remove(identity) {
+            h.abort();
+        }
+        self.video.remove(&camera::hub_key(identity));
+    }
+
+    /// Список камер — в фоне (Media Foundation долго перечисляет), результат в `VoiceState.cameras`.
+    fn refresh_cameras(&self) {
+        let (state, repaint) = (self.state.clone(), self.repaint.clone());
+        let _ = std::thread::Builder::new().name("murmur-cameras".into()).spawn(move || {
+            let list: Vec<Device> = capture_win::camera::list_cameras().into_iter().map(|c| Device { id: c.id, name: c.name }).collect();
+            state.lock().unwrap().cameras = list;
+            repaint();
+        });
+    }
+
+    async fn set_camera(&mut self, on: bool, device: Option<String>) {
+        if !on {
+            self.stop_camera(None).await;
+            self.set(|s| s.camera_notice = None);
+            return;
+        }
+        let Some((room, _)) = &self.room else {
+            self.set(|s| s.camera_notice = Some("Камера включается в голосовом канале или звонке.".into()));
+            return;
+        };
+        let identity = room.local_participant().identity().as_str().to_string();
+        self.stop_camera(None).await;
+        self.set(|s| s.camera_notice = None);
+        let source = camera::new_source();
+        let sink = camera::sink(&source, &self.cap_tx, &self.video, &identity);
+        let started = tokio::task::block_in_place(|| capture_win::camera::Camera::start(device.as_deref(), sink));
+        let cam = match started {
+            Ok(c) => c,
+            Err(e) => {
+                self.set(|s| s.camera_notice = Some(e));
+                return;
+            }
+        };
+        let Some((room, _)) = &self.room else { return };
+        match camera::publish(room, &source).await {
+            Ok(p) => {
+                self.camera = Some(CamRun { _cam: cam, source, publication: Some(p) });
+                self.set(|s| s.camera_on = true);
+                log::info!("камера включена");
+                self.refresh_peers(false);
+            }
+            Err(e) => {
+                tokio::task::block_in_place(|| drop(cam));
+                self.video.remove(&camera::hub_key(&identity));
+                self.set(|s| s.camera_notice = Some(e));
+            }
+        }
+    }
+
+    /// Выключить камеру (захват гаснет, трек снимается). `notice` — почему (если сама).
+    async fn stop_camera(&mut self, notice: Option<String>) {
+        let Some(c) = self.camera.take() else {
+            if notice.is_some() {
+                self.set(|s| s.camera_notice = notice);
+            }
+            return;
+        };
+        let CamRun { _cam, source: _, publication } = c;
+        tokio::task::block_in_place(|| drop(_cam));
+        let mut identity = None;
+        if let Some((room, _)) = &self.room {
+            identity = Some(room.local_participant().identity().as_str().to_string());
+            if let Some(p) = publication
+                && let Ok(Err(e)) = tokio::time::timeout(IO_TIMEOUT, room.local_participant().unpublish_track(&p.sid())).await
+            {
+                log::warn!("снятие камеры: {e}");
+            }
+        }
+        if let Some(id) = identity {
+            self.video.remove(&camera::hub_key(&id));
+        }
+        log::info!("камера выключена");
+        self.set(|s| {
+            s.camera_on = false;
+            if notice.is_some() {
+                s.camera_notice = notice;
+            }
+        });
+        self.refresh_peers(false);
+    }
+
     async fn stop_stream(&mut self) {
         if self.stream.is_some() {
             self.play(Sound::StreamStop);
@@ -1743,6 +1886,13 @@ impl Engine {
     }
 
     async fn on_capture_event(&mut self, ev: CaptureEvent) {
+        if ev.generation == camera::CAM_GEN {
+            if let CapEvent::Error(e) = ev.event {
+                log::warn!("камера: {e}");
+                self.stop_camera(Some(e)).await;
+            }
+            return;
+        }
         if ev.generation != self.generation || self.stream.is_none() {
             return;
         }
@@ -2056,6 +2206,8 @@ impl Engine {
                         || self.recv.get(identity).is_some_and(|(sid, ..)| *sid == publication.sid()))
             }
             TrackSource::ScreenshareAudio => self.watching.contains(identity),
+            // Камеры всех участников — всегда (плитки в голосе и звонках).
+            TrackSource::Camera => true,
             _ => publication.kind() == TrackKind::Audio,
         }
     }
@@ -2278,6 +2430,9 @@ impl Engine {
         for (_, h) in self.receivers.drain() {
             h.abort();
         }
+        for (_, h) in self.cam_receivers.drain() {
+            h.abort();
+        }
         self.recv.clear();
         self.video.clear();
     }
@@ -2348,6 +2503,7 @@ impl Engine {
             level: lp.audio_level(),
             mic_muted: !self.mic_should_send(),
             streaming: self.stream.is_some(),
+            camera: self.camera.is_some(),
         });
         let mut remote: Vec<Peer> = room
             .remote_participants()
@@ -2370,6 +2526,7 @@ impl Engine {
                     level: p.audio_level(),
                     mic_muted,
                     streaming,
+                    camera: p.track_publications().values().any(|t| t.source() == TrackSource::Camera),
                 }
             })
             .collect();
