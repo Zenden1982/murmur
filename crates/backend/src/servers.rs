@@ -192,30 +192,45 @@ pub async fn update(
 ) -> AppResult<Json<Server>> {
     me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
     let db = &state.inner.db;
-    if let Some(n) = req.name {
-        let name = validate_name(&n, limits::SERVER_NAME_MAX, "название сервера")?;
-        sqlx::query("UPDATE servers SET name = ? WHERE id = ?").bind(name).bind(id).execute(db).await?;
-    }
-    if let Some(d) = req.description {
-        let d = d.trim();
-        if d.chars().count() > limits::SERVER_DESCRIPTION_MAX || d.chars().any(|c| c.is_control() && c != '\n') {
-            return Err(AppError::Validation(format!("описание: до {} символов", limits::SERVER_DESCRIPTION_MAX)));
+    // Сначала проверяем все поля, потом пишем — чтобы при ошибке не применялась половина правки.
+    let name = req.name.map(|n| validate_name(&n, limits::SERVER_NAME_MAX, "название сервера")).transpose()?;
+    let description = match req.description {
+        Some(d) => {
+            let d = d.trim().to_string();
+            if d.chars().count() > limits::SERVER_DESCRIPTION_MAX || d.chars().any(|c| c.is_control() && c != '\n') {
+                return Err(AppError::Validation(format!("описание: до {} символов", limits::SERVER_DESCRIPTION_MAX)));
+            }
+            Some(d)
         }
-        sqlx::query("UPDATE servers SET description = ? WHERE id = ?").bind((!d.is_empty()).then_some(d)).bind(id).execute(db).await?;
+        None => None,
+    };
+    if let Some(b) = &req.banner
+        && !b.is_empty()
+        && !proto::banner::ALL.contains(&b.as_str())
+    {
+        return Err(AppError::Validation("нет такого узора баннера".into()));
+    }
+    let color = req.color.map(|c| c.to_ascii_uppercase());
+    if let Some(c) = &color
+        && !c.is_empty()
+        && !proto::SERVER_COLORS.contains(&c.as_str())
+    {
+        return Err(AppError::Validation("нет такого цвета".into()));
+    }
+    let mut tx = db.begin().await?;
+    if let Some(name) = name {
+        sqlx::query("UPDATE servers SET name = ? WHERE id = ?").bind(name).bind(id).execute(&mut *tx).await?;
+    }
+    if let Some(d) = description {
+        sqlx::query("UPDATE servers SET description = ? WHERE id = ?").bind((!d.is_empty()).then_some(d)).bind(id).execute(&mut *tx).await?;
     }
     if let Some(b) = req.banner {
-        if !b.is_empty() && !proto::banner::ALL.contains(&b.as_str()) {
-            return Err(AppError::Validation("нет такого узора баннера".into()));
-        }
-        sqlx::query("UPDATE servers SET banner = ? WHERE id = ?").bind((!b.is_empty()).then_some(b)).bind(id).execute(db).await?;
+        sqlx::query("UPDATE servers SET banner = ? WHERE id = ?").bind((!b.is_empty()).then_some(b)).bind(id).execute(&mut *tx).await?;
     }
-    if let Some(c) = req.color {
-        let c = c.to_ascii_uppercase();
-        if !c.is_empty() && !proto::SERVER_COLORS.contains(&c.as_str()) {
-            return Err(AppError::Validation("нет такого цвета".into()));
-        }
-        sqlx::query("UPDATE servers SET color = ? WHERE id = ?").bind((!c.is_empty()).then_some(c)).bind(id).execute(db).await?;
+    if let Some(c) = color {
+        sqlx::query("UPDATE servers SET color = ? WHERE id = ?").bind((!c.is_empty()).then_some(c)).bind(id).execute(&mut *tx).await?;
     }
+    tx.commit().await?;
     publish_server(&state, id).await?;
     Ok(Json(server_for(&state.inner.db, id, user.id).await?))
 }

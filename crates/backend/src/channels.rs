@@ -128,12 +128,15 @@ pub async fn update(
     let (m, row) = p::channel_member(&state.inner.db, id, user.id).await?;
     m.require(perm::MANAGE_CHANNELS)?;
     let kind = ChannelKind::parse(&row.kind).unwrap_or(ChannelKind::Text);
-    if let Some(n) = req.name {
-        let name = validate_name(&n, limits::CHANNEL_NAME_MAX, "название")?;
+    // Сначала проверки, потом запись — без частичного применения.
+    let name = req.name.map(|n| validate_name(&n, limits::CHANNEL_NAME_MAX, "название")).transpose()?;
+    if let Some(limit) = req.user_limit {
+        check_limit(kind, limit)?;
+    }
+    if let Some(name) = name {
         sqlx::query("UPDATE channels SET name = ? WHERE id = ?").bind(name).bind(id).execute(&state.inner.db).await?;
     }
     if let Some(limit) = req.user_limit {
-        check_limit(kind, limit)?;
         sqlx::query("UPDATE channels SET user_limit = ? WHERE id = ?")
             .bind(limit.map(i64::from))
             .bind(id)
