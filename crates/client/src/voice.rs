@@ -992,10 +992,14 @@ impl Engine {
         self.apply_processing();
         let mic = self.publish_mic(&room.local_participant()).await;
         // Переподключение во время трансляции: тот же источник — в новую комнату.
+        let mut republish_failed = false;
         if let Some(st) = &mut self.stream {
             match stream::publish(&room, &st.source, st.preset, st.hw).await {
                 Ok(p) => st.publication = Some(p),
-                Err(e) => log::error!("повторная публикация трансляции: {e}"),
+                Err(e) => {
+                    log::error!("повторная публикация трансляции: {e}");
+                    republish_failed = true;
+                }
             }
             if let Some((src, p)) = &mut st.low {
                 match stream::publish_low(&room, src).await {
@@ -1011,6 +1015,11 @@ impl Engine {
             }
         }
         self.room = Some((room, events));
+        if republish_failed {
+            // Без видеодорожки трансляция «живая» только на нашем экране — останавливаем честно (V7).
+            self.stop_stream().await;
+            self.set(|s| s.stream_notice = Some("Трансляция остановлена: не удалось возобновить после переподключения.".into()));
+        }
         self.sync_subscriptions();
         self.mic = mic;
         self.last_peers.clear();
