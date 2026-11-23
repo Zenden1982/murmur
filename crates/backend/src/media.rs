@@ -11,6 +11,10 @@ use proto::limits;
 pub enum Kind {
     Avatar,
     UserBanner,
+    /// Иконка сервера: квадрат любой стороны до IMAGE_PROFILE_MAX_SIDE; без GIF.
+    ServerIcon,
+    /// Баннер сервера: BANNER_W×BANNER_H; без GIF.
+    ServerBanner,
 }
 
 impl Kind {
@@ -19,6 +23,30 @@ impl Kind {
         match self {
             Kind::Avatar => (limits::AVATAR_SIDE, limits::AVATAR_SIDE, limits::AVATAR_MAX_BYTES),
             Kind::UserBanner => (limits::USER_BANNER_W, limits::USER_BANNER_H, limits::USER_BANNER_MAX_BYTES),
+            // для иконки w = h = максимальная сторона
+            Kind::ServerIcon => (limits::IMAGE_PROFILE_MAX_SIDE, limits::IMAGE_PROFILE_MAX_SIDE, limits::IMAGE_PROFILE_MAX_BYTES),
+            Kind::ServerBanner => (limits::BANNER_W, limits::BANNER_H, limits::IMAGE_BANNER_MAX_BYTES),
+        }
+    }
+
+    fn allows_gif(self) -> bool {
+        matches!(self, Kind::Avatar | Kind::UserBanner)
+    }
+
+    /// Размер подходит: точный для аватара/баннеров, квадрат до максимума для иконки сервера.
+    fn dims_ok(self, (dw, dh): (usize, usize)) -> bool {
+        let (w, h, _) = self.spec();
+        match self {
+            Kind::ServerIcon => dw != 0 && dw == dh && dw <= w as usize,
+            _ => (dw, dh) == (w as usize, h as usize),
+        }
+    }
+
+    fn dims_error(self) -> String {
+        let (w, h, _) = self.spec();
+        match self {
+            Kind::ServerIcon => format!("нужен квадрат до {w}×{w}"),
+            _ => format!("нужна картинка {w}×{h}"),
         }
     }
 }
@@ -34,8 +62,11 @@ pub fn sanitize(kind: Kind, body: &[u8]) -> Result<Vec<u8>, String> {
     }
     let mime = crate::chat::sniff_image(body).ok_or("поддерживаются PNG, JPEG, WebP и GIF")?;
     let dim = imagesize::blob_size(body).map_err(|_| "картинка повреждена".to_string())?;
-    if (dim.width, dim.height) != (w as usize, h as usize) {
-        return Err(format!("нужна картинка {w}×{h}"));
+    if !kind.dims_ok((dim.width, dim.height)) {
+        return Err(kind.dims_error());
+    }
+    if mime == "image/gif" && !kind.allows_gif() {
+        return Err("поддерживаются PNG, JPEG и WebP".into());
     }
     if mime == "image/gif" {
         scan_gif(body, w, h, limits::GIF_FRAMES_MAX as u64 * w as u64 * h as u64)?;
@@ -408,5 +439,29 @@ mod tests {
     #[test]
     fn chat_garbage_rejected() {
         assert!(sanitize_chat(b"not an image").is_err());
+    }
+
+    #[test]
+    fn server_icon_square_any_side_no_gif() {
+        assert!(sanitize(Kind::ServerIcon, &png(128, 128)).is_ok());
+        assert!(sanitize(Kind::ServerIcon, &png(128, 64)).is_err());
+        assert!(sanitize(Kind::ServerIcon, &png(1024, 1024)).is_err());
+        let g = gif_frames(64, 64, &[(64, 64, 5), (64, 64, 5)]);
+        assert!(sanitize(Kind::ServerIcon, &g).is_err());
+    }
+
+    #[test]
+    fn server_banner_exact_and_exif_stripped() {
+        let j = jpeg(960, 480);
+        let mut app1 = vec![0xFF, 0xE1];
+        let payload = b"Exif\0\0GPS";
+        app1.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+        app1.extend_from_slice(payload);
+        let mut with = j[..2].to_vec();
+        with.extend_from_slice(&app1);
+        with.extend_from_slice(&j[2..]);
+        let out = sanitize(Kind::ServerBanner, &with).unwrap();
+        assert!(!contains(&out, b"Exif"));
+        assert!(sanitize(Kind::ServerBanner, &png(960, 384)).is_err());
     }
 }

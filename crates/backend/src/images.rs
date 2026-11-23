@@ -6,7 +6,6 @@ use axum::{
     http::{HeaderValue, header},
     response::{IntoResponse, Response},
 };
-use proto::limits;
 
 use crate::{
     AppState,
@@ -16,45 +15,24 @@ use crate::{
     security,
 };
 
-/// Проверить и сохранить квадратную картинку (PNG/JPEG/WebP, до 512 px и 1 МБ). Возвращает ключ.
+/// Иконка сервера: квадрат до 512 px (PNG/JPEG/WebP, до 1 МБ); перекодируется без метаданных. Возвращает ключ.
 pub async fn store_profile_image(state: &AppState, body: &[u8]) -> AppResult<String> {
-    if body.len() > limits::IMAGE_PROFILE_MAX_BYTES {
-        return Err(AppError::Validation(format!(
-            "картинка больше {} КБ",
-            limits::IMAGE_PROFILE_MAX_BYTES / 1024
-        )));
-    }
-    match sniff_image(body) {
-        Some("image/png" | "image/jpeg" | "image/webp") => {}
-        _ => return Err(AppError::Validation("поддерживаются PNG, JPEG и WebP".into())),
-    }
-    let dim = imagesize::blob_size(body).map_err(|_| AppError::Validation("картинка повреждена".into()))?;
-    let side = limits::IMAGE_PROFILE_MAX_SIDE as usize;
-    if dim.width == 0 || dim.width != dim.height || dim.width > side {
-        return Err(AppError::Validation(format!("нужен квадрат до {side}×{side}")));
-    }
-    let key = security::new_session_token();
-    write_atomic(&storage_path(state, &key), body)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("запись файла: {e}")))?;
-    Ok(key)
+    store_clean(state, crate::media::Kind::ServerIcon, body).await
 }
 
-/// Баннер сервера: PNG/JPEG/WebP ровно 960×480, до 2 МБ. Возвращает ключ.
+/// Баннер сервера: PNG/JPEG/WebP ровно 960×480, до 2 МБ; перекодируется без метаданных. Возвращает ключ.
 pub async fn store_banner_image(state: &AppState, body: &[u8]) -> AppResult<String> {
-    if body.len() > limits::IMAGE_BANNER_MAX_BYTES {
-        return Err(AppError::Validation(format!("картинка больше {} МБ", limits::IMAGE_BANNER_MAX_BYTES / 1024 / 1024)));
-    }
-    match sniff_image(body) {
-        Some("image/png" | "image/jpeg" | "image/webp") => {}
-        _ => return Err(AppError::Validation("поддерживаются PNG, JPEG и WebP".into())),
-    }
-    let dim = imagesize::blob_size(body).map_err(|_| AppError::Validation("картинка повреждена".into()))?;
-    if dim.width != limits::BANNER_W as usize || dim.height != limits::BANNER_H as usize {
-        return Err(AppError::Validation(format!("нужна картинка {}×{}", limits::BANNER_W, limits::BANNER_H)));
-    }
+    store_clean(state, crate::media::Kind::ServerBanner, body).await
+}
+
+async fn store_clean(state: &AppState, kind: crate::media::Kind, body: &[u8]) -> AppResult<String> {
+    let body = body.to_vec();
+    let clean = tokio::task::spawn_blocking(move || crate::media::sanitize(kind, &body))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("проверка картинки: {e}")))?
+        .map_err(AppError::Validation)?;
     let key = security::new_session_token();
-    write_atomic(&storage_path(state, &key), body)
+    write_atomic(&storage_path(state, &key), &clean)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("запись файла: {e}")))?;
     Ok(key)

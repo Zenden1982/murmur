@@ -48,6 +48,9 @@ pub const CHAT_WINDOW: Duration = Duration::from_secs(10);
 /// Лимит загрузок картинок на пользователя.
 pub const UPLOADS: u32 = 30;
 pub const UPLOADS_WINDOW: Duration = Duration::from_secs(60);
+/// Лимит смен аватара/баннера/иконок на пользователя (тяжёлая обработка картинки).
+pub const MEDIA_CHANGES: u32 = 10;
+pub const MEDIA_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -61,6 +64,7 @@ pub struct Inner {
     pub auth_limiter: RateLimiter,
     pub chat_limiter: RateLimiter<i64>,
     pub upload_limiter: RateLimiter<i64>,
+    pub media_limiter: RateLimiter<i64>,
     /// Где лежат файлы вложений.
     pub uploads_dir: PathBuf,
     /// Выпуски клиента (`latest.json` + файлы), см. `releases.rs`.
@@ -115,6 +119,7 @@ impl AppState {
                 auth_limiter,
                 chat_limiter: RateLimiter::new(CHAT_MESSAGES, CHAT_WINDOW),
                 upload_limiter: RateLimiter::new(UPLOADS, UPLOADS_WINDOW),
+                media_limiter: RateLimiter::new(MEDIA_CHANGES, MEDIA_WINDOW),
                 uploads_dir,
                 releases_dir,
                 events: broadcast::channel(256).0,

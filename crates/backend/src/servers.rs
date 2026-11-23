@@ -223,6 +223,7 @@ pub async fn update(
 /// `PUT /servers/{id}/icon` — тело: квадратная картинка.
 pub async fn put_icon(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>, body: Bytes) -> AppResult<Json<Server>> {
     me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
+    state.inner.media_limiter.check(user.id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
     let key = images::store_profile_image(&state, &body).await?;
     set_icon(&state, id, Some(key)).await?;
     Ok(Json(server_for(&state.inner.db, id, user.id).await?))
@@ -247,6 +248,7 @@ async fn set_icon(state: &AppState, id: i64, key: Option<String>) -> AppResult<(
 /// `PUT /servers/{id}/banner` — своя картинка баннера 960×480.
 pub async fn put_banner(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>, body: Bytes) -> AppResult<Json<Server>> {
     me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
+    state.inner.media_limiter.check(user.id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
     let key = images::store_banner_image(&state, &body).await?;
     set_banner_image(&state, id, Some(key)).await?;
     Ok(Json(server_for(&state.inner.db, id, user.id).await?))

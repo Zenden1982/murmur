@@ -9,6 +9,12 @@ use serde_json::json;
 
 /// Заголовок PNG нужного размера (сервер смотрит только на заголовок).
 pub fn fake_png(w: u32, h: u32) -> Vec<u8> {
+    if (w as u64) * (h as u64) <= 1_000_000 && w > 0 && h > 0 {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x % 256) as u8, (y % 256) as u8, 90, 255]));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        return out;
+    }
     let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
     v.extend_from_slice(&13u32.to_be_bytes());
     v.extend_from_slice(b"IHDR");

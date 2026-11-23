@@ -183,6 +183,12 @@ async fn summon_to_voice() {
 
 /// Минимальный валидный PNG нужного размера (заголовок IHDR — imagesize читает только его).
 fn png(w: u32, h: u32) -> Vec<u8> {
+    if (w as u64) * (h as u64) <= 1_000_000 && w > 0 && h > 0 {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x % 256) as u8, (y % 256) as u8, 90, 255]));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        return out;
+    }
     let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
     v.extend_from_slice(&w.to_be_bytes());
     v.extend_from_slice(&h.to_be_bytes());
