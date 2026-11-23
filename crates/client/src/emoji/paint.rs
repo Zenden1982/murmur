@@ -102,6 +102,8 @@ pub fn label(ui: &mut Ui, text: &str, font: FontId, color: Color32, selectable: 
     let size = if jumbo_segs(&segs) { (font.size * 2.2).round() } else { (font.size * 1.25).round() };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
+        // высота строки по тексту/смайлу, а не по interact_size (34 px): иначе над сообщением со смайлом большой зазор
+        ui.spacing_mut().interact_size.y = (font.size * 1.3).max(size);
         for seg in segs {
             match seg {
                 Seg::Text(t) => {

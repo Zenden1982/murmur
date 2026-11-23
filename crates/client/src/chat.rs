@@ -739,7 +739,8 @@ impl Chat {
     /// Текущий кадр анимированного GIF вложения в размере показа `size`; None — не GIF, играть нельзя
     /// или нет свободного места (одновременно играют не больше `GIF_SLOTS`); тогда рисуется первый кадр.
     fn gif_tex(&mut self, id: i64, base: &TextureHandle, size: egui::Vec2, use_slot: bool) -> Option<TextureHandle> {
-        if !self.play_gifs || !crate::people::People::can_play(&self.ctx) {
+        // GIF — содержимое сообщения, а не украшение: общий уровень «Анимации» (и системная настройка Windows) на него не влияет
+        if !self.play_gifs || !crate::anim::window_active(&self.ctx) {
             return None;
         }
         let bytes = self.gifs.get(&id)?.clone();
