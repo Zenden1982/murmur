@@ -586,6 +586,14 @@ impl Engine {
         }
         let (state, repaint) = (self.state.clone(), self.repaint.clone());
         let spawned = std::thread::Builder::new().name("amadeus-devices".into()).spawn(move || {
+            // Флаг снимается и при панике внутри драйвера (V17).
+            struct BusyGuard(&'static std::sync::atomic::AtomicBool);
+            impl Drop for BusyGuard {
+                fn drop(&mut self) {
+                    self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _busy = BusyGuard(&BUSY);
             let t0 = Instant::now();
             let inputs: Vec<Device> =
                 audio.recording_devices().map(|d| Device { id: d.id.as_str().to_string(), name: d.name }).collect();
@@ -598,7 +606,6 @@ impl Engine {
                 s.outputs = outputs;
             }
             repaint();
-            BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
         });
         if spawned.is_err() {
             BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
