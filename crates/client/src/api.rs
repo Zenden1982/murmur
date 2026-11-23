@@ -179,6 +179,11 @@ impl Api {
         self.call::<(), _>(Method::POST, "/auth/logout", None).await
     }
 
+    /// «Выйти везде»: закрывает все сеансы этого человека, включая текущий.
+    pub async fn logout_all(&self) -> ApiResult<()> {
+        self.call::<(), _>(Method::POST, "/auth/logout-all", None).await
+    }
+
     pub async fn me(&self) -> ApiResult<User> {
         self.call::<(), _>(Method::GET, "/me", None).await
     }

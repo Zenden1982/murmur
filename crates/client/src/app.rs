@@ -56,6 +56,8 @@ fn insecure_remote(url: &str) -> bool {
 
 enum Msg {
     Me(ApiResult<User>),
+    /// Ответ «выйти везде».
+    LogoutAll(Result<(), String>),
     Auth(ApiResult<AuthResponse>),
     /// Ответ входа для уже сменённого адреса сервера — только снять «занято».
     AuthStale,
@@ -207,6 +209,8 @@ pub struct App {
     settings_open: bool,
     /// Раздел настроек и строка поиска в их меню.
     set_tab: SetTab,
+    /// Окно «Выйти на всех устройствах» в настройках аккаунта: (идёт запрос, ошибка).
+    logout_all: Option<(bool, Option<String>)>,
     set_query: String,
     /// Отладочный оверлей метрик (F3).
     metrics_open: bool,
@@ -429,6 +433,7 @@ impl App {
             channels_at: Instant::now(),
             settings_open: false,
             set_tab: SetTab::Voice,
+            logout_all: None,
             set_query: String::new(),
             metrics_open: false,
             metrics_init: false,
@@ -759,6 +764,15 @@ impl App {
                         let wait = [3u64, 6, 12, 30][(self.boot_attempts as usize).min(3)];
                         self.boot_attempts += 1;
                         self.boot_retry = Some(Instant::now() + Duration::from_secs(wait));
+                    }
+                }
+                Msg::LogoutAll(Ok(())) => {
+                    self.logout_all = None;
+                    self.logout();
+                }
+                Msg::LogoutAll(Err(e)) => {
+                    if let Some(s) = &mut self.logout_all {
+                        *s = (false, Some(e));
                     }
                 }
                 Msg::ProfileField(i, res) => {
@@ -4353,6 +4367,39 @@ impl App {
             }, |ui| {
                 ui.label(RichText::new(v).color(t::p().text_muted));
             });
+        }
+        toggle_row(ui, w, |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label("Выйти на всех устройствах");
+                ui.label(RichText::new("Закрыть все сеансы, включая этот").size(12.5).color(t::p().text_muted));
+            });
+        }, |ui| {
+            if kit::button(ui, kit::ButtonKind::Danger, "Выйти везде", None).clicked() {
+                self.logout_all = Some((false, None));
+            }
+        });
+        if let Some((busy, error)) = self.logout_all.clone() {
+            let (mut go, mut cancel) = (false, false);
+            let res = kit::modal(ui.ctx(), "logout-all", "Выйти на всех устройствах", 420.0, |ui| {
+                ui.label(RichText::new("Все сеансы будут закрыты, на каждом устройстве придётся войти заново. Этот сеанс тоже.").size(14.0));
+                if let Some(e) = &error {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(e).size(13.0).color(t::p().danger_text));
+                }
+                ui.add_space(18.0);
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    go = kit::button_ex(ui, kit::ButtonKind::Danger, if busy { "Подождите…" } else { "Выйти везде" }, None, !busy).clicked();
+                    cancel = kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked();
+                });
+            });
+            if go {
+                self.logout_all = Some((true, None));
+                let api = self.api.clone();
+                self.spawn(async move { api.logout_all().await.map_err(|e| e.message) }, Msg::LogoutAll);
+            } else if res != kit::ModalResult::Open || cancel {
+                self.logout_all = None;
+            }
         }
     }
 
