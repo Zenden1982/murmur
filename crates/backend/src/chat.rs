@@ -349,6 +349,12 @@ async fn react(state: &AppState, user_id: i64, mid: i64, name: &str, on: bool) -
         .ok_or(AppError::NotFound)?;
     // доступ к каналу (чужой — NotFound, как и для истории)
     let target = chat_target(state, channel_id, user_id).await?;
+    if on
+        && let Some((other, opened_by)) = target.dm
+        && !crate::dm::can_write(&state.inner.db, user_id, other, Some(opened_by)).await?
+    {
+        return Err(crate::dm::not_allowed());
+    }
     state.inner.chat_limiter.check(user_id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
     let changed = if on {
         // новый вид реакции — только пока их меньше лимита
