@@ -1,10 +1,6 @@
-# Murmur
-
-**English** · [Русский](README.md)
-
-**Native Rust voice, chat & screen-sharing messenger. Self-host in one command.**
-
-Murmur is a Discord-style app for friends, gaming squads and small teams — voice channels, text chat, friends and DMs, group calls — built around one thing most chat apps do badly: **sharing your screen or a single window, with that app's sound, in real quality.**
+<h1 align="center">Murmur</h1>
+<p align="center"><b>Your own Discord for friends: voice, chat, screen sharing and remote control.<br>The server installs with one command.</b></p>
+<p align="center"><b>English</b> · <a href="README.md">Русский</a> · <a href="#self-hosting">Self-hosting</a> · <a href="https://github.com/Zenden1982/murmur/releases">Download</a></p>
 
 <p align="center"><img src="docs/screenshots/voice.gif" alt="Murmur voice channel" width="720"></p>
 
@@ -12,25 +8,34 @@ Murmur is a Discord-style app for friends, gaming squads and small teams — voi
   <img src="docs/screenshots/chat.png" alt="Text chat" width="49%">
   <img src="docs/screenshots/settings-stream.png" alt="Screen sharing settings" width="49%">
 </p>
+<p align="center"><sub>Screenshots are from the client's demo mode, the data is fake.</sub></p>
 
-<sub>Screenshots are from the built-in demo mode with test data.</sub>
+I'm building Murmur for myself and my friends, so we can talk, play and show each other our screens without depending on someone else's service. It's a regular voice chat with channels, text, friends and DMs, but the focus is on what these apps usually do worst: **screen sharing**.
 
+## Screen sharing
 
-## Why Murmur
+You can share your **whole screen** — the computer's sound goes along with it (except Murmur itself, to avoid echo). Or you can share **a single app**: viewers see only that window and hear only that program. Music in another tab or chat notifications stay out of the stream.
 
-- **Native client, no Electron.** Rust + wgpu, a single Windows .exe (installer ≈ 35 MB). In idle it uses ≈180 MB of RAM versus ≈1 GB for Discord (6 processes; measured on Windows 11, 2026-11-23). <!-- ЗАМЕР: в голосе и при просмотре стрима — дописать -->
-- **Real screen sharing.** Share a whole screen or one window, up to 1080p/1440p at 60 fps and native resolution, hardware-encoded on your GPU (NVENC / AMF / QuickSync). The sound of *only that app* is shared too (per-process audio capture), not the whole system mix.
-- **Remote control of a shared screen — on request.** A viewer can ask the streamer for control; the streamer allows or denies it, sees a "being controlled" indicator, and can take control back at any moment. Pointer-only mode is available too. Discord has nothing like it.
-- **Built for bad networks.** TURN over TLS/443 for networks that block UDP, an economy layer for viewers on weak links, fast reconnect without leaving the channel. A built-in F3 overlay shows RTT, bitrate, fps, packet loss and the encoder in use.
-- **Clean voice.** Local neural noise suppression (DeepFilterNet), echo cancellation, per-user volume, push-to-talk and global hotkeys that work from inside a game.
-- **Everything you expect from a chat.** Text channels, roles and permissions, invites, friends, DMs with unread counters, group calls with camera (up to 8), reactions, emoji, stickers, GIF search (proxied through your server — clients never talk to a third party), Windows notifications, Do Not Disturb that turns on during a stream.
-- **Private by design.** No ads, no telemetry. Images are re-encoded on the server (EXIF stripped). Update packages are signed (ed25519).
-- **Zero-hassle self-hosting.** One script brings up LiveKit, Caddy (automatic HTTPS) and the backend (Rust + SQLite — no database server to manage). See below.
-- **Free to host, free to use.** Your own server has no limits at all. We also run an official instance; paid plans there (higher stream quality and bigger files for large communities) are planned, nothing is paywalled on self-hosted servers. AGPL-3.0.
+Quality goes up to 1440p at 60 fps or your monitor's native resolution. Video is encoded by the GPU, so it barely affects a game. If a viewer's connection is weak they can turn on an economy mode, and if your ISP blocks UDP everything falls back to TLS on port 443. Press F3 for an overlay with ping, bitrate, fps and packet loss — handy for finding out what's lagging.
+
+## Remote control
+
+Think AnyDesk, but inside the call, with no extra software. A viewer clicks "Ask for control" and **the streamer decides**: refuse, allow a pointer only (the viewer shows with a cursor where to look), or allow full mouse and keyboard control.
+
+While someone is in control the streamer sees a "being controlled by …" badge, and can take control back at any moment with the "Take back" button or Ctrl+Alt+Space. You can only control what is being shared — the window or the screen, not the whole computer at once. Useful for helping a parent with their PC, going through settings together, or showing a newcomer how something works.
+
+## What else
+
+- **A light client, no Electron.** Written in Rust, a single Windows .exe, installer ≈ 35 MB. Idle, it takes about 180 MB of RAM; Discord on my machine in the same state takes about 1 GB (six processes; measured on Windows 11, 2026-11-23). <!-- ЗАМЕР: в голосе и при просмотре стрима — дописать -->
+- **Decent voice.** Local neural noise suppression (DeepFilterNet), echo cancellation, per-user volume, push-to-talk and global hotkeys that work from inside a game.
+- **Chat.** Text channels, roles and permissions, invites, friends, DMs, group calls with camera for up to 8 people, reactions, emoji, stickers, GIF search (requests go through your server, clients never talk to third parties), Windows notifications and a Do Not Disturb that turns itself on while you stream.
+- **Privacy.** No ads, no telemetry. Images are re-encoded on the server and stripped of metadata. Client updates are signed.
+- **Your own server.** One script sets up LiveKit, Caddy (HTTPS is automatic) and a Rust backend with SQLite — no database server to run. Your own server has no limits.
+- **Later.** There may eventually be an official server with paid plans for large communities (higher stream quality, bigger files). It won't restrict anything on your own server. AGPL-3.0.
 
 ## Status
 
-Windows client only for now (Linux later). Used daily by a small group of friends; expect rough edges — please report bugs in Issues.
+For now it's a Windows client only; Linux comes later. Right now I and a few friends use Murmur every day, so rough edges happen — if something breaks, open an issue.
 
 ## Self-hosting
 
