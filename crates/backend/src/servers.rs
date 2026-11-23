@@ -379,6 +379,12 @@ pub(crate) async fn drop_member(state: &AppState, server_id: i64, user_id: i64) 
         .bind(user_id)
         .execute(&state.inner.db)
         .await?;
+    // Приглашения ушедшего (кик, бан, выход) больше не действуют.
+    sqlx::query("UPDATE invites SET revoked = 1 WHERE server_id = ? AND created_by = ?")
+        .bind(server_id)
+        .bind(user_id)
+        .execute(&state.inner.db)
+        .await?;
     publish(state, Audience::User(user_id), ServerEvent::ServerRemoved { server_id });
     publish(state, Audience::Server(server_id), ServerEvent::MemberRemoved { server_id, user_id });
     Ok(())

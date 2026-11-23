@@ -23,8 +23,14 @@ pub async fn create(
     Path(id): Path<i64>,
     ApiJson(req): ApiJson<CreateInviteRequest>,
 ) -> AppResult<(StatusCode, Json<Invite>)> {
-    p::member(&state.inner.db, id, user.id).await?.require(perm::INVITE)?;
-    let inv = db::create_invite(&state.inner.db, id, user.id, req.uses.unwrap_or(1), req.expires_in_hours.unwrap_or(168)).await?;
+    let me = p::member(&state.inner.db, id, user.id).await?;
+    me.require(perm::INVITE)?;
+    let expires = req.expires_in_hours.unwrap_or(168);
+    // Обычный участник не выпускает бессрочные приглашения (их может только управляющий сервером).
+    if expires == 0 && me.require(perm::MANAGE_SERVER).is_err() {
+        return Err(AppError::Validation("бессрочные приглашения — только для управляющих сервером".into()));
+    }
+    let inv = db::create_invite(&state.inner.db, id, user.id, req.uses.unwrap_or(1), expires).await?;
     Ok((StatusCode::CREATED, Json(inv)))
 }
 
