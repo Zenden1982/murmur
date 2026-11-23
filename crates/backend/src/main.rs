@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Cmd::Backup { out, database_url }) => {
-            let pool = backend::connect(&database_url).await?;
+            let pool = backend::connect_existing(&database_url).await.context("база не найдена или недоступна")?;
             backend::backup(&pool, &out).await?;
             println!("Копия базы: {}", out.display());
             Ok(())

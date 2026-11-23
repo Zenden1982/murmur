@@ -13,8 +13,17 @@ use crate::{
 
 /// Подключение к SQLite (файл создаётся при необходимости) + миграции.
 pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
+    connect_with(database_url, true).await
+}
+
+/// Подключение к существующей базе без миграций и без создания файла (для `backup`: копия должна быть ровно такой, как есть, S18).
+pub async fn connect_existing(database_url: &str) -> anyhow::Result<SqlitePool> {
+    connect_with(database_url, false).await
+}
+
+async fn connect_with(database_url: &str, migrate_and_create: bool) -> anyhow::Result<SqlitePool> {
     let opts = SqliteConnectOptions::from_str(database_url)?
-        .create_if_missing(true)
+        .create_if_missing(migrate_and_create)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(std::time::Duration::from_secs(5));
@@ -27,7 +36,9 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
         .max_connections(8)
         .connect_with(opts)
         .await?;
-    migrate(&pool).await?;
+    if migrate_and_create {
+        migrate(&pool).await?;
+    }
     Ok(pool)
 }
 
