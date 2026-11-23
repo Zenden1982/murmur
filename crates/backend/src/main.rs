@@ -101,7 +101,19 @@ async fn main() -> anyhow::Result<()> {
                     .fetch_optional(&pool)
                     .await?;
             let admin = admin.context("нет администратора: сначала backend create-admin")?;
-            let inv = backend::create_invite(&pool, 1, admin, uses, hours)
+            // Сервер администратора (самый ранний его); иначе самый ранний вообще — а не жёстко id=1.
+            let server: Option<i64> = sqlx::query_scalar("SELECT id FROM servers WHERE owner_id = ? ORDER BY id LIMIT 1")
+                .bind(admin)
+                .fetch_optional(&pool)
+                .await?;
+            let server = match server {
+                Some(s) => s,
+                None => sqlx::query_scalar("SELECT id FROM servers ORDER BY id LIMIT 1")
+                    .fetch_optional(&pool)
+                    .await?
+                    .context("нет ни одного сервера")?,
+            };
+            let inv = backend::create_invite(&pool, server, admin, uses, hours)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
             println!("{}", inv.code);
