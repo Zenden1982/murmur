@@ -3061,7 +3061,7 @@ impl App {
             self.set_fullscreen(&ctx, false);
         }
         let modal_open =
-            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open() || !self.on_call_screen(vs);
+            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open() || self.chat.lightbox_open() || !self.on_call_screen(vs);
         let (f11, esc) = ui.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
         if f11 && !modal_open {
             if self.fullscreen {

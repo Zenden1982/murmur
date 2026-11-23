@@ -1405,7 +1405,8 @@ impl Chat {
     fn ui_lightbox(&mut self, ui: &Ui) {
         let Some(id) = self.lightbox else { return };
         let ctx = ui.ctx().clone();
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        // consume: Esc не должен заодно снять фокус стрима и т. п. (U6)
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.lightbox = None;
             return;
         }
