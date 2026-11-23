@@ -1033,6 +1033,8 @@ impl Engine {
             }
         }
         self.room = None;
+        self.viewers.clear();
+        self.publish_viewers();
     }
 
     async fn leave(&mut self) {
