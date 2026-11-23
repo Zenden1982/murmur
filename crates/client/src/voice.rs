@@ -683,6 +683,13 @@ impl Engine {
         };
         if let Err(e) = res {
             log::warn!("микрофон {id:?}: {e}");
+            self.set(|s| s.audio_error = Some(format!("Не удалось переключить микрофон: {e}")));
+        } else {
+            self.set(|s| {
+                if s.audio_error.as_deref().is_some_and(|m| m.starts_with("Не удалось переключить микрофон")) {
+                    s.audio_error = None;
+                }
+            });
         }
     }
 
@@ -695,6 +702,13 @@ impl Engine {
         };
         if let Err(e) = res {
             log::warn!("вывод {id:?}: {e}");
+            self.set(|s| s.audio_error = Some(format!("Не удалось переключить вывод звука: {e}")));
+        } else {
+            self.set(|s| {
+                if s.audio_error.as_deref().is_some_and(|m| m.starts_with("Не удалось переключить вывод")) {
+                    s.audio_error = None;
+                }
+            });
         }
     }
 
