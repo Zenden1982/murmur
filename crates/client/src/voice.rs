@@ -1374,6 +1374,7 @@ impl Engine {
                                 info.source = source;
                                 info.title = title;
                                 info.minimized = false;
+                                info.hidden = false;
                                 info.size = None;
                             }
                         });
@@ -1569,9 +1570,18 @@ impl Engine {
                 });
             }
             Err(e) => {
-                log::warn!("трансляция: пересоздание энкодера под {width}×{height}: {e}");
-                self.stop_stream().await;
-                self.set(|s| s.stream_notice = Some(format!("Трансляция остановлена: {e}")));
+                // Запасной путь: новая трансляция с нуля — stream::start сам уйдёт на процессор, если видеокарта не смогла.
+                log::warn!("трансляция: пересоздание энкодера под {width}×{height}: {e} — запуск заново");
+                let mut title = None;
+                self.set(|s| title = s.stream.as_ref().map(|i| i.title.clone()));
+                let audio = self.stream.as_ref().is_some_and(|st| st.audio.is_some());
+                self.stop_stream_quiet().await;
+                if let Some(title) = title {
+                    self.start_stream(source, title, width, height, preset, audio).await;
+                }
+                if self.stream.is_none() {
+                    self.set(|s| s.stream_notice = Some(format!("Трансляция остановлена: {e}")));
+                }
             }
         }
     }
