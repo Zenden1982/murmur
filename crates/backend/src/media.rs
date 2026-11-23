@@ -38,7 +38,7 @@ pub fn sanitize(kind: Kind, body: &[u8]) -> Result<Vec<u8>, String> {
         return Err(format!("нужна картинка {w}×{h}"));
     }
     if mime == "image/gif" {
-        scan_gif(body, w, h)?;
+        scan_gif(body, w, h, limits::GIF_FRAMES_MAX as u64 * w as u64 * h as u64)?;
         reencode_gif(body)
     } else {
         reencode_static(body, w, h)
@@ -54,13 +54,13 @@ fn gif_options(skip: bool) -> gif::DecodeOptions {
 }
 
 /// Проход по кадрам без распаковки LZW: число кадров, границы, сумма пикселей.
-fn scan_gif(body: &[u8], w: u32, h: u32) -> Result<(), String> {
+/// `budget` — максимум суммарных пикселей всех кадров.
+fn scan_gif(body: &[u8], w: u32, h: u32, budget: u64) -> Result<(), String> {
     let bad = |_| "GIF повреждён".to_string();
     let mut d = gif_options(true).read_info(Cursor::new(body)).map_err(bad)?;
     if (d.width() as u32, d.height() as u32) != (w, h) {
-        return Err(format!("нужна картинка {w}×{h}"));
+        return Err("GIF повреждён".into());
     }
-    let budget = limits::GIF_FRAMES_MAX as u64 * w as u64 * h as u64;
     let (mut frames, mut pixels) = (0usize, 0u64);
     while let Some(f) = d.read_next_frame().map_err(bad)? {
         frames += 1;
@@ -110,6 +110,74 @@ fn reencode_static(body: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+/// Картинка чата: бюджет пикселей на кадр (≈25 Мп).
+const CHAT_MAX_PIXELS: u64 = 25_000_000;
+/// GIF чата: холст × кадры (клиент держит кадры распакованными, RGBA).
+const CHAT_GIF_MAX_PIXELS: u64 = 64_000_000;
+const JPEG_QUALITY: u8 = 90;
+
+/// Проверить и очистить картинку чата: декод с лимитами, перекодирование без метаданных (EXIF/GPS, tEXt,
+/// комментарии GIF, XMP). Возвращает (байты, mime, ширина, высота). Тяжело — звать из `spawn_blocking`.
+pub fn sanitize_chat(body: &[u8]) -> Result<(Vec<u8>, &'static str, u32, u32), String> {
+    let max = limits::IMAGE_MAX_BYTES;
+    if body.len() > max {
+        return Err(format!("картинка больше {} МБ", max / 1024 / 1024));
+    }
+    let mime = crate::chat::sniff_image(body).ok_or("поддерживаются только PNG, JPEG, GIF и WebP")?;
+    let dim = imagesize::blob_size(body).map_err(|_| "картинка повреждена".to_string())?;
+    let (w, h) = (dim.width as u64, dim.height as u64);
+    let side = limits::IMAGE_MAX_SIDE as u64;
+    if w == 0 || h == 0 || w > side || h > side {
+        return Err(format!("размер картинки — до {side}×{side}"));
+    }
+    if w * h > CHAT_MAX_PIXELS {
+        return Err("картинка слишком большая (больше 25 мегапикселей)".into());
+    }
+    let (w, h) = (w as u32, h as u32);
+    let (out, mime) = if mime == "image/gif" {
+        scan_gif(body, w, h, CHAT_GIF_MAX_PIXELS)?;
+        if w as u64 * h as u64 * 2 > CHAT_GIF_MAX_PIXELS {
+            // хотя бы пара кадров должна помещаться
+            return Err("GIF слишком тяжёлый".into());
+        }
+        (reencode_gif(body)?, "image/gif")
+    } else {
+        reencode_chat_static(body, mime == "image/jpeg")?
+    };
+    if out.len() > max {
+        return Err(format!("после обработки картинка больше {} МБ", max / 1024 / 1024));
+    }
+    Ok((out, mime, w, h))
+}
+
+/// JPEG → JPEG (качество 90), PNG/WebP → PNG; поворот из EXIF применяется к пикселям, сам EXIF не переносится.
+fn reencode_chat_static(body: &[u8], jpeg: bool) -> Result<(Vec<u8>, &'static str), String> {
+    use image::ImageDecoder;
+    fn bad<E>(_: E) -> String {
+        "картинка повреждена".to_string()
+    }
+    let r = image::ImageReader::new(Cursor::new(body)).with_guessed_format().map_err(bad)?;
+    let mut dec = r.into_decoder().map_err(bad)?;
+    let orientation = dec.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut lim = image::Limits::default();
+    lim.max_image_width = Some(limits::IMAGE_MAX_SIDE);
+    lim.max_image_height = Some(limits::IMAGE_MAX_SIDE);
+    lim.max_alloc = Some(DECODE_MAX_BYTES * 2);
+    dec.set_limits(lim).map_err(bad)?;
+    let mut img = image::DynamicImage::from_decoder(dec).map_err(bad)?;
+    img.apply_orientation(orientation);
+    let mut out = Vec::new();
+    if jpeg {
+        let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY);
+        rgb.write_with_encoder(enc).map_err(|e| e.to_string())?;
+        Ok((out, "image/jpeg"))
+    } else {
+        img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        Ok((out, "image/png"))
+    }
 }
 
 #[cfg(test)]
@@ -273,5 +341,72 @@ mod tests {
         let cut = &g[..g.len() / 2];
         let e = sanitize(Kind::Avatar, cut).unwrap_err();
         assert!(e.contains("повреждён"), "{e}");
+    }
+
+    #[test]
+    fn chat_jpeg_exif_stripped_stays_jpeg() {
+        let j = jpeg(300, 200);
+        let mut app1 = vec![0xFF, 0xE1];
+        let payload = b"Exif\0\0GPS-55.75N-37.61E";
+        app1.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+        app1.extend_from_slice(payload);
+        let mut with = j[..2].to_vec();
+        with.extend_from_slice(&app1);
+        with.extend_from_slice(&j[2..]);
+        let (out, mime, w, h) = sanitize_chat(&with).unwrap();
+        assert_eq!((mime, w, h), ("image/jpeg", 300, 200));
+        assert!(!contains(&out, b"Exif") && !contains(&out, b"GPS"));
+    }
+
+    #[test]
+    fn chat_png_text_stripped() {
+        let p = png(64, 64);
+        let data = b"Comment\0secret";
+        let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+        let mut body = b"tEXt".to_vec();
+        body.extend_from_slice(data);
+        chunk.extend_from_slice(&body);
+        chunk.extend_from_slice(&crc32(&body).to_be_bytes());
+        let mut with = p[..33].to_vec();
+        with.extend_from_slice(&chunk);
+        with.extend_from_slice(&p[33..]);
+        let (out, mime, _, _) = sanitize_chat(&with).unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(!contains(&out, b"secret"));
+    }
+
+    #[test]
+    fn chat_pixel_budget() {
+        // 6000×5000 = 30 Мп > 25 Мп: отказ по заголовку, без декодирования
+        let mut p = png(8, 8);
+        p[16..20].copy_from_slice(&6000u32.to_be_bytes());
+        p[20..24].copy_from_slice(&5000u32.to_be_bytes());
+        let e = sanitize_chat(&p).unwrap_err();
+        assert!(e.contains("мегапикселей"), "{e}");
+    }
+
+    #[test]
+    fn chat_gif_animated_and_comment_stripped() {
+        let mut g = gif_frames(100, 80, &[(100, 80, 5), (100, 80, 7)]);
+        g.pop();
+        g.extend_from_slice(&[0x21, 0xFE, 6]);
+        g.extend_from_slice(b"secret");
+        g.extend_from_slice(&[0, 0x3B]);
+        let (out, mime, w, h) = sanitize_chat(&g).unwrap();
+        assert_eq!((mime, w, h), ("image/gif", 100, 80));
+        assert!(!contains(&out, b"secret"));
+        assert_eq!(gif_delays(&out), vec![5, 7]);
+    }
+
+    #[test]
+    fn chat_gif_too_heavy() {
+        // холст 4000×4000 = 16 Мп, 5 кадров → 80 Мп > 64 Мп
+        let g = gif_frames(4000, 4000, &vec![(4000, 4000, 2); 5]);
+        assert!(sanitize_chat(&g).is_err());
+    }
+
+    #[test]
+    fn chat_garbage_rejected() {
+        assert!(sanitize_chat(b"not an image").is_err());
     }
 }

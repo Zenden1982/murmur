@@ -472,8 +472,14 @@ async fn backup_makes_consistent_copy() {
 
 // ------------------------------------------------------------------ чат
 
-/// Минимальный PNG: сигнатура + IHDR (размеры читаются из заголовка).
+/// PNG: настоящий (декодируется), если небольшой; для огромных размеров — только сигнатура + IHDR.
 fn png(w: u32, h: u32) -> Vec<u8> {
+    if (w as u64) * (h as u64) <= 1_000_000 {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x % 256) as u8, (y % 256) as u8, 90, 255]));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        return out;
+    }
     let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
     v.extend_from_slice(&13u32.to_be_bytes());
     v.extend_from_slice(b"IHDR");
@@ -745,7 +751,9 @@ async fn chat_images() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(h[header::CONTENT_TYPE], "image/png");
     assert_eq!(h["x-content-type-options"], "nosniff");
-    assert_eq!(body, img);
+    // файл перекодируется сервером (метаданные не переносятся): остаётся PNG тех же размеров
+    assert!(body.starts_with(b"\x89PNG") && body.len() == att.size as usize);
+    let _ = &img;
     assert_eq!(
         c.t.call_raw(Method::GET, &url, None, vec![]).await.0,
         StatusCode::UNAUTHORIZED

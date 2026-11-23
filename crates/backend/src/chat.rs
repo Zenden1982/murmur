@@ -441,18 +441,13 @@ pub async fn upload(
     if body.len() > limits::IMAGE_MAX_BYTES {
         return Err(too_big());
     }
-    let mime = sniff_image(&body).ok_or_else(|| {
-        AppError::Validation("поддерживаются только PNG, JPEG, GIF и WebP".into())
-    })?;
-    let dim = imagesize::blob_size(&body)
-        .map_err(|_| AppError::Validation("картинка повреждена".into()))?;
-    let (w, h) = (dim.width as u64, dim.height as u64);
-    let side = limits::IMAGE_MAX_SIDE as u64;
-    if w == 0 || h == 0 || w > side || h > side {
-        return Err(AppError::Validation(format!(
-            "размер картинки — до {side}×{side}"
-        )));
-    }
+    // Проверка и очистка (EXIF/GPS, текстовые чанки, комментарии GIF), лимиты декодирования.
+    let raw = body;
+    let (body, mime, w, h) = tokio::task::spawn_blocking(move || crate::media::sanitize_chat(&raw))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("обработка картинки: {e}")))?
+        .map_err(AppError::Validation)?;
+    let (w, h) = (w as u64, h as u64);
     let pending: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM attachments WHERE uploader_id = ? AND message_id IS NULL",
     )
