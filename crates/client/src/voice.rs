@@ -1457,7 +1457,8 @@ impl Engine {
         let restarting = self.stream.is_some();
         // Тот же пресет — меняем только источник: трек и публикация остаются (зрители не переподключаются).
         if let Some(mut st) = self.stream.take() {
-            if st.preset == preset && st.publication.is_some() {
+            // Кодировщик сменили в настройках на процессор — полный перезапуск, а не смена только источника (V15).
+            if st.preset == preset && st.publication.is_some() && (!st.hw || stream::hw_allowed()) {
                 if let Some(c) = st.capture.take() {
                     tokio::task::block_in_place(|| c.stop_bounded());
                 }
