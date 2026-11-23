@@ -4861,7 +4861,8 @@ fn grid_rects(r: Rect, n: usize, aspect: f32, gap: f32) -> Vec<Rect> {
         2 => 2,
         3 | 5 | 6 | 9 => 3,
         4 => 2,
-        _ => 4,
+        // Много плиток: столбцов столько, чтобы они вписались по высоте и не сжимались в полоски (U7).
+        _ => ((n as f32 * aspect * r.width() / r.height().max(1.0)).sqrt().ceil() as usize).clamp(4, n),
     };
     let rows = n.div_ceil(cols);
     let tw = (r.width() - gap * (cols - 1) as f32) / cols as f32;
