@@ -116,7 +116,7 @@ const SET_TABS: [(SetTab, &str, &str, &str, &str); 7] = [
     (SetTab::Profile, "ПОЛЬЗОВАТЕЛЬ", "Профиль", "Как вас видят другие", "аватар имя отображаемое о себе активность игра личные сообщения"),
     (SetTab::Account, "ПОЛЬЗОВАТЕЛЬ", "Аккаунт", "Логин, сервер и вход", "логин сервер пароль сеансы выйти"),
     (SetTab::Voice, "ПРИЛОЖЕНИЕ", "Голос и видео", "Устройства, микрофон и шумоподавление", "микрофон вывод звука наушники проверка рация голосом порог чувствительность шумоподавление эхоподавление громкость"),
-    (SetTab::Stream, "ПРИЛОЖЕНИЕ", "Стрим экрана", "Качество и звук трансляции экрана", "трансляция качество разрешение кадры звук"),
+    (SetTab::Stream, "ПРИЛОЖЕНИЕ", "Стрим экрана", "Качество, кодировщик, звук и окно в окне", "трансляция качество разрешение кадры звук"),
     (SetTab::Hotkeys, "ПРИЛОЖЕНИЕ", "Горячие клавиши", "Работают, даже когда окно свёрнуто", "клавиша рация сочетание"),
     (SetTab::Look, "ПРИЛОЖЕНИЕ", "Внешний вид", "Тема, анимации и звуки интерфейса", "тема тёмная светлая анимации индикатор речи пинг плитки кот звуки"),
     (SetTab::Notify, "ПРИЛОЖЕНИЕ", "Уведомления", "Трей, автозапуск и обновления", "трей автозапуск windows обновления версия"),
@@ -308,6 +308,7 @@ impl App {
         #[allow(unused_mut)]
         let mut settings = Settings::load();
         let (pip_panel, pip_window) = (settings.pip_panel, settings.pip_window);
+        crate::stream::set_prefs(settings.stream_encoder, settings.stream_bitrate_mbps);
         // Отладка: AMADEUS_THEME=dark|light — тема для скриншотов (не сохраняется).
         #[cfg(debug_assertions)]
         match std::env::var("AMADEUS_THEME").as_deref() {
@@ -4174,7 +4175,7 @@ impl App {
     }
 
     /// Настройки → «Стрим экрана» (пока — то, что уже есть: качество и звук по умолчанию).
-    fn ui_settings_stream(&mut self, ui: &mut Ui, w: f32) {
+    fn ui_settings_stream(&mut self, ui: &mut Ui, w: f32, vs: &VoiceState) {
         let mut preset = self.settings.stream_preset;
         toggle_row(ui, w, |ui| {
             ui.label("Качество по умолчанию").on_hover_text("Разрешение и частота кадров; можно сменить при запуске трансляции");
@@ -4198,6 +4199,40 @@ impl App {
                 self.settings.save();
             }
         });
+        // Кодировщик и битрейт — на следующий запуск трансляции
+        let mut enc = self.settings.stream_encoder;
+        let live = vs.stream.as_ref().map(|s| s.backend.clone());
+        toggle_row(ui, w, |ui| {
+            ui.label("Кодировщик").on_hover_text("Авто — видеокарта, а если не вышло — процессор. «Процессор» выручает, когда видеокарта занята игрой или глючит; «Видеокарта» не нагружает процессор.");
+        }, |ui| {
+            kit::segmented(ui, &mut enc, &crate::stream::EncoderPref::ALL);
+        });
+        if let Some(b) = &live {
+            ui.label(RichText::new(format!("Сейчас кодирует: {b}")).size(12.5).color(t::p().text_muted));
+        }
+        let mut manual = self.settings.stream_bitrate_mbps.is_some();
+        let mut mbps = self.settings.stream_bitrate_mbps.unwrap_or(8.0);
+        toggle_row(ui, w, |ui| {
+            ui.label("Битрейт").on_hover_text("Потолок скорости потока. «Авто» — по качеству (3–12 Мбит/с); реальную скорость всё равно подстраивает под ваш канал. Вручную — если канал стабильный и хочется чётче, или наоборот слабый.");
+        }, |ui| {
+            kit::segmented(ui, &mut manual, &[(false, "Авто"), (true, "Вручную")]);
+        });
+        if manual {
+            ui.horizontal(|ui| {
+                kit::slider(ui, &mut mbps, crate::stream::BITRATE_MIN_MBPS..=crate::stream::BITRATE_MAX_MBPS, 260.0);
+                ui.label(RichText::new(format!("{:.0} Мбит/с", mbps.round())).size(13.0).color(t::p().text_muted));
+            });
+        }
+        let new_mbps = manual.then(|| mbps.round().max(crate::stream::BITRATE_MIN_MBPS));
+        if enc != self.settings.stream_encoder || new_mbps != self.settings.stream_bitrate_mbps {
+            self.settings.stream_encoder = enc;
+            self.settings.stream_bitrate_mbps = new_mbps;
+            self.settings.save();
+            crate::stream::set_prefs(enc, new_mbps);
+        }
+        if live.is_some() {
+            ui.label(RichText::new("Применится при следующем запуске трансляции").size(12.5).color(t::p().text_muted));
+        }
         let (mut pip_auto, mut topmost) = (self.settings.pip_auto, self.settings.pip_topmost);
         toggle_row(ui, w, |ui| {
             ui.label("Окно в окне для трансляций").on_hover_text("Смотрите стрим в маленьком окне, пока заняты другим: внутри Murmur, а когда Murmur свёрнут или вы в другой программе — отдельным окном");
@@ -4316,7 +4351,7 @@ impl App {
                         SetTab::Profile => self.ui_settings_profile(ui, w),
                         SetTab::Account => self.ui_settings_account(ui, w),
                         SetTab::Voice => self.ui_settings_voice(ui, w, vs),
-                        SetTab::Stream => self.ui_settings_stream(ui, w),
+                        SetTab::Stream => self.ui_settings_stream(ui, w, vs),
                         SetTab::Hotkeys => self.ui_settings_hotkeys(ui, w),
                         SetTab::Look => self.ui_settings_look(ui, w),
                         SetTab::Notify => self.ui_settings_app(ui, w),

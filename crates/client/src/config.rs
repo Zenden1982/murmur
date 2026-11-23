@@ -132,6 +132,10 @@ pub struct Settings {
     pub stream_preset: Preset,
     /// Передавать звук окна/системы в трансляции.
     pub stream_audio: bool,
+    /// Чем кодировать трансляцию (применяется при следующем запуске трансляции).
+    pub stream_encoder: crate::stream::EncoderPref,
+    /// Ручной потолок битрейта трансляции, Мбит/с; None — «Авто» (по пресету).
+    pub stream_bitrate_mbps: Option<f32>,
     /// Мини-плеер трансляции («окно в окне») появляется сам; выключено — только по кнопке на плитке.
     pub pip_auto: bool,
     /// Окно ОС с плеером — поверх всех окон.
@@ -201,6 +205,8 @@ impl Default for Settings {
             user_muted: HashMap::new(),
             stream_preset: Preset::default(),
             stream_audio: true,
+            stream_encoder: crate::stream::EncoderPref::Auto,
+            stream_bitrate_mbps: None,
             pip_auto: true,
             pip_topmost: true,
             pip_panel: None,
@@ -350,5 +356,6 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"sounds":true}"#).unwrap();
         assert!(s.pip_auto && s.pip_topmost);
         assert_eq!((s.pip_panel, s.pip_window), (None, None));
+        assert_eq!((s.stream_encoder, s.stream_bitrate_mbps), (crate::stream::EncoderPref::Auto, None));
     }
 }

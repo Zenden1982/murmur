@@ -1,6 +1,7 @@
 //! Трансляция окна/экрана: пресеты качества, приёмник кадров для LiveKit, публикация трека.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use capture_win::hw::{EncodedSink, HwCapture};
 use capture_win::{AppAudio, AudioSink, AudioTarget, Capture, CaptureConfig, Event, I420Buffer, Sink, SourceId, app_audio};
@@ -58,8 +59,13 @@ impl Preset {
         !matches!(self, Preset::P720_30)
     }
 
-    /// Потолок битрейта; реальный подстраивает WebRTC (GCC) под канал.
+    /// Потолок битрейта; реальный подстраивает WebRTC (GCC) под канал. Заданный в настройках («Вручную») заменяет пресетный.
     pub fn max_bitrate(self) -> u64 {
+        bitrate_or(self.default_bitrate(), BITRATE_BPS.load(Ordering::Relaxed))
+    }
+
+    /// Пресетный потолок («Авто»).
+    pub fn default_bitrate(self) -> u64 {
         match self {
             Preset::P720_30 => 3_000_000,
             Preset::P1080_30 => 5_000_000,
@@ -68,6 +74,40 @@ impl Preset {
             Preset::Native => 12_000_000,
         }
     }
+}
+
+/// Что кодирует трансляцию (настройка «Кодировщик»): Авто — видеокарта, а если не вышло — процессор.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EncoderPref {
+    #[default]
+    Auto,
+    /// Видеокарта; не вышло — процессор (с записью в лог).
+    Gpu,
+    /// Только процессор (OpenH264): когда видеокарта занята игрой или глючит.
+    Cpu,
+}
+
+impl EncoderPref {
+    pub const ALL: [(EncoderPref, &'static str); 3] = [(EncoderPref::Auto, "Авто"), (EncoderPref::Gpu, "Видеокарта"), (EncoderPref::Cpu, "Процессор")];
+}
+
+/// Границы ручного битрейта, Мбит/с.
+pub const BITRATE_MIN_MBPS: f32 = 1.0;
+pub const BITRATE_MAX_MBPS: f32 = 30.0;
+
+static ENCODER_PREF: AtomicU8 = AtomicU8::new(0);
+/// Ручной потолок битрейта, бит/с; 0 — «Авто».
+static BITRATE_BPS: AtomicU64 = AtomicU64::new(0);
+
+/// Применить настройки трансляции (вызывать при старте и при изменении; действуют на следующий запуск трансляции).
+pub fn set_prefs(pref: EncoderPref, bitrate_mbps: Option<f32>) {
+    ENCODER_PREF.store(pref as u8, Ordering::Relaxed);
+    BITRATE_BPS.store(bitrate_mbps.map_or(0, |m| (m.clamp(BITRATE_MIN_MBPS, BITRATE_MAX_MBPS) * 1_000_000.0) as u64), Ordering::Relaxed);
+}
+
+/// Ручной битрейт (бит/с, 0 — нет) вместо пресетного.
+fn bitrate_or(default: u64, manual: u64) -> u64 {
+    if manual == 0 { default } else { manual }
 }
 
 /// Имена треков трансляции: основной и экономный слой (свой simulcast: аппаратный энкодер выдаёт один готовый поток).
@@ -271,7 +311,7 @@ pub struct Started {
 
 /// `AMADEUS_NO_HW=1` — принудительно программное кодирование (диагностика).
 pub fn hw_allowed() -> bool {
-    std::env::var_os("AMADEUS_NO_HW").is_none()
+    std::env::var_os("AMADEUS_NO_HW").is_none() && ENCODER_PREF.load(Ordering::Relaxed) != EncoderPref::Cpu as u8
 }
 
 /// Новый захват с новым источником видео: сначала видеокарта, если нельзя — процессор.
@@ -398,4 +438,27 @@ pub fn start_audio(id: SourceId, source: &NativeAudioSource) -> Result<AppAudio,
     let target = AudioTarget::for_source(id).ok_or("не удалось определить процесс окна")?;
     let sink = Arc::new(LkAudioSink { source: source.clone(), errors: Default::default() });
     AppAudio::start(target, sink)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_bitrate_replaces_preset_cap() {
+        assert_eq!(bitrate_or(5_000_000, 0), 5_000_000);
+        assert_eq!(bitrate_or(5_000_000, 9_000_000), 9_000_000);
+    }
+
+    #[test]
+    fn set_prefs_clamps_manual_bitrate_and_gates_hw() {
+        set_prefs(EncoderPref::Cpu, Some(100.0));
+        assert_eq!(BITRATE_BPS.load(Ordering::Relaxed), 30_000_000);
+        assert!(!hw_allowed());
+        set_prefs(EncoderPref::Gpu, Some(0.1));
+        assert_eq!(BITRATE_BPS.load(Ordering::Relaxed), 1_000_000);
+        set_prefs(EncoderPref::Auto, None);
+        assert_eq!(BITRATE_BPS.load(Ordering::Relaxed), 0);
+        assert_eq!(Preset::P1080_30.max_bitrate(), 5_000_000);
+    }
 }
