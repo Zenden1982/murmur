@@ -42,13 +42,13 @@ pub mod limits {
     pub const BANNER_W: u32 = 960;
     pub const BANNER_H: u32 = 480;
     pub const IMAGE_BANNER_MAX_BYTES: usize = 2 * 1024 * 1024;
-    /// Аватар пользователя (итоговый файл): ровно 256×256, до 5 МБ; PNG/JPEG/WebP/GIF.
+    /// Аватар пользователя (итоговый файл): ровно 256×256, до 4 МБ; PNG/JPEG/WebP/GIF.
     pub const AVATAR_SIDE: u32 = 256;
-    pub const AVATAR_MAX_BYTES: usize = 5 * 1024 * 1024;
-    /// Баннер пользователя (итоговый файл): ровно 960×384 (5:2), до 5 МБ.
+    pub const AVATAR_MAX_BYTES: usize = 4 * 1024 * 1024;
+    /// Баннер пользователя (итоговый файл): ровно 960×384 (5:2), до 6 МБ.
     pub const USER_BANNER_W: u32 = 960;
     pub const USER_BANNER_H: u32 = 384;
-    pub const USER_BANNER_MAX_BYTES: usize = 5 * 1024 * 1024;
+    pub const USER_BANNER_MAX_BYTES: usize = 6 * 1024 * 1024;
     /// Кадров в GIF профиля (и суммарно пикселей — не больше GIF_FRAMES_MAX холстов).
     pub const GIF_FRAMES_MAX: usize = 300;
     /// Исходник, который можно открыть в окне обрезки.
