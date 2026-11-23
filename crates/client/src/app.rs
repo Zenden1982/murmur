@@ -213,6 +213,12 @@ pub struct App {
     pointer_moved_at: Instant,
     /// Какие трансляции нарисованы в текущем кадре и какого размера (физ. пиксели).
     views_frame: HashMap<String, (u32, u32)>,
+    /// Мини-плеер трансляции («окно в окне»): выбор стрима, закрыт/закреплён; положение и ширина панели.
+    pip: crate::pip::Pip,
+    pip_pos: Option<Pos2>,
+    pip_w: f32,
+    /// Канал звонка, в котором плеер сбрасывался (новый вход → снова показывать).
+    pip_chan: Option<i64>,
     /// «Смотреть» нажато, движок ещё не подтвердил (фокус не сбрасывать).
     watch_pending: Option<(String, Instant)>,
     /// Текстовый чат.
@@ -409,6 +415,10 @@ impl App {
             views_sent: HashMap::new(),
             pointer_moved_at: Instant::now(),
             views_frame: HashMap::new(),
+            pip: crate::pip::Pip::default(),
+            pip_pos: None,
+            pip_w: 320.0,
+            pip_chan: None,
             watch_pending: None,
             chat,
             people,
@@ -1335,6 +1345,13 @@ impl App {
             let watching = std::mem::take(&mut vs.watching);
             vs = demo_state(ui.input(|i| i.time));
             vs.watching = watching;
+            // AMADEUS_DEMO_WATCH=1 — «смотрим» все трансляции демо; =2 — ещё и мини-плеер включён вручную (скриншоты окна в окне)
+            if let Ok(v) = std::env::var("AMADEUS_DEMO_WATCH") {
+                vs.watching = vs.peers.iter().filter(|p| p.streaming).map(|p| p.identity.clone()).collect();
+                if v == "2" {
+                    self.pip.force();
+                }
+            }
             self.demo_frames(ui, &vs);
         }
         #[cfg(debug_assertions)]
@@ -1436,6 +1453,7 @@ impl App {
         if self.picker.is_some() {
             self.ui_picker(ui, &vs);
         }
+        self.ui_pip(ui, &vs);
         self.report_views(&vs);
     }
 
@@ -1865,6 +1883,129 @@ impl App {
                     self.view = View::Text(ch.id);
                 }
             }
+        }
+    }
+
+    /// Мини-плеер трансляции: плавающая панель, пока выбранный стрим не виден на сцене (или включён вручную).
+    fn ui_pip(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        use crate::pip::PeerInfo;
+        let ch = vs.channel.as_ref().filter(|_| vs.conn == Conn::Connected).cloned();
+        let ch_id = ch.as_ref().map(|c| c.id);
+        if ch_id != self.pip_chan {
+            self.pip_chan = ch_id;
+            self.pip.reset();
+        }
+        let Some(ch) = ch else { return };
+        if self.settings_open {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let mut watching = vs.watching.clone();
+        watching.sort();
+        let infos: Vec<PeerInfo> = vs.peers.iter().map(|p| PeerInfo { identity: &p.identity, speaking: p.speaking && !p.mic_muted, streaming: p.streaming }).collect();
+        let Some(id) = self.pip.pick(ctx.input(|i| i.time), &watching, &infos) else { return };
+        let drawn: std::collections::HashSet<String> = self.views_frame.keys().cloned().collect();
+        if !self.pip.wanted(&id, &drawn) {
+            return;
+        }
+        let frame = self.video.frame(&id);
+        let aspect = frame.as_ref().map(|f| f.size[1] as f32 / f.size[0].max(1) as f32).filter(|a| *a > 0.1 && *a < 3.0).unwrap_or(9.0 / 16.0);
+        let area_rect = ctx.content_rect();
+        let w = self.pip_w.clamp(200.0, 720.0).min(area_rect.width() - 24.0);
+        let size = vec2(w, w * aspect);
+        let default_pos = pos2(area_rect.right() - size.x - 16.0, area_rect.top() + crate::frame::HEIGHT + 76.0);
+        let pos = self.pip_pos.unwrap_or(default_pos);
+        let pos = pos2(pos.x.clamp(area_rect.left() + 4.0, (area_rect.right() - size.x - 4.0).max(area_rect.left() + 4.0)), pos.y.clamp(area_rect.top() + 4.0, (area_rect.bottom() - size.y - 4.0).max(area_rect.top() + 4.0)));
+        let name = vs.peers.iter().find(|p| p.identity == id).map(|p| peer_name(&self.people, p)).unwrap_or_default();
+        let pinned = self.pip.pinned() == Some(id.as_str());
+        let svol = self.settings.stream_volume_of(&id);
+        let ppp = ctx.pixels_per_point();
+
+        let mut new_pos = pos;
+        let mut new_w = w;
+        let mut act = None::<PipAct>;
+        let mut drawn_rect = None;
+        egui::Area::new(Id::new("pip-panel")).order(egui::Order::Foreground).fixed_pos(pos).show(&ctx, |ui| {
+            let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+            drawn_rect = Some(rect);
+            let radius = CornerRadius::same(10);
+            let painter = ui.painter();
+            painter.rect_filled(rect.expand(1.0), radius, Color32::BLACK);
+            match &frame {
+                Some(f) => egui::Image::new(egui::load::SizedTexture::new(f.texture, rect.size())).corner_radius(radius).paint_at(ui, rect),
+                None => egui::Spinner::new().size(28.0).color(t::p().accent).paint_at(ui, Rect::from_center_size(rect.center(), vec2(28.0, 28.0))),
+            }
+            let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
+            ui.painter().rect_stroke(rect.expand(1.0), radius, Stroke::new(1.0, if hovered { t::p().accent } else { t::p().border_strong }), StrokeKind::Outside);
+            if resp.dragged() {
+                new_pos = pos + resp.drag_delta();
+            }
+            if resp.double_clicked() {
+                act = Some(PipAct::Expand);
+            }
+            if hovered {
+                chip(ui.painter(), rect.left_bottom() + vec2(10.0, -10.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, name), ON_VIDEO);
+                let mut c = pos2(rect.right() - 22.0, rect.top() + 22.0);
+                let btn = |ui: &Ui, c: Pos2, icon: &str, tip: &str, id: &str| {
+                    let r = Rect::from_center_size(c, vec2(32.0, 32.0));
+                    let rr = ui.interact(r, Id::new(("pip-btn", id)), Sense::click());
+                    ui.painter().circle_filled(c, 16.0, if rr.hovered() { t::p().accent } else { t::overlay_dark(190) });
+                    ui.painter().text(c, Align2::CENTER_CENTER, icon, t::font(16.0), ON_VIDEO);
+                    rr.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+                };
+                if btn(ui, c, ph::X, "Закрыть", "close") {
+                    act = Some(PipAct::Close);
+                }
+                c.x -= 38.0;
+                if btn(ui, c, ph::ARROWS_OUT, "Вернуться к звонку", "expand") {
+                    act = Some(PipAct::Expand);
+                }
+                c.x -= 38.0;
+                let sicon = if svol <= 0.001 { ph::SPEAKER_SLASH } else { ph::SPEAKER_HIGH };
+                if btn(ui, c, sicon, if svol <= 0.001 { "Включить звук" } else { "Выключить звук" }, "mute") {
+                    act = Some(PipAct::Mute);
+                }
+                c.x -= 38.0;
+                if btn(ui, c, if pinned { ph::PUSH_PIN_SLASH } else { ph::PUSH_PIN }, if pinned { "Открепить" } else { "Закрепить этот стрим" }, "pin") {
+                    act = Some(PipAct::Pin);
+                }
+            }
+            // угол справа внизу — растягивать (пропорции сохраняются)
+            let grip = Rect::from_min_size(rect.right_bottom() - vec2(22.0, 22.0), vec2(22.0, 22.0));
+            let gr = ui.interact(grip, Id::new("pip-grip"), Sense::drag());
+            if hovered || gr.hovered() {
+                ui.painter().text(grip.center(), Align2::CENTER_CENTER, ph::CORNERS_OUT, t::font(12.0), ON_VIDEO_MUTED);
+            }
+            if gr.dragged() {
+                new_w = (w + gr.drag_delta().x).clamp(200.0, 720.0);
+            }
+            gr.on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+        });
+        self.pip_pos = Some(new_pos);
+        self.pip_w = new_w;
+        if let Some(r) = drawn_rect {
+            self.mark_view(&id, r, ppp);
+        }
+        match act {
+            Some(PipAct::Close) => self.pip.dismiss(),
+            Some(PipAct::Pin) => self.pip.pin(if pinned { None } else { Some(id.clone()) }),
+            Some(PipAct::Mute) => {
+                let nv = if svol <= 0.001 { 1.0 } else { 0.0 };
+                self.settings.stream_volume.insert(id.clone(), nv);
+                self.settings.save();
+                self.voice.send(Cmd::SetStreamVolume(id.clone(), nv));
+            }
+            Some(PipAct::Expand) => {
+                self.focus = Some(id.clone());
+                if crate::dms::is_dm(&ch) {
+                    self.view = View::Dm(ch.id);
+                } else {
+                    self.select_server(ch.server_id);
+                    self.view = View::Voice;
+                }
+                self.pip.force_off();
+            }
+            None => {}
         }
     }
 
@@ -2663,6 +2804,10 @@ impl App {
             if overlay_button(ui, c, ph::CORNERS_OUT, "Полный экран (F11)", Id::new(("s-full", &p.identity))).clicked() {
                 act = Some(StreamAct::Fullscreen);
             }
+            c.x -= 44.0;
+            if overlay_button(ui, c, ph::PICTURE_IN_PICTURE, "Окно в окне", Id::new(("s-pip", &p.identity))).clicked() {
+                act = Some(StreamAct::Pip);
+            }
             if big {
                 c.x -= 44.0;
                 if overlay_button(ui, c, ph::SQUARES_FOUR, "Все участники (Esc)", Id::new(("s-grid", &p.identity))).clicked() {
@@ -2691,12 +2836,17 @@ impl App {
                 self.set_fullscreen(ui.ctx(), true);
             }
             Some(StreamAct::Grid) => self.focus = None,
+            Some(StreamAct::Pip) => {
+                self.pip.pin(Some(p.identity.clone()));
+                self.pip.force();
+            }
             Some(StreamAct::Unwatch) => self.unwatch(ui.ctx(), &p.identity),
             None => {}
         }
     }
 
     fn watch(&mut self, identity: &str) {
+        self.pip.reset();
         self.voice.send(Cmd::Watch { identity: identity.to_string(), on: true });
         self.watch_pending = Some((identity.to_string(), Instant::now()));
         self.focus = Some(identity.to_string());
@@ -4443,11 +4593,20 @@ enum Item<'a> {
     Stream(&'a Peer),
 }
 
+/// Действие в мини-плеере.
+enum PipAct {
+    Close,
+    Expand,
+    Mute,
+    Pin,
+}
+
 enum StreamAct {
     Watch,
     Focus,
     Fullscreen,
     Grid,
+    Pip,
     Unwatch,
 }
 

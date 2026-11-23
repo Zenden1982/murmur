@@ -83,6 +83,11 @@ impl Pip {
         self.dismissed = false;
     }
 
+    /// Вернулись на сцену: ручной показ больше не нужен.
+    pub fn force_off(&mut self) {
+        self.forced = false;
+    }
+
     /// Нужен ли плеер: выбранный стрим не нарисован на сцене (`drawn`), плеер не закрыт крестиком; вручную — всегда.
     pub fn wanted(&self, picked: &str, drawn: &HashSet<String>) -> bool {
         !self.dismissed && (self.forced || !drawn.contains(picked))
