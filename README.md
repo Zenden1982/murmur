@@ -1,121 +1,52 @@
 <h1 align="center"><img src="docs/logo.png" alt="" width="56" align="absmiddle">&nbsp;Murmur</h1>
-<p align="center"><b>Голос, чат и показ экрана со звуком — на вашем собственном сервере.<br>Можно даже дать другу порулить вашим компьютером. Сервер ставится одной командой.</b></p>
-<p align="center"><a href="README.en.md">English</a> · <b>Русский</b> · <a href="#установка-своего-сервера">Установка сервера</a> · <a href="https://github.com/Zenden1982/murmur/releases">Скачать клиент</a></p>
+<p align="center"><b>Voice, chat and screen sharing with sound — on your own server.<br>You can even let a friend take the controls of your computer. The server installs with one command.</b></p>
+<p align="center"><b>English</b> · <a href="README.ru.md">Русский</a> · <a href="#self-hosting">Self-hosting</a> · <a href="https://github.com/Zenden1982/murmur/releases">Download</a></p>
 
-<p align="center"><img src="docs/screenshots/voice.gif" alt="Голосовой канал Murmur" width="720"></p>
+<p align="center"><img src="docs/screenshots/voice.gif" alt="Murmur voice channel" width="720"></p>
 
 <p align="center">
-  <img src="docs/screenshots/chat.png" alt="Текстовый чат" width="49%">
-  <img src="docs/screenshots/settings-stream.png" alt="Настройки стрима" width="49%">
+  <img src="docs/screenshots/chat.png" alt="Text chat" width="49%">
+  <img src="docs/screenshots/settings-stream.png" alt="Screen sharing settings" width="49%">
 </p>
-<p align="center"><sub>Скриншоты из демо-режима клиента, данные тестовые.</sub></p>
+<p align="center"><sub>Screenshots are from the client's demo mode, the data is fake.</sub></p>
 
-Я делаю Murmur для себя и друзей — чтобы можно было спокойно поговорить, поиграть и показать друг другу экран, не завися от чужих сервисов: сервер ваш, данные ваши. В нём есть голосовые каналы, текст, друзья и личные сообщения, но главное — то, ради чего всё затевалось: **показ экрана**, который не мучает ни стримера, ни зрителей.
+I'm building Murmur for myself and my friends, so we can talk, play and show each other our screens without depending on someone else's service: the server is yours, and so is the data. It has voice channels, text, friends and DMs, but the main point is what it was all started for: **screen sharing** that is easy on both the streamer and the viewers.
 
-## Показ экрана
+## Screen sharing
 
-Можно показать **весь экран** — тогда в трансляцию уходит звук компьютера (кроме самого Murmur, чтобы не было эха). А можно показать **одну программу**: зрители видят только это окно, и слышно тоже только эту программу. Музыка в другой вкладке или уведомления мессенджера в трансляцию не попадут.
+You can share your **whole screen** — the computer's sound goes along with it (except Murmur itself, to avoid echo). Or you can share **a single app**: viewers see only that window and hear only that program. Music in another tab or chat notifications stay out of the stream.
 
-Качество — до 1440p при 60 кадрах в секунду или в родном разрешении монитора. Видео кодируется видеокартой, так что игре это почти не мешает. Если у зрителя слабый интернет, он может включить экономный режим; а если провайдер режет UDP, всё пойдёт через TLS по порту 443. По F3 открывается оверлей с пингом, битрейтом, кадрами и потерями — удобно искать, из-за чего всё тормозит.
+Quality goes up to 1440p at 60 fps or your monitor's native resolution. Video is encoded by the GPU, so it barely affects a game. If a viewer's connection is weak they can turn on an economy mode, and if your ISP blocks UDP everything falls back to TLS on port 443. Press F3 for an overlay with ping, bitrate, fps and packet loss — handy for finding out what's lagging.
 
-## Удалённое управление
+## Remote control
 
-Это похоже на AnyDesk, только прямо внутри звонка, без отдельных программ. Зритель нажимает «Попросить управление», а **стример сам решает**: отказать, дать только указку (зритель показывает курсором, куда смотреть) или разрешить полное управление мышью и клавиатурой.
+Think AnyDesk, but inside the call, with no extra software. A viewer clicks "Ask for control" and **the streamer decides**: refuse, allow a pointer only (the viewer shows with a cursor where to look), or allow full mouse and keyboard control.
 
-Пока кто-то управляет, у стримера висит плашка «Тобой управляет …», а забрать управление можно в любой момент — кнопкой «Забрать» или сочетанием Ctrl+Alt+Пробел. Управлять можно только тем, что вы показываете: окном или экраном, но не всем компьютером сразу. Удобно, когда надо помочь родителям с компьютером, вместе разобраться с настройками или что-то быстро показать новичку.
+While someone is in control the streamer sees a "being controlled by …" badge, and can take control back at any moment with the "Take back" button or Ctrl+Alt+Space. You can only control what is being shared — the window or the screen, not the whole computer at once. Useful for helping a parent with their PC, going through settings together, or showing a newcomer how something works.
 
-## Что ещё есть
+## What else
 
-- **Лёгкий клиент без Electron.** Написан на Rust, один .exe для Windows, установщик ≈ 35 МБ. В простое занимает около 180 МБ памяти, а Discord у меня в том же состоянии — около 1 ГБ (шесть процессов; замер на Windows 11, 2026-11-23). <!-- ЗАМЕР: в голосе и при просмотре стрима — дописать -->
-- **Нормальный голос.** Локальный нейросетевой шумодав (DeepFilterNet), эхоподавление, громкость каждого участника отдельно, рация и глобальные горячие клавиши, которые работают прямо из игры.
-- **Чат.** Текстовые каналы, роли и права, инвайты, друзья, личные сообщения, групповые звонки с камерой до 8 человек, реакции, эмодзи, стикеры, поиск GIF (запросы идут через ваш сервер, клиенты ни к кому постороннему не обращаются), уведомления Windows и «Не беспокоить», который сам включается во время трансляции.
-- **Приватность.** Ни рекламы, ни телеметрии. Картинки на сервере перекодируются, метаданные удаляются. Обновления клиента подписаны.
-- **Свой сервер.** Один скрипт ставит LiveKit, Caddy (HTTPS сам) и бэкенд на Rust с SQLite — отдельную базу данных поднимать не надо. На своём сервере нет никаких лимитов.
-- **Дальше.** Позже, возможно, появится официальный сервер с тарифами для больших сообществ (качество стрима повыше, файлы побольше). На своих серверах это ничего не ограничит. Лицензия AGPL-3.0.
+- **A light client, no Electron.** Written in Rust, a single Windows .exe, installer ≈ 35 MB. Idle, it takes about 180 MB of RAM; Discord on my machine in the same state takes about 1 GB (six processes; measured on Windows 11, 2026-11-23). <!-- ЗАМЕР: в голосе и при просмотре стрима — дописать -->
+- **Decent voice.** Local neural noise suppression (DeepFilterNet), echo cancellation, per-user volume, push-to-talk and global hotkeys that work from inside a game.
+- **Chat.** Text channels, roles and permissions, invites, friends, DMs, group calls with camera for up to 8 people, reactions, emoji, stickers, GIF search (requests go through your server, clients never talk to third parties), Windows notifications and a Do Not Disturb that turns itself on while you stream.
+- **Privacy.** No ads, no telemetry. Images are re-encoded on the server and stripped of metadata. Client updates are signed.
+- **Your own server.** One script sets up LiveKit, Caddy (HTTPS is automatic) and a Rust backend with SQLite — no database server to run. Your own server has no limits.
+- **Later.** There may eventually be an official server with paid plans for large communities (higher stream quality, bigger files). It won't restrict anything on your own server. AGPL-3.0.
 
-## Статус
+## Status
 
-Пока есть только клиент для Windows, Linux — потом. Сейчас Murmur каждый день используют я и несколько друзей, так что шероховатости бывают — если что-то сломалось, напишите в Issues.
+For now it's a Windows client only; Linux comes later. Right now I and a few friends use Murmur every day, so rough edges happen — if something breaks, open an issue.
 
-## Установка своего сервера
+## Self-hosting
 
-Сервер Murmur — три сервиса в Docker (голос и видео LiveKit, Caddy с сертификатами, бэкенд с аккаунтами и чатом).
-Ставится одной командой, готовые образы скачиваются с ghcr.io, на сервере ничего не собирается.
-
-### Что нужно
-
-- VPS с **Ubuntu 22.04 / 24.04** или **Debian 12**, архитектура x86-64, от 1 ГБ памяти.
-- Доступ по SSH с правами root (или sudo).
-- Свой домен **не обязателен**: без него установщик использует бесплатные имена по IP вида `api.85-12-34-56.sslip.io`.
-
-### Установка
-
-Зайдите на сервер по SSH и выполните:
+Ubuntu 22.04/24.04 or Debian 12 (x86-64, 1 GB RAM+), root over SSH. Run on the server:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Zenden1982/murmur/main/deploy/install.sh | sudo sh
 ```
 
-Установщик спросит:
+The installer sets up Docker, LiveKit, Caddy (HTTPS) and the backend, then prints the server address (enter it in the client's login screen) and an invite for your friends. A domain is optional — without one it uses free `sslip.io` names. Details (ports, updates, backup) are in the [Russian guide](README.ru.md#установка-своего-сервера).
 
-1. **Домен.** Enter — без домена (имена sslip.io по IP). Если вводите свой, заранее создайте три A-записи
-   `lk.`, `turn.` и `api.` на IP сервера (например, `lk.chat.example.com`); установщик дождётся, пока они заработают.
-2. **Почту** для Let's Encrypt. Можно пропустить.
-3. **Ник и пароль администратора.**
+## License
 
-Дальше он сам поставит Docker, создаст ключи, откроет порты в ufw (если он включён) и запустит сервер.
-Установка идёт несколько минут. В конце на экране будут:
-
-- **адрес сервера** — его вписывают в клиент Murmur на экране входа;
-- **инвайт** для друзей (по умолчанию на 10 человек, действует 7 дней).
-
-Всё ставится в `/opt/murmur`.
-
-### Порты
-
-Если у хостера есть свой firewall (панель провайдера), откройте входящие:
-
-| Порт | Зачем |
-|---|---|
-| 443/tcp | HTTPS, API и подключение к LiveKit |
-| 7881/tcp | медиа LiveKit по TCP |
-| 7882/udp | медиа LiveKit по UDP |
-| 3478/udp | TURN |
-
-### Управление: команда `murmur`
-
-| Команда | Что делает |
-|---|---|
-| `murmur invite [--uses N] [--hours H]` | новый инвайт (по умолчанию 10 человек, 7 дней) |
-| `murmur update` | обновить до последней версии; перед этим делается копия базы, настройки и ключи сохраняются |
-| `murmur update --domain chat.example.com` | перейти на свой домен; прежний адрес `…sslip.io` продолжит работать |
-| `murmur backup` | копия базы данных |
-| `murmur status` | состояние сервера и проверка обновлений |
-| `murmur logs` | журналы |
-
-Повторный запуск установочной команды тоже обновляет сервер, ничего не стирая.
-
-### Установка без вопросов
-
-Для автоматизации:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Zenden1982/murmur/main/deploy/install.sh \
-  | sudo sh -s -- --yes --admin <ник> --admin-password-file <файл с паролем> [--domain <домен>] [--email <почта>]
-```
-
-### Обновления клиента
-
-Свой сервер не хранит выпуски клиента: номер новой версии он берёт у официального сервера
-(`UPDATES_UPSTREAM`, по умолчанию `https://api.murmurchat.ru`), а за файлом отправляет клиентов туда же.
-Если новому клиенту нужен более свежий сервер, клиенты не увидят это обновление, пока вы не выполните `murmur update`.
-Чтобы отключить, задайте пустое `UPDATES_UPSTREAM=` в `/opt/murmur/.env` и перезапустите сервер (`murmur update`).
-
-### Вручную через docker compose
-
-Для тех, кто не хочет запускать скрипт: те же файлы лежат в [`deploy/`](deploy/) (`docker-compose.yml`, `render.sh`,
-`.env.example`). Подробности и другие схемы (за своим reverse proxy, без доступа к Docker Hub) — в [deploy/README.md](deploy/README.md).
-
-## Лицензия
-
-AGPL-3.0, см. [LICENSE](LICENSE).
+AGPL-3.0.
