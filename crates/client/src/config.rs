@@ -255,8 +255,13 @@ impl Settings {
         match std::fs::read(&p) {
             Ok(bytes) => {
                 let mut s: Self = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                    log::warn!("settings.json повреждён ({e}), беру настройки по умолчанию");
-                    Self::default()
+                    // Одно плохое поле не должно стирать токен, громкости и всё остальное: сохраняем копию и разбираем по полям.
+                    let bad = p.with_extension("json.bad");
+                    match std::fs::write(&bad, &bytes) {
+                        Ok(()) => log::warn!("settings.json повреждён ({e}); копия — {}, читаю по полям", bad.display()),
+                        Err(we) => log::warn!("settings.json повреждён ({e}); копию сохранить не удалось: {we}; читаю по полям"),
+                    }
+                    Self::lenient(&bytes)
                 });
                 if s.migrate_server() {
                     log::info!("адрес сервера заменён на {}", s.server_url);
@@ -266,6 +271,27 @@ impl Settings {
             }
             Err(_) => Self::default(),
         }
+    }
+
+    /// Разбор по полям: что читается — берём, плохие поля остаются по умолчанию.
+    fn lenient(bytes: &[u8]) -> Self {
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return Self::default();
+        };
+        let Ok(serde_json::Value::Object(mut ok)) = serde_json::to_value(Self::default()) else {
+            return Self::default();
+        };
+        for (k, v) in map {
+            let prev = ok.insert(k.clone(), v);
+            if serde_json::from_value::<Self>(serde_json::Value::Object(ok.clone())).is_err() {
+                log::warn!("settings.json: поле «{k}» не читается — по умолчанию");
+                match prev {
+                    Some(p) => ok.insert(k, p),
+                    None => ok.remove(&k),
+                };
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(ok)).unwrap_or_default()
     }
 
     /// Старый адрес сервера по умолчанию → новый. true — если поменяли.
@@ -286,8 +312,13 @@ impl Settings {
         let tmp = p.with_extension("json.tmp");
         match serde_json::to_vec_pretty(self) {
             Ok(bytes) => {
-                if std::fs::write(&tmp, bytes).is_ok() {
-                    let _ = std::fs::rename(&tmp, &p);
+                match std::fs::write(&tmp, bytes) {
+                    Ok(()) => {
+                        if let Err(e) = std::fs::rename(&tmp, &p) {
+                            log::error!("настройки не сохранены (переименование {}): {e}", p.display());
+                        }
+                    }
+                    Err(e) => log::error!("настройки не сохранены (запись {}): {e}", tmp.display()),
                 }
             }
             Err(e) => log::error!("не удалось сохранить настройки: {e}"),
@@ -320,6 +351,18 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_bad_field_keeps_the_rest() {
+        let s = Settings::lenient(r#"{"session_token":"abc","theme":"нет-такой-темы","sounds_volume":"громко","sounds":false}"#.as_bytes());
+        assert_eq!(s.session_token.as_deref(), Some("abc"));
+        assert_eq!(s.theme, ThemePref::System);
+        assert_eq!(s.sounds_volume, Settings::default().sounds_volume);
+        assert!(!s.sounds);
+        // не объект / мусор — по умолчанию
+        assert_eq!(Settings::lenient(b"[1,2]").session_token, None);
+        assert_eq!(Settings::lenient(b"not json").session_token, None);
+    }
 
     #[test]
     fn old_settings_default_theme() {
