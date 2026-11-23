@@ -42,7 +42,9 @@ pub fn row_ex(ui: &mut Ui, icon: &str, text: &str, active: bool, trailing: Optio
     let icon_c = if active { p.accent } else { fg };
     painter.text(pos2(rect.left() + 22.0, rect.center().y), Align2::CENTER_CENTER, icon, icon_font, icon_c);
     let font = if active || unread > 0 { t::bold(15.0) } else { t::semibold(15.0) };
-    painter.text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, text, font, fg);
+    // справа — бейдж или подпись: имени остаётся место до них
+    let right_pad = if unread > 0 { 40.0 } else if trailing.is_some() { 48.0 } else { 12.0 };
+    crate::banner::paint_truncated(painter, pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, text, font, fg, rect.width() - 40.0 - right_pad);
     if unread > 0 {
         let txt = crate::unread::badge_text(unread);
         count_badge(painter, pos2(rect.right() - 20.0, rect.center().y), &txt, bg);

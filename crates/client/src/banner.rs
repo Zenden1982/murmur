@@ -127,6 +127,15 @@ pub fn truncate_galley(painter: &Painter, text: &str, font: egui::FontId, color:
     painter.layout_job(job)
 }
 
+/// Текст с якорем `anchor` в точке `pos`, обрезанный многоточием до `max_w`. Возвращает занятую ширину.
+pub fn paint_truncated(painter: &Painter, pos: egui::Pos2, anchor: egui::Align2, text: &str, font: egui::FontId, color: Color32, max_w: f32) -> f32 {
+    let g = truncate_galley(painter, text, font, color, max_w.max(8.0));
+    let r = anchor.anchor_size(pos, g.size());
+    let w = g.size().x;
+    painter.galley(r.min, g, color);
+    w
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

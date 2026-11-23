@@ -512,7 +512,7 @@ impl Friends {
         cx.people.paint(ui.painter(), av, 18.0, &u, if speaking { 0.6 } else { 0.0 }, !fr.online);
         status_dot(ui.painter(), av + vec2(13.0, 13.0), fr.online, p.bg);
         let x = rect.left() + 56.0;
-        ui.painter().text(pos2(x, rect.center().y - 9.0), Align2::LEFT_CENTER, u.shown_name(), t::semibold(15.0), if fr.online { p.text } else { p.text_muted });
+        crate::banner::paint_truncated(ui.painter(), pos2(x, rect.center().y - 9.0), Align2::LEFT_CENTER, u.shown_name(), t::semibold(15.0), if fr.online { p.text } else { p.text_muted }, rect.right() - 370.0 - x);
         let sub_y = rect.center().y + 10.0;
         match (&voice, &fr.activity) {
             (Some((s, c)), _) => {

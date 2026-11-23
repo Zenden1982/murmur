@@ -304,7 +304,7 @@ impl ChannelsUi {
         let caret = if collapsed { ph::CARET_RIGHT } else { ph::CARET_DOWN };
         let painter = ui.painter();
         painter.text(pos2(rect.left() + 8.0, rect.center().y), Align2::CENTER_CENTER, caret, egui::FontId::proportional(12.0), color);
-        painter.text(pos2(rect.left() + 18.0, rect.center().y), Align2::LEFT_CENTER, c.name.to_uppercase(), t::bold(12.0), color);
+        crate::banner::paint_truncated(painter, pos2(rect.left() + 18.0, rect.center().y), Align2::LEFT_CENTER, &c.name.to_uppercase(), t::bold(12.0), color, rect.width() - 18.0 - if manage { 32.0 } else { 8.0 });
         if manage {
             let plus = Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(20.0, 20.0));
             let pr = ui.interact(plus, ui.id().with(("cat-plus", c.id)), Sense::click());

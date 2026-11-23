@@ -2517,15 +2517,23 @@ impl App {
                 }
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 14.0;
+                    // имя канала не шире экрана: справа остаётся место для кнопок шапки
+                    let name_max = (ui.available_width() - 340.0).max(160.0);
                     if let Some(name) = text_ch {
                         ui.label(RichText::new(ph::HASH).size(20.0).color(t::p().text_muted));
-                        ui.label(RichText::new(name).font(t::xbold(18.0)));
+                        ui.scope(|ui| {
+                            ui.set_max_width(name_max);
+                            ui.add(egui::Label::new(RichText::new(name).font(t::xbold(18.0))).truncate());
+                        });
                     } else {
                     match &vs.channel {
                         Some(ch) => {
                             let icon = if crate::dms::is_dm(ch) { ph::PHONE } else { ph::SPEAKER_HIGH };
                             ui.label(RichText::new(icon).size(20.0).color(t::p().text_muted));
-                            ui.label(RichText::new(&ch.name).font(t::xbold(18.0)));
+                            ui.scope(|ui| {
+                                ui.set_max_width(name_max);
+                                ui.add(egui::Label::new(RichText::new(&ch.name).font(t::xbold(18.0))).truncate());
+                            });
                             if vs.conn == Conn::Connected {
                                 ui.label(
                                     RichText::new(t::plural(vs.peers.len(), "участник", "участника", "участников"))
@@ -4945,9 +4953,7 @@ pub(crate) fn member_row(ui: &mut Ui, p: &Peer, people: &People) -> egui::Respon
         painter.text(pos2(x, c.y), Align2::RIGHT_CENTER, egui_phosphor::fill::MONITOR_ARROW_UP, t::icon_fill(14.0), t::p().accent);
         icons_w += 20.0;
     }
-    let name = painter.layout_no_wrap(u.shown_name().to_string(), t::semibold(14.0), color);
-    let name_w = name.size().x;
-    painter.galley(pos2(c.x + 19.0, c.y - name.size().y / 2.0), name, color);
+    let name_w = crate::banner::paint_truncated(painter, pos2(c.x + 19.0, c.y), Align2::LEFT_CENTER, u.shown_name(), t::semibold(14.0), color, rect.right() - 12.0 - icons_w - 8.0 - (c.x + 19.0));
     if let (Some(phase), true) = (phase, amp > 0.02) {
         let left = c.x + 19.0 + name_w + 8.0;
         if left + 28.0 <= rect.right() - 12.0 - icons_w {
