@@ -38,9 +38,27 @@ type MicTestKey = (Option<String>, Option<String>, NoiseMode, bool, bool);
 
 const CHANNELS_REFRESH: Duration = Duration::from_secs(60);
 
+/// Растёт при каждой смене адреса сервера: ответ входа, начатого для прежнего адреса, отбрасывается (C9).
+static SERVER_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Адрес http:// не в локальной сети: пароль пойдёт открытым текстом (C8).
+fn insecure_remote(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else { return false };
+    let host = rest.split(['/', ':']).next().unwrap_or("").to_ascii_lowercase();
+    let local = host == "localhost"
+        || host.ends_with(".local")
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.strip_prefix("172.").and_then(|r| r.split('.').next()).and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (16..=31).contains(&n));
+    !local
+}
+
 enum Msg {
     Me(ApiResult<User>),
     Auth(ApiResult<AuthResponse>),
+    /// Ответ входа для уже сменённого адреса сервера — только снять «занято».
+    AuthStale,
     /// Проверка сервера на экране входа: (адрес, отвечает ли).
     Health(String, bool),
     /// Превью приглашения на экране входа: (код, куда зовут).
@@ -785,6 +803,7 @@ impl App {
                         Err(e) => self.profile_error = Some(e),
                     }
                 }
+                Msg::AuthStale => self.login.busy = false,
                 Msg::Auth(res) => {
                     self.login.busy = false;
                     match res {
@@ -1037,7 +1056,10 @@ impl App {
                     api.login(&name, &pass).await
                 }
             },
-            Msg::Auth,
+            {
+                let mine = SERVER_EPOCH.load(Ordering::SeqCst);
+                move |r| if SERVER_EPOCH.load(Ordering::SeqCst) == mine { Msg::Auth(r) } else { Msg::AuthStale }
+            },
         );
     }
 
@@ -1049,6 +1071,9 @@ impl App {
         if !url.starts_with("http://") && !url.starts_with("https://") {
             url = format!("https://{url}");
         }
+        SERVER_EPOCH.fetch_add(1, Ordering::SeqCst);
+        self.login.busy = false;
+        self.login.error = insecure_remote(&url).then(|| "Адрес начинается с http:// — пароль уйдёт без шифрования. Лучше использовать https://.".to_string());
         self.settings.server_url = url.clone();
         self.settings.save();
         self.set_api(Api::new(&url, None));
