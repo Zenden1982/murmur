@@ -1415,6 +1415,7 @@ impl Engine {
 
     async fn start_stream(&mut self, source: SourceId, title: String, width: u32, height: u32, preset: Preset, audio: bool) {
         if self.room.is_none() {
+            self.set(|s| s.stream_notice = Some("Не удалось начать трансляцию: нет подключения к голосовому каналу.".into()));
             return;
         }
         self.set(|s| s.stream_notice = None);
