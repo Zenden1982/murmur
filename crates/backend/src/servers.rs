@@ -239,6 +239,7 @@ pub async fn update(
 pub async fn put_icon(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>, body: Bytes) -> AppResult<Json<Server>> {
     me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
     state.inner.media_limiter.check(user.id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
+    let _images = state.inner.image_lock.lock().await; // сериализует запись файла, смену ключа и очистку (S12)
     let key = images::store_profile_image(&state, &body).await?;
     set_icon(&state, id, Some(key)).await?;
     Ok(Json(server_for(&state.inner.db, id, user.id).await?))
@@ -247,6 +248,7 @@ pub async fn put_icon(State(state): State<AppState>, user: AuthUser, Path(id): P
 /// `DELETE /servers/{id}/icon`
 pub async fn delete_icon(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> AppResult<Json<Server>> {
     me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
+    let _images = state.inner.image_lock.lock().await; // сериализует запись файла, смену ключа и очистку (S12)
     set_icon(&state, id, None).await?;
     Ok(Json(server_for(&state.inner.db, id, user.id).await?))
 }
@@ -255,7 +257,7 @@ async fn set_icon(state: &AppState, id: i64, key: Option<String>) -> AppResult<(
     let old: Option<String> = sqlx::query_scalar("SELECT icon_key FROM servers WHERE id = ?").bind(id).fetch_one(&state.inner.db).await?;
     sqlx::query("UPDATE servers SET icon_key = ? WHERE id = ?").bind(&key).bind(id).execute(&state.inner.db).await?;
     if let Some(old) = old {
-        images::remove(state, &old).await;
+        images::release(state, &old).await;
     }
     publish_server(state, id).await
 }
@@ -264,6 +266,7 @@ async fn set_icon(state: &AppState, id: i64, key: Option<String>) -> AppResult<(
 pub async fn put_banner(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>, body: Bytes) -> AppResult<Json<Server>> {
     me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
     state.inner.media_limiter.check(user.id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
+    let _images = state.inner.image_lock.lock().await; // сериализует запись файла, смену ключа и очистку (S12)
     let key = images::store_banner_image(&state, &body).await?;
     set_banner_image(&state, id, Some(key)).await?;
     Ok(Json(server_for(&state.inner.db, id, user.id).await?))
@@ -272,6 +275,7 @@ pub async fn put_banner(State(state): State<AppState>, user: AuthUser, Path(id):
 /// `DELETE /servers/{id}/banner` — убрать свою картинку (останется узор).
 pub async fn delete_banner(State(state): State<AppState>, user: AuthUser, Path(id): Path<i64>) -> AppResult<Json<Server>> {
     me_on(&state, id, &user).await?.require(perm::MANAGE_SERVER)?;
+    let _images = state.inner.image_lock.lock().await; // сериализует запись файла, смену ключа и очистку (S12)
     set_banner_image(&state, id, None).await?;
     Ok(Json(server_for(&state.inner.db, id, user.id).await?))
 }
@@ -280,7 +284,7 @@ async fn set_banner_image(state: &AppState, id: i64, key: Option<String>) -> App
     let old: Option<String> = sqlx::query_scalar("SELECT banner_key FROM servers WHERE id = ?").bind(id).fetch_one(&state.inner.db).await?;
     sqlx::query("UPDATE servers SET banner_key = ? WHERE id = ?").bind(&key).bind(id).execute(&state.inner.db).await?;
     if let Some(old) = old {
-        images::remove(state, &old).await;
+        images::release(state, &old).await;
     }
     publish_server(state, id).await
 }

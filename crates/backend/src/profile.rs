@@ -173,6 +173,7 @@ async fn set_image(state: &AppState, id: i64, slot: Slot, key: Option<String>) -
 /// PUT /me/avatar — тело: картинка 256×256 (PNG/JPEG/WebP/GIF, до 4 МБ).
 pub async fn put_avatar(State(state): State<AppState>, user: AuthUser, body: Bytes) -> AppResult<Json<User>> {
     state.inner.media_limiter.check(user.id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
+    let _images = state.inner.image_lock.lock().await; // сериализует запись файла, смену ключа и очистку (S12)
     let key = images::store_profile_media(&state, crate::media::Kind::Avatar, body).await?;
     set_image(&state, user.id, Slot::Avatar, Some(key)).await?;
     changed(&state, user.id).await
@@ -180,6 +181,7 @@ pub async fn put_avatar(State(state): State<AppState>, user: AuthUser, body: Byt
 
 /// DELETE /me/avatar
 pub async fn delete_avatar(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<User>> {
+    let _images = state.inner.image_lock.lock().await; // сериализует запись файла, смену ключа и очистку (S12)
     set_image(&state, user.id, Slot::Avatar, None).await?;
     changed(&state, user.id).await
 }
@@ -187,6 +189,7 @@ pub async fn delete_avatar(State(state): State<AppState>, user: AuthUser) -> App
 /// PUT /me/banner — тело: картинка 960×384 (PNG/JPEG/WebP/GIF, до 6 МБ).
 pub async fn put_banner(State(state): State<AppState>, user: AuthUser, body: Bytes) -> AppResult<Json<User>> {
     state.inner.media_limiter.check(user.id).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
+    let _images = state.inner.image_lock.lock().await; // сериализует запись файла, смену ключа и очистку (S12)
     let key = images::store_profile_media(&state, crate::media::Kind::UserBanner, body).await?;
     set_image(&state, user.id, Slot::Banner, Some(key)).await?;
     changed(&state, user.id).await
@@ -194,6 +197,7 @@ pub async fn put_banner(State(state): State<AppState>, user: AuthUser, body: Byt
 
 /// DELETE /me/banner
 pub async fn delete_banner(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<User>> {
+    let _images = state.inner.image_lock.lock().await; // сериализует запись файла, смену ключа и очистку (S12)
     set_image(&state, user.id, Slot::Banner, None).await?;
     changed(&state, user.id).await
 }

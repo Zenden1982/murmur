@@ -67,6 +67,8 @@ pub struct Inner {
     pub chat_limiter: RateLimiter<i64>,
     pub upload_limiter: RateLimiter<i64>,
     pub media_limiter: RateLimiter<i64>,
+    /// Запись картинки + смена ключа + удаление старого файла — по одному (ключи-хеши общие, S12).
+    pub image_lock: tokio::sync::Mutex<()>,
     pub preview_limiter: RateLimiter,
     /// Где лежат файлы вложений.
     pub uploads_dir: PathBuf,
@@ -123,6 +125,7 @@ impl AppState {
                 chat_limiter: RateLimiter::new(CHAT_MESSAGES, CHAT_WINDOW),
                 upload_limiter: RateLimiter::new(UPLOADS, UPLOADS_WINDOW),
                 media_limiter: RateLimiter::new(MEDIA_CHANGES, MEDIA_WINDOW),
+                image_lock: tokio::sync::Mutex::new(()),
                 preview_limiter: RateLimiter::new(PREVIEW_ATTEMPTS, AUTH_WINDOW),
                 uploads_dir,
                 releases_dir,
