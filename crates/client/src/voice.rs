@@ -927,6 +927,8 @@ impl Engine {
                     .is_some_and(|a| a.is_unauthorized() || a.code == "forbidden" || a.code == "not_found");
                 if attempt == 0 || fatal {
                     let msg = humanize_join_error(&e);
+                    // Назад в комнату не вернёмся — захват экрана без комнаты не нужен (V8).
+                    self.stop_stream().await;
                     self.set(|s| {
                         s.conn = Conn::Failed(msg);
                         s.peers.clear();
