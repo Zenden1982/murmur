@@ -4909,7 +4909,7 @@ fn ellipsize(s: &str, max: usize) -> String {
 }
 
 /// Текст поверх видео (видео тёмное в обеих темах).
-const ON_VIDEO: Color32 = Color32::from_rgb(0xF2, 0xF4, 0xF8);
+pub(crate) const ON_VIDEO: Color32 = Color32::from_rgb(0xF2, 0xF4, 0xF8);
 const ON_VIDEO_MUTED: Color32 = Color32::from_rgb(0xB8, 0xBE, 0xCA);
 
 /// Полупрозрачная подпись поверх видео.

@@ -10,7 +10,7 @@ use crate::remote::proto::{Btn, InputEv, Level};
 use crate::theme as t;
 use crate::voice::{Cmd, VoiceHandle, VoiceState};
 
-const ON_VIDEO: Color32 = Color32::from_rgb(0xF2, 0xF4, 0xF8);
+use crate::app::ON_VIDEO;
 
 /// Цвет указки участника — яркий и одинаковый в любой теме (у стримера, у зрителей).
 pub fn pointer_color(name: &str) -> Color32 {
