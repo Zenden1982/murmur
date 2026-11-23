@@ -100,10 +100,12 @@ pub fn label(ui: &mut Ui, text: &str, font: FontId, color: Color32, selectable: 
         return ui.add(egui::Label::new(RichText::new(text).font(font).color(color)).wrap().selectable(selectable));
     }
     let size = if jumbo_segs(&segs) { (font.size * 2.2).round() } else { (font.size * 1.25).round() };
-    ui.horizontal_wrapped(|ui| {
+    // высота строки по тексту/смайлу, а не по interact_size (34 px): иначе над сообщением со смайлом большой зазор;
+    // выставлять надо до horizontal_wrapped — он берёт минимальную высоту строки в момент вызова
+    let prev_h = ui.spacing().interact_size.y;
+    ui.spacing_mut().interact_size.y = (font.size * 1.3).max(size);
+    let resp = ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        // высота строки по тексту/смайлу, а не по interact_size (34 px): иначе над сообщением со смайлом большой зазор
-        ui.spacing_mut().interact_size.y = (font.size * 1.3).max(size);
         for seg in segs {
             match seg {
                 Seg::Text(t) => {
@@ -132,7 +134,9 @@ pub fn label(ui: &mut Ui, text: &str, font: FontId, color: Color32, selectable: 
             }
         }
     })
-    .response
+    .response;
+    ui.spacing_mut().interact_size.y = prev_h;
+    resp
 }
 
 /// Одна строка через painter (левый край по центру `at`), обрезается многоточием по `max_w`. Возвращает ширину.

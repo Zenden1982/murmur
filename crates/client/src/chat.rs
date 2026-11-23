@@ -1120,12 +1120,15 @@ impl Chat {
                 ui.set_width(full_w - gutter - 24.0);
                 ui.spacing_mut().item_spacing.y = 3.0;
                 if !grouped {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        // высота строки по тексту, а не по interact_size (34 px): иначе между именем и сообщением большой зазор
+                    // высота строки по тексту, а не по interact_size (34 px): иначе между именем и сообщением большой зазор.
+                    // Выставлять надо ДО horizontal — он берёт минимальную высоту строки в момент вызова.
+                    ui.scope(|ui| {
                         ui.spacing_mut().interact_size.y = 18.0;
-                        ui.label(RichText::new(author.shown_name()).font(t::semibold(15.0)).color(t::avatar_color(&author.name)));
-                        ui.label(RichText::new(time_label(m.created_at, true)).size(12.0).color(t::p().text_muted));
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.label(RichText::new(author.shown_name()).font(t::semibold(15.0)).color(t::avatar_color(&author.name)));
+                            ui.label(RichText::new(time_label(m.created_at, true)).size(12.0).color(t::p().text_muted));
+                        });
                     });
                 }
                 let sticker = m.sticker.as_deref().and_then(crate::reactions::sticker_cat);
