@@ -219,6 +219,10 @@ pub struct App {
     pip_w: f32,
     /// Канал звонка, в котором плеер сбрасывался (новый вход → снова показывать).
     pip_chan: Option<i64>,
+    /// Murmur неактивен с этого момента (для переезда плеера в окно ОС).
+    pip_away: Option<Instant>,
+    /// Ширина окна ОС с плеером.
+    pip_win_w: f32,
     /// «Смотреть» нажато, движок ещё не подтвердил (фокус не сбрасывать).
     watch_pending: Option<(String, Instant)>,
     /// Текстовый чат.
@@ -303,6 +307,7 @@ impl App {
         start_watchdog(ctx.clone());
         #[allow(unused_mut)]
         let mut settings = Settings::load();
+        let (pip_panel, pip_window) = (settings.pip_panel, settings.pip_window);
         // Отладка: AMADEUS_THEME=dark|light — тема для скриншотов (не сохраняется).
         #[cfg(debug_assertions)]
         match std::env::var("AMADEUS_THEME").as_deref() {
@@ -416,9 +421,11 @@ impl App {
             pointer_moved_at: Instant::now(),
             views_frame: HashMap::new(),
             pip: crate::pip::Pip::default(),
-            pip_pos: None,
-            pip_w: 320.0,
+            pip_pos: pip_panel.map(|(x, y, _)| pos2(x, y)),
+            pip_w: pip_panel.map_or(320.0, |(_, _, w)| w),
             pip_chan: None,
+            pip_away: None,
+            pip_win_w: pip_window.map_or(400.0, |(_, _, w)| w),
             watch_pending: None,
             chat,
             people,
@@ -1886,7 +1893,8 @@ impl App {
         }
     }
 
-    /// Мини-плеер трансляции: плавающая панель, пока выбранный стрим не виден на сцене (или включён вручную).
+    /// Мини-плеер трансляции: плавающая панель внутри Murmur, а когда окно Murmur неактивно (свёрнуто, в трее, вы в другой
+    /// программе) дольше `PIP_AWAY` — отдельное окно ОС. Нужен, пока выбранный стрим не виден на сцене (или включён вручную).
     fn ui_pip(&mut self, ui: &mut Ui, vs: &VoiceState) {
         use crate::pip::PeerInfo;
         let ch = vs.channel.as_ref().filter(|_| vs.conn == Conn::Connected).cloned();
@@ -1895,97 +1903,150 @@ impl App {
             self.pip_chan = ch_id;
             self.pip.reset();
         }
-        let Some(ch) = ch else { return };
-        if self.settings_open {
+        let Some(ch) = ch else {
+            self.pip_away = None;
             return;
-        }
+        };
         let ctx = ui.ctx().clone();
+        // Murmur неактивен: свёрнут, скрыт в трей или не в фокусе
+        let inactive = ctx.input(|i| i.viewport().minimized == Some(true) || i.viewport().focused == Some(false)) || !desktop::is_visible(self.window);
+        if inactive {
+            let since = *self.pip_away.get_or_insert_with(Instant::now);
+            if since.elapsed() < PIP_AWAY {
+                ctx.request_repaint_after(PIP_AWAY - since.elapsed() + Duration::from_millis(20));
+            }
+        } else {
+            self.pip_away = None;
+        }
+        let as_window = self.pip_away.is_some_and(|t| t.elapsed() >= PIP_AWAY);
         let mut watching = vs.watching.clone();
         watching.sort();
         let infos: Vec<PeerInfo> = vs.peers.iter().map(|p| PeerInfo { identity: &p.identity, speaking: p.speaking && !p.mic_muted, streaming: p.streaming }).collect();
         let Some(id) = self.pip.pick(ctx.input(|i| i.time), &watching, &infos) else { return };
-        let drawn: std::collections::HashSet<String> = self.views_frame.keys().cloned().collect();
-        if !self.pip.wanted(&id, &drawn) {
+        // в окне ОС сцену никто не видит — «нарисовано на сцене» не считается
+        let drawn: std::collections::HashSet<String> = if as_window { Default::default() } else { self.views_frame.keys().cloned().collect() };
+        if !self.pip.wanted(&id, &drawn) || (!self.settings.pip_auto && !self.pip.forced()) || (self.settings_open && !as_window) {
             return;
         }
         let frame = self.video.frame(&id);
         let aspect = frame.as_ref().map(|f| f.size[1] as f32 / f.size[0].max(1) as f32).filter(|a| *a > 0.1 && *a < 3.0).unwrap_or(9.0 / 16.0);
-        let area_rect = ctx.content_rect();
-        let w = self.pip_w.clamp(200.0, 720.0).min(area_rect.width() - 24.0);
-        let size = vec2(w, w * aspect);
-        let default_pos = pos2(area_rect.right() - size.x - 16.0, area_rect.top() + crate::frame::HEIGHT + 76.0);
-        let pos = self.pip_pos.unwrap_or(default_pos);
-        let pos = pos2(pos.x.clamp(area_rect.left() + 4.0, (area_rect.right() - size.x - 4.0).max(area_rect.left() + 4.0)), pos.y.clamp(area_rect.top() + 4.0, (area_rect.bottom() - size.y - 4.0).max(area_rect.top() + 4.0)));
         let name = vs.peers.iter().find(|p| p.identity == id).map(|p| peer_name(&self.people, p)).unwrap_or_default();
         let pinned = self.pip.pinned() == Some(id.as_str());
         let svol = self.settings.stream_volume_of(&id);
         let ppp = ctx.pixels_per_point();
-
-        let mut new_pos = pos;
-        let mut new_w = w;
         let mut act = None::<PipAct>;
-        let mut drawn_rect = None;
-        egui::Area::new(Id::new("pip-panel")).order(egui::Order::Foreground).fixed_pos(pos).show(&ctx, |ui| {
-            let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
-            drawn_rect = Some(rect);
-            let radius = CornerRadius::same(10);
-            let painter = ui.painter();
-            painter.rect_filled(rect.expand(1.0), radius, Color32::BLACK);
-            match &frame {
-                Some(f) => egui::Image::new(egui::load::SizedTexture::new(f.texture, rect.size())).corner_radius(radius).paint_at(ui, rect),
-                None => egui::Spinner::new().size(28.0).color(t::p().accent).paint_at(ui, Rect::from_center_size(rect.center(), vec2(28.0, 28.0))),
+
+        if as_window {
+            let w = self.pip_win_w.clamp(240.0, 960.0);
+            let size = vec2(w, (w * aspect).round());
+            let mut builder = egui::ViewportBuilder::default()
+                .with_title("Murmur — трансляция")
+                .with_inner_size(size)
+                .with_min_inner_size([240.0, 135.0])
+                .with_decorations(false)
+                .with_active(false)
+                .with_taskbar(false);
+            if self.settings.pip_topmost {
+                builder = builder.with_always_on_top();
             }
-            let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
-            ui.painter().rect_stroke(rect.expand(1.0), radius, Stroke::new(1.0, if hovered { t::p().accent } else { t::p().border_strong }), StrokeKind::Outside);
-            if resp.dragged() {
-                new_pos = pos + resp.drag_delta();
+            // где открыть: прошлое место, иначе правый нижний угол экрана (над панелью задач)
+            let monitor = ctx.input(|i| i.viewport().monitor_size);
+            if let Some((x, y, _)) = self.settings.pip_window {
+                builder = builder.with_position([x, y]);
+            } else if let Some(m) = monitor {
+                builder = builder.with_position([m.x - size.x - 24.0, m.y - size.y - 72.0]);
             }
-            if resp.double_clicked() {
-                act = Some(PipAct::Expand);
-            }
-            if hovered {
-                chip(ui.painter(), rect.left_bottom() + vec2(10.0, -10.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, name), ON_VIDEO);
-                let mut c = pos2(rect.right() - 22.0, rect.top() + 22.0);
-                let btn = |ui: &Ui, c: Pos2, icon: &str, tip: &str, id: &str| {
-                    let r = Rect::from_center_size(c, vec2(32.0, 32.0));
-                    let rr = ui.interact(r, Id::new(("pip-btn", id)), Sense::click());
-                    ui.painter().circle_filled(c, 16.0, if rr.hovered() { t::p().accent } else { t::overlay_dark(190) });
-                    ui.painter().text(c, Align2::CENTER_CENTER, icon, t::font(16.0), ON_VIDEO);
-                    rr.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
-                };
-                if btn(ui, c, ph::X, "Закрыть", "close") {
+            let mut drawn_px = None;
+            let mut win_geom = None::<(f32, f32, f32)>;
+            let mut new_w = w;
+            let vid = egui::ViewportId::from_hash_of("pip-window");
+            ctx.show_viewport_immediate(vid, builder, |ui, _class| {
+                let rect = ui.max_rect();
+                drawn_px = Some(rect.size());
+                let (a, resp) = pip_player(ui, rect, frame.as_ref(), &name, svol, pinned);
+                act = a;
+                if resp.drag_started() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                let grip = Rect::from_min_size(rect.right_bottom() - vec2(22.0, 22.0), vec2(22.0, 22.0));
+                let gr = ui.interact(grip, Id::new("pip-win-grip"), Sense::drag());
+                if gr.drag_started() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(egui::ResizeDirection::SouthEast));
+                }
+                gr.on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+                // пропорции кадра: ширина решает, высота подгоняется
+                let cur = ui.ctx().input(|i| i.viewport().inner_rect.map(|r| r.size()));
+                if let Some(cur) = cur {
+                    new_w = cur.x;
+                    let want_h = (cur.x * aspect).round();
+                    if (cur.y - want_h).abs() > 1.5 {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(cur.x, want_h)));
+                    }
+                }
+                if ui.ctx().input(|i| i.viewport().close_requested()) {
                     act = Some(PipAct::Close);
                 }
-                c.x -= 38.0;
-                if btn(ui, c, ph::ARROWS_OUT, "Вернуться к звонку", "expand") {
-                    act = Some(PipAct::Expand);
+                // запомнить, где окно оставили (когда отпустили мышь)
+                let (outer, down) = ui.ctx().input(|i| (i.viewport().outer_rect, i.pointer.any_down()));
+                if let Some(o) = outer
+                    && !down
+                {
+                    win_geom = Some((o.min.x, o.min.y, new_w));
                 }
-                c.x -= 38.0;
-                let sicon = if svol <= 0.001 { ph::SPEAKER_SLASH } else { ph::SPEAKER_HIGH };
-                if btn(ui, c, sicon, if svol <= 0.001 { "Включить звук" } else { "Выключить звук" }, "mute") {
-                    act = Some(PipAct::Mute);
+            });
+            if let Some(g) = win_geom
+                && self.settings.pip_window.is_none_or(|p| (p.0 - g.0).abs() > 1.0 || (p.1 - g.1).abs() > 1.0 || (p.2 - g.2).abs() > 1.0)
+            {
+                self.settings.pip_window = Some(g);
+                self.settings.save();
+            }
+            self.pip_win_w = new_w;
+            if let Some(sz) = drawn_px {
+                // размер в физических пикселях — SFU по нему выбирает качество
+                self.views_frame.insert(id.clone(), ((sz.x * ppp) as u32, (sz.y * ppp) as u32));
+            }
+        } else {
+            let area_rect = ctx.content_rect();
+            let w = self.pip_w.clamp(200.0, 720.0).min(area_rect.width() - 24.0);
+            let size = vec2(w, w * aspect);
+            let default_pos = pos2(area_rect.right() - size.x - 16.0, area_rect.top() + crate::frame::HEIGHT + 76.0);
+            let pos = self.pip_pos.unwrap_or(default_pos);
+            let pos = pos2(
+                pos.x.clamp(area_rect.left() + 4.0, (area_rect.right() - size.x - 4.0).max(area_rect.left() + 4.0)),
+                pos.y.clamp(area_rect.top() + 4.0, (area_rect.bottom() - size.y - 4.0).max(area_rect.top() + 4.0)),
+            );
+            let mut new_pos = pos;
+            let mut new_w = w;
+            let mut drawn_rect = None;
+            let mut moved = false;
+            egui::Area::new(Id::new("pip-panel")).order(egui::Order::Foreground).fixed_pos(pos).show(&ctx, |ui| {
+                let rect = Rect::from_min_size(ui.cursor().min, size);
+                ui.allocate_rect(rect, Sense::hover());
+                drawn_rect = Some(rect);
+                let (a, resp) = pip_player(ui, rect, frame.as_ref(), &name, svol, pinned);
+                act = a;
+                if resp.dragged() {
+                    new_pos = pos + resp.drag_delta();
                 }
-                c.x -= 38.0;
-                if btn(ui, c, if pinned { ph::PUSH_PIN_SLASH } else { ph::PUSH_PIN }, if pinned { "Открепить" } else { "Закрепить этот стрим" }, "pin") {
-                    act = Some(PipAct::Pin);
+                let grip = Rect::from_min_size(rect.right_bottom() - vec2(22.0, 22.0), vec2(22.0, 22.0));
+                let gr = ui.interact(grip, Id::new("pip-grip"), Sense::drag());
+                if gr.dragged() {
+                    new_w = (w + gr.drag_delta().x).clamp(200.0, 720.0);
                 }
+                moved = resp.drag_stopped() || gr.drag_stopped();
+                gr.on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+            });
+            self.pip_pos = Some(new_pos);
+            self.pip_w = new_w;
+            if moved {
+                self.settings.pip_panel = Some((new_pos.x, new_pos.y, new_w));
+                self.settings.save();
             }
-            // угол справа внизу — растягивать (пропорции сохраняются)
-            let grip = Rect::from_min_size(rect.right_bottom() - vec2(22.0, 22.0), vec2(22.0, 22.0));
-            let gr = ui.interact(grip, Id::new("pip-grip"), Sense::drag());
-            if hovered || gr.hovered() {
-                ui.painter().text(grip.center(), Align2::CENTER_CENTER, ph::CORNERS_OUT, t::font(12.0), ON_VIDEO_MUTED);
+            if let Some(r) = drawn_rect {
+                self.mark_view(&id, r, ppp);
             }
-            if gr.dragged() {
-                new_w = (w + gr.drag_delta().x).clamp(200.0, 720.0);
-            }
-            gr.on_hover_cursor(egui::CursorIcon::ResizeNwSe);
-        });
-        self.pip_pos = Some(new_pos);
-        self.pip_w = new_w;
-        if let Some(r) = drawn_rect {
-            self.mark_view(&id, r, ppp);
         }
+
         match act {
             Some(PipAct::Close) => self.pip.dismiss(),
             Some(PipAct::Pin) => self.pip.pin(if pinned { None } else { Some(id.clone()) }),
@@ -1996,6 +2057,13 @@ impl App {
                 self.voice.send(Cmd::SetStreamVolume(id.clone(), nv));
             }
             Some(PipAct::Expand) => {
+                if as_window {
+                    // из окна ОС — поднять главное окно
+                    desktop::show(self.window);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.pip_away = None;
+                }
                 self.focus = Some(id.clone());
                 if crate::dms::is_dm(&ch) {
                     self.view = View::Dm(ch.id);
@@ -4130,6 +4198,23 @@ impl App {
                 self.settings.save();
             }
         });
+        let (mut pip_auto, mut topmost) = (self.settings.pip_auto, self.settings.pip_topmost);
+        toggle_row(ui, w, |ui| {
+            ui.label("Окно в окне для трансляций").on_hover_text("Смотрите стрим в маленьком окне, пока заняты другим: внутри Murmur, а когда Murmur свёрнут или вы в другой программе — отдельным окном");
+        }, |ui| {
+            if kit::switch(ui, &mut pip_auto).changed() {
+                self.settings.pip_auto = pip_auto;
+                self.settings.save();
+            }
+        });
+        toggle_row(ui, w, |ui| {
+            ui.label("Мини-окно поверх других окон").on_hover_text("Отдельное окно с трансляцией остаётся над играми и другими программами (применяется при следующем показе)");
+        }, |ui| {
+            if kit::switch(ui, &mut topmost).changed() {
+                self.settings.pip_topmost = topmost;
+                self.settings.save();
+            }
+        });
     }
 
     /// Настройки → «Горячие клавиши» (пока одна — рация).
@@ -4591,6 +4676,56 @@ fn demo_state(time: f64) -> VoiceState {
 enum Item<'a> {
     Person(&'a Peer),
     Stream(&'a Peer),
+}
+
+/// Сколько Murmur должен быть неактивен, чтобы плеер переехал в окно ОС.
+const PIP_AWAY: Duration = Duration::from_millis(1500);
+
+/// Содержимое мини-плеера (общее для панели и окна ОС): видео, имя и кнопки при наведении. Возвращает действие и отклик
+/// на весь прямоугольник (перетаскивание обрабатывает хозяин: панель двигает себя, окно — StartDrag).
+fn pip_player(ui: &mut Ui, rect: Rect, frame: Option<&crate::video::Frame>, name: &str, svol: f32, pinned: bool) -> (Option<PipAct>, egui::Response) {
+    let resp = ui.interact(rect, Id::new("pip-body"), Sense::click_and_drag());
+    let radius = CornerRadius::same(10);
+    ui.painter().rect_filled(rect, radius, Color32::BLACK);
+    match frame {
+        Some(f) => egui::Image::new(egui::load::SizedTexture::new(f.texture, rect.size())).corner_radius(radius).paint_at(ui, rect),
+        None => egui::Spinner::new().size(28.0).color(t::p().accent).paint_at(ui, Rect::from_center_size(rect.center(), vec2(28.0, 28.0))),
+    }
+    let hovered = ui.rect_contains_pointer(rect);
+    ui.painter().rect_stroke(rect, radius, Stroke::new(1.0, if hovered { t::p().accent } else { t::p().border_strong }), StrokeKind::Inside);
+    let mut act = None;
+    if resp.double_clicked() {
+        act = Some(PipAct::Expand);
+    }
+    if hovered {
+        chip(ui.painter(), rect.left_bottom() + vec2(10.0, -10.0), Align2::LEFT_BOTTOM, &format!("{}  {}", ph::MONITOR, name), ON_VIDEO);
+        let btn = |ui: &Ui, c: Pos2, icon: &str, tip: &str, key: &str| {
+            let r = Rect::from_center_size(c, vec2(32.0, 32.0));
+            let rr = ui.interact(r, Id::new(("pip-btn", key)), Sense::click());
+            ui.painter().circle_filled(c, 16.0, if rr.hovered() { t::p().accent } else { t::overlay_dark(190) });
+            ui.painter().text(c, Align2::CENTER_CENTER, icon, t::font(16.0), ON_VIDEO);
+            rr.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+        };
+        let mut c = pos2(rect.right() - 22.0, rect.top() + 22.0);
+        if btn(ui, c, ph::X, "Закрыть", "close") {
+            act = Some(PipAct::Close);
+        }
+        c.x -= 38.0;
+        if btn(ui, c, ph::ARROWS_OUT, "Вернуться к звонку", "expand") {
+            act = Some(PipAct::Expand);
+        }
+        c.x -= 38.0;
+        let sicon = if svol <= 0.001 { ph::SPEAKER_SLASH } else { ph::SPEAKER_HIGH };
+        if btn(ui, c, sicon, if svol <= 0.001 { "Включить звук" } else { "Выключить звук" }, "mute") {
+            act = Some(PipAct::Mute);
+        }
+        c.x -= 38.0;
+        if btn(ui, c, if pinned { ph::PUSH_PIN_SLASH } else { ph::PUSH_PIN }, if pinned { "Открепить" } else { "Закрепить этот стрим" }, "pin") {
+            act = Some(PipAct::Pin);
+        }
+        ui.painter().text(rect.right_bottom() - vec2(11.0, 11.0), Align2::CENTER_CENTER, ph::CORNERS_OUT, t::font(12.0), ON_VIDEO_MUTED);
+    }
+    (act, resp)
 }
 
 /// Действие в мини-плеере.

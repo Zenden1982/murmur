@@ -132,6 +132,14 @@ pub struct Settings {
     pub stream_preset: Preset,
     /// Передавать звук окна/системы в трансляции.
     pub stream_audio: bool,
+    /// Мини-плеер трансляции («окно в окне») появляется сам; выключено — только по кнопке на плитке.
+    pub pip_auto: bool,
+    /// Окно ОС с плеером — поверх всех окон.
+    pub pip_topmost: bool,
+    /// Положение (x, y) и ширина панели плеера внутри Murmur.
+    pub pip_panel: Option<(f32, f32, f32)>,
+    /// Положение (x, y) на экране и ширина окна ОС с плеером.
+    pub pip_window: Option<(f32, f32, f32)>,
     /// Громкость звука трансляций участников по identity (отдельно от голоса).
     pub stream_volume: HashMap<String, f32>,
     /// «Закрыть» прячет окно в трей (выход — меню значка в трее).
@@ -193,6 +201,10 @@ impl Default for Settings {
             user_muted: HashMap::new(),
             stream_preset: Preset::default(),
             stream_audio: true,
+            pip_auto: true,
+            pip_topmost: true,
+            pip_panel: None,
+            pip_window: None,
             stream_volume: HashMap::new(),
             close_to_tray: true,
             autostart: true,
@@ -331,5 +343,12 @@ mod tests {
         let mut own: Settings = serde_json::from_str(r#"{"server_url":"https://chat.example.com"}"#).unwrap();
         assert!(!own.migrate_server());
         assert_eq!(own.server_url, "https://chat.example.com");
+    }
+
+    #[test]
+    fn old_settings_json_gets_pip_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"sounds":true}"#).unwrap();
+        assert!(s.pip_auto && s.pip_topmost);
+        assert_eq!((s.pip_panel, s.pip_window), (None, None));
     }
 }

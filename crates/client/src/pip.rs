@@ -83,6 +83,10 @@ impl Pip {
         self.dismissed = false;
     }
 
+    pub fn forced(&self) -> bool {
+        self.forced
+    }
+
     /// Вернулись на сцену: ручной показ больше не нужен.
     pub fn force_off(&mut self) {
         self.forced = false;
