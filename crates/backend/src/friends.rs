@@ -218,12 +218,20 @@ pub async fn request(State(state): State<AppState>, user: AuthUser, ApiJson(req)
             if count(db, friends, user.id).await? >= limits::FRIENDS_MAX {
                 return Err(AppError::Validation(format!("не больше {} друзей", limits::FRIENDS_MAX)));
             }
-            sqlx::query("INSERT INTO friendships (requester_id, addressee_id, status, created_at) VALUES (?, ?, 'pending', ?)")
+            let inserted = sqlx::query("INSERT INTO friendships (requester_id, addressee_id, status, created_at) VALUES (?, ?, 'pending', ?)")
                 .bind(user.id)
                 .bind(target)
                 .bind(now())
                 .execute(db)
-                .await?;
+                .await;
+            match inserted {
+                Ok(_) => {}
+                // Параллельный запрос уже создал заявку — это не ошибка.
+                Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                    return Ok((StatusCode::OK, Json(list(&state, user.id).await?)));
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
     }
     tracing::info!(from = user.id, to = target, "friend request");

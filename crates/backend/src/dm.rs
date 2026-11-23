@@ -150,15 +150,28 @@ pub async fn open(State(state): State<AppState>, user: AuthUser, ApiJson(req): A
         .execute(&mut *tx)
         .await?
         .last_insert_rowid();
-    sqlx::query("INSERT INTO dm_channels (channel_id, user_a, user_b, opened_by, created_at) VALUES (?, ?, ?, ?, ?)")
+    let inserted = sqlx::query("INSERT INTO dm_channels (channel_id, user_a, user_b, opened_by, created_at) VALUES (?, ?, ?, ?, ?)")
         .bind(id)
         .bind(a)
         .bind(b)
         .bind(user.id)
         .bind(now())
         .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+        .await;
+    match inserted {
+        Ok(_) => tx.commit().await?,
+        // Одновременный запрос уже создал этот диалог — отдаём его.
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+            drop(tx);
+            let existing: i64 = sqlx::query_scalar("SELECT channel_id FROM dm_channels WHERE user_a = ? AND user_b = ?")
+                .bind(a)
+                .bind(b)
+                .fetch_one(db)
+                .await?;
+            return Ok((StatusCode::OK, Json(dm_view(&state, existing, user.id).await?)));
+        }
+        Err(e) => return Err(e.into()),
+    }
     tracing::info!(channel_id = id, from = user.id, to = other, "dm opened");
     Ok((StatusCode::CREATED, Json(dm_view(&state, id, user.id).await?)))
 }

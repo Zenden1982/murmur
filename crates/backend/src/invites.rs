@@ -108,14 +108,22 @@ pub async fn join(State(state): State<AppState>, user: AuthUser, Path(code): Pat
         return Err(AppError::InvalidInvite);
     }
     let role = p::default_role(&mut *tx, sid).await?;
-    sqlx::query("INSERT INTO server_members (server_id, user_id, role_id, joined_at) VALUES (?, ?, ?, ?)")
+    let inserted = sqlx::query("INSERT INTO server_members (server_id, user_id, role_id, joined_at) VALUES (?, ?, ?, ?)")
         .bind(sid)
         .bind(user.id)
         .bind(role)
         .bind(now())
         .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+        .await;
+    match inserted {
+        Ok(_) => tx.commit().await?,
+        // Параллельный запрос уже добавил этого человека — без списания и без ошибки.
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+            drop(tx);
+            return Ok(Json(servers::server_for(&state.inner.db, sid, user.id).await?));
+        }
+        Err(e) => return Err(e.into()),
+    }
     tracing::info!(server_id = sid, user_id = user.id, "joined server by invite");
     announce_join(&state, sid, user.id).await?;
     Ok(Json(servers::server_for(&state.inner.db, sid, user.id).await?))
