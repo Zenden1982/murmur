@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
+        .route("/auth/logout-all", post(logout_all))
         .route("/me", get(profile::me).patch(profile::update))
         .route(
             "/me/avatar",
@@ -166,6 +167,9 @@ async fn register(
 ) -> AppResult<(StatusCode, Json<AuthResponse>)> {
     rate_limit(&state, ip)?;
     let name = db::validate_name(&req.name)?;
+    if db::name_collides(&state.inner.db, &name).await? {
+        return Err(AppError::NameTaken);
+    }
     db::validate_password(&req.password)?;
     let code = security::normalize_invite_code(&req.invite_code);
     let hash = db::hash_password_async(req.password).await?;
@@ -234,6 +238,15 @@ async fn login(
     Ok(Json(
         new_session(&state, profile::load_user(&state.inner.db, id).await?).await?,
     ))
+}
+
+/// `POST /auth/logout-all` — «выйти везде»: все сеансы этого человека, включая текущий (S20).
+async fn logout_all(State(state): State<AppState>, user: AuthUser) -> AppResult<StatusCode> {
+    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+        .bind(user.id)
+        .execute(&state.inner.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn logout(State(state): State<AppState>, user: AuthUser) -> AppResult<StatusCode> {

@@ -59,6 +59,13 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Имя уже занято с учётом юникода: UNIQUE COLLATE NOCASE различает только ASCII-регистр, а «Иван» и «иван» — один человек (S19).
+pub(crate) async fn name_collides(pool: &SqlitePool, name: &str) -> AppResult<bool> {
+    let want = name.to_lowercase();
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM users").fetch_all(pool).await?;
+    Ok(names.iter().any(|n| n.to_lowercase() == want))
+}
+
 pub(crate) fn validate_name(name: &str) -> AppResult<String> {
     let name = name.trim().to_string();
     let n = name.chars().count();
