@@ -1727,6 +1727,7 @@ impl App {
                         .show_separator_line(false)
                         .frame(Frame::new().inner_margin(Margin::same(8)))
                         .show(ui, |ui| {
+                            self.ui_call_strip(ui, vs);
                             Frame::new()
                                 .fill(t::p().surface_2)
                                 .stroke(Stroke::new(1.0, t::p().border))
@@ -1753,6 +1754,7 @@ impl App {
                     .show_separator_line(false)
                     .frame(Frame::new().inner_margin(Margin::same(8)))
                     .show(ui, |ui| {
+                        self.ui_call_strip(ui, vs);
                         Frame::new()
                             .fill(t::p().surface_2)
                             .stroke(Stroke::new(1.0, t::p().border))
@@ -1866,6 +1868,71 @@ impl App {
         }
     }
 
+    /// Плашка «вы в звонке» над панелью пользователя: где вы, перейти туда по клику и крупная кнопка «Отключиться».
+    /// Нет на самом экране звонка (там есть своя капсула с кнопками).
+    fn ui_call_strip(&mut self, ui: &mut Ui, vs: &VoiceState) {
+        let Some(ch) = vs.channel.clone().filter(|_| vs.conn != Conn::Idle) else { return };
+        if self.on_call_screen(vs) {
+            return;
+        }
+        let p = t::p();
+        let is_dm = crate::dms::is_dm(&ch);
+        let head = match &vs.conn {
+            Conn::Connected => "Голос подключён",
+            Conn::Connecting => "Подключение…",
+            _ => "Нет связи…",
+        };
+        let sub = if is_dm {
+            format!("Звонок: {}", ch.name)
+        } else {
+            match self.model.servers.iter().find(|s| s.id == ch.server_id) {
+                Some(s) => format!("{} / {}", ch.name, s.name),
+                None => ch.name.clone(),
+            }
+        };
+        let mut leave = false;
+        let mut go = false;
+        Frame::new()
+            .fill(p.surface_2)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(CornerRadius::same(kit::R_CARD))
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let w = ui.available_width();
+                    let (text_rect, resp) = ui.allocate_exact_size(vec2(w - 36.0 - 8.0, 36.0), Sense::click());
+                    let hot = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), kit::HOVER_S);
+                    let color = if vs.conn == Conn::Connected { p.status_online } else { p.text_muted };
+                    ui.painter().text(text_rect.left_top() + vec2(0.0, 2.0), Align2::LEFT_TOP, head, t::semibold(13.0), color);
+                    let g = ui.painter().layout_no_wrap(sub.clone(), t::font(12.5), p.text_muted.lerp_to_gamma(p.text, hot));
+                    let clipped = ui.painter().with_clip_rect(text_rect);
+                    clipped.galley(text_rect.left_top() + vec2(0.0, 19.0), g, p.text_muted);
+                    if resp.on_hover_text("Вернуться к звонку").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        go = true;
+                    }
+                    ui.add_space(8.0);
+                    let (rect, r) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
+                    let hover = ui.ctx().animate_bool_with_time(r.id, r.hovered(), kit::HOVER_S);
+                    ui.painter().circle_filled(rect.center(), 18.0, p.danger.lerp_to_gamma(p.danger_hover, hover));
+                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, egui_phosphor::fill::PHONE_X, t::icon_fill(18.0), Color32::WHITE);
+                    if r.on_hover_text("Отключиться").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        leave = true;
+                    }
+                });
+            });
+        ui.add_space(6.0);
+        if leave {
+            self.voice.send(Cmd::Leave);
+        } else if go {
+            if is_dm {
+                self.view = View::Dm(ch.id);
+            } else {
+                self.select_server(ch.server_id);
+                self.view = View::Voice;
+            }
+        }
+    }
+
     fn ui_me(&mut self, ui: &mut Ui, vs: &VoiceState) {
         let me = self.me.as_ref().map(people::public);
         let name = me.as_ref().map(|u| u.shown_name().to_string()).unwrap_or_default();
@@ -1894,10 +1961,6 @@ impl App {
                 ui.allocate_ui_with_layout(vec2(ui.available_width(), 0.0), Layout::left_to_right(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(RichText::new(sub).size(12.0).color(t::p().text_muted));
-                    // капсулы с «Отключиться» вне экрана канала нет — маленькая красная трубка здесь
-                    if vs.channel.is_some() && !self.on_call_screen(vs) && leave_button(ui).clicked() {
-                        self.voice.send(Cmd::Leave);
-                    }
                 });
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -4791,17 +4854,6 @@ fn toggle_row(ui: &mut Ui, w: f32, left: impl FnOnce(&mut Ui), right: impl FnOnc
 }
 
 /// Маленькая красная трубка «Отключиться» (в панели пользователя, когда капсулы не видно).
-fn leave_button(ui: &mut Ui) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(20.0, 16.0), Sense::click());
-    let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), kit::HOVER_S);
-    let p = t::p();
-    if hover > 0.0 {
-        ui.painter().rect_filled(rect.expand(2.0), CornerRadius::same(5), p.danger.gamma_multiply(0.2 * hover));
-    }
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, egui_phosphor::fill::PHONE_X, t::icon_fill(14.0), p.danger);
-    resp.on_hover_text("Отключиться").on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
 /// Поле формы входа: 44 px высотой.
 fn login_field(text: &mut String, width: f32, id: Id) -> TextEdit<'_> {
     TextEdit::singleline(text).id(id).desired_width(width).margin(Margin::symmetric(14, 12)).font(t::font(15.0))
