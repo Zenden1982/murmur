@@ -241,6 +241,8 @@ pub struct App {
     activity: Option<crate::activity::Detector>,
     my_game: crate::activity::Game,
     game_sent: Option<crate::activity::Game>,
+    /// Отправка игры не удалась — sync_activity повторит.
+    activity_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Поиск на экране друзей.
     friend_filter: String,
     /// Окошко «Задать статус» (текст).
@@ -438,6 +440,7 @@ impl App {
             members,
             summon: None,
             activity: None,
+            activity_failed: Default::default(),
             my_game: None,
             game_sent: None,
             friend_filter: String::new(),
@@ -2456,15 +2459,24 @@ impl App {
         if let Some(g) = self.activity.as_ref().and_then(|d| d.poll()) {
             self.my_game = g;
         }
+        if self.activity_failed.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.game_sent = None; // прошлая отправка не дошла — повторить
+        }
         let want = if self.settings.share_activity { self.my_game.clone() } else { None };
         if self.game_sent.as_ref() == Some(&want) {
             return;
         }
         self.game_sent = Some(want.clone());
         let api = self.api.clone();
+        let failed = self.activity_failed.clone();
+        let ctx = self.ctx.clone();
         self.rt.spawn(async move {
             if let Err(e) = api.set_activity(want.as_ref().map(|g| g.0.clone()), want.map(|g| g.1)).await {
                 log::warn!("активность не отправлена: {e}");
+                // повтор — через несколько секунд, не в плотном цикле
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                ctx.request_repaint();
             }
         });
     }
@@ -4586,6 +4598,8 @@ impl eframe::App for App {
                 // поток (пере)открылся — дочитать, что могли пропустить
                 if self.screen == Screen::Main && !self.demo {
                     self.fetch_channels();
+                    // сервер забывает игру, когда человек «не в сети»: после переподключения потока — отправить снова
+                    self.game_sent = None;
                 }
                 continue;
             }
