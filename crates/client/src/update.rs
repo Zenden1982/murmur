@@ -85,7 +85,13 @@ impl Updater {
                     match r {
                         Ok(info) => {
                             self.error = None;
-                            self.available = info.filter(|i| proto::is_newer(&i.version, CURRENT));
+                            self.available = info.filter(|i| proto::is_newer(&i.version, CURRENT)).filter(|i| {
+                                let ok = i.verify();
+                                if !ok {
+                                    log::warn!("обновление {} без верной подписи издателя — пропущено", i.version);
+                                }
+                                ok
+                            });
                             self.next_check = Instant::now() + CHECK_EVERY;
                         }
                         Err(e) => {
@@ -205,6 +211,9 @@ fn human_io(e: &std::io::Error) -> String {
 }
 
 async fn download_and_swap(base: &str, info: &ReleaseInfo, progress: &AtomicU64, ctx: &egui::Context) -> Result<(), String> {
+    if !info.verify() {
+        return Err("у обновления нет верной подписи — не устанавливаю".into());
+    }
     let exe = desktop::current_exe().ok_or("не найден путь к программе")?;
     let new = sibling(&exe, ".new");
     let http = reqwest::Client::builder()

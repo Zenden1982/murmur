@@ -9,6 +9,8 @@ publish.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 # Справочник Unicode-эмодзи: реакции любым эмодзи.
 emojis = "0.9"
+# Подпись выпусков клиента (ed25519): проверка в клиенте, подпись — scripts/release.sh (example release_sign).
+ed25519-dalek = { version = "2", default-features = false }
 
 [dev-dependencies]
 serde_json = "1.0.154"

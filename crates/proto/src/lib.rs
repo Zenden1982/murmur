@@ -117,9 +117,40 @@ pub struct ReleaseInfo {
     /// своим клиентам (обновления с официального), только если сам не старее.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_server: Option<String>,
+    /// Подпись ed25519 (hex, 128 символов) над `signing_message()`; ключ издателя вшит в клиент (`RELEASE_PUBKEY`).
+    /// Без верной подписи клиент не ставит обновление: сервер (в т.ч. чужой self-host) не может подсунуть свой exe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig: Option<String>,
 }
 
+/// Публичный ключ подписи выпусков (ed25519). Приватный — `.tools/release-signing.key`, не в репозитории.
+pub const RELEASE_PUBKEY: [u8; 32] = [
+    0xb1, 0xf7, 0x5d, 0x96, 0x53, 0x08, 0x3b, 0x90,
+    0x87, 0xee, 0xc1, 0x43, 0x5c, 0x86, 0x79, 0x49,
+    0x34, 0xb7, 0xa0, 0x53, 0x3c, 0x38, 0xf6, 0x63,
+    0x50, 0x13, 0x74, 0xe4, 0x18, 0x1d, 0x07, 0x81,
+];
+
 impl ReleaseInfo {
+    /// Что подписывается: версия, файл, SHA-256 и размер (заметки и min_server — только для показа).
+    pub fn signing_message(&self) -> Vec<u8> {
+        format!("murmur-release-v1\n{}\n{}\n{}\n{}", self.version, self.file, self.sha256, self.size).into_bytes()
+    }
+
+    /// Подпись есть и верна для ключа `pubkey`.
+    pub fn verify_with(&self, pubkey: &[u8; 32]) -> bool {
+        use ed25519_dalek::{Signature, VerifyingKey};
+        let Some(sig) = self.sig.as_deref() else { return false };
+        let Some(sig) = unhex::<64>(sig) else { return false };
+        let Ok(key) = VerifyingKey::from_bytes(pubkey) else { return false };
+        key.verify_strict(&self.signing_message(), &Signature::from_bytes(&sig)).is_ok()
+    }
+
+    /// Подпись верна для ключа издателя Murmur.
+    pub fn verify(&self) -> bool {
+        self.verify_with(&RELEASE_PUBKEY)
+    }
+
     /// Сервер версии `server_version` может отдавать этот выпуск: `min_server` нет или сервер не старее.
     pub fn server_ok(&self, server_version: &str) -> bool {
         match self.min_server.as_deref() {
@@ -137,6 +168,17 @@ impl ReleaseInfo {
             && self.sha256.len() == 64
             && self.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
+}
+
+fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != N * 2 || !s.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Имя файла для `/download/{file}`: латиница, цифры, `.`, `-`, `_`; не начинается с точки.
@@ -883,6 +925,7 @@ mod tests {
             size: 1,
             installer: Some("amadeus-setup-0.2.0.exe".into()),
             min_server: None,
+            sig: None,
         };
         assert!(r.is_valid());
         r.file = "../x.exe".into();
@@ -904,6 +947,37 @@ mod tests {
             size: 1,
             installer: None,
             min_server: min_server.map(Into::into),
+            sig: None,
+        }
+    }
+
+    #[test]
+    fn release_signature() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let pubkey = *key.verifying_key().as_bytes();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let mut r = release(None);
+        assert!(!r.verify_with(&pubkey), "без подписи нельзя");
+        r.sig = Some(hex(&key.sign(&r.signing_message()).to_bytes()));
+        assert!(r.verify_with(&pubkey));
+        assert!(!r.verify(), "чужой ключ издателя не подходит");
+        // любое поле из подписанных — меняет сообщение
+        let mut bad = r.clone();
+        bad.sha256 = "b".repeat(64);
+        assert!(!bad.verify_with(&pubkey));
+        let mut bad = r.clone();
+        bad.file = "murmur-evil.exe".into();
+        assert!(!bad.verify_with(&pubkey));
+        // заметки и min_server не подписываются
+        let mut ok = r.clone();
+        ok.notes = "другой текст".into();
+        assert!(ok.verify_with(&pubkey));
+        // мусор вместо подписи
+        for s in ["", "zz", &"0".repeat(128), &"é".repeat(64)] {
+            let mut g = r.clone();
+            g.sig = Some(s.into());
+            assert!(!g.verify_with(&pubkey));
         }
     }
 

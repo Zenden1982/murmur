@@ -42,11 +42,16 @@ gzip -kf9 "$OUT/$EXE"   # сервер отдаёт .gz клиентам с Acce
 
 SHA=$(sha256sum "$OUT/$EXE" | cut -d' ' -f1)
 SIZE=$(stat -c %s "$OUT/$EXE")
-MIN_SERVER="$MIN_SERVER" NOTES="$NOTES" VERSION="$VERSION" EXE="$EXE" SETUP="$SETUP" SHA="$SHA" SIZE="$SIZE" python -X utf8 -I -c '
+# Подпись ed25519 (ключ — .tools/release-signing.key, не в git; публичный ключ вшит в proto::RELEASE_PUBKEY).
+SIGKEY="{SIGKEY:-.tools/release-signing.key}"
+[[ -f "$SIGKEY" ]] || { echo "нет ключа подписи $SIGKEY — клиенты не примут выпуск без подписи"; exit 1; }
+SIG=$(cargo run -q -p proto --example release_sign -- sign "$SIGKEY" "$VERSION" "$EXE" "$SHA" "$SIZE")
+[[ {#SIG} -eq 128 ]] || { echo "подпись не получилась"; exit 1; }
+SIG="$SIG" MIN_SERVER="$MIN_SERVER" NOTES="$NOTES" VERSION="$VERSION" EXE="$EXE" SETUP="$SETUP" SHA="$SHA" SIZE="$SIZE" python -X utf8 -I -c '
 import json, os
 e = os.environ
 info = {"version": e["VERSION"], "notes": e["NOTES"], "file": e["EXE"], "sha256": e["SHA"],
-        "size": int(e["SIZE"]), "installer": e["SETUP"]}
+        "size": int(e["SIZE"]), "installer": e["SETUP"], "sig": e["SIG"]}
 if e["MIN_SERVER"]:
     info["min_server"] = e["MIN_SERVER"]
 print(json.dumps(info, ensure_ascii=False, indent=2))
