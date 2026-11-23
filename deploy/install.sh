@@ -384,7 +384,15 @@ Murmur нужны свободные порты 443, 7881, 7882/udp, 3478/udp и
     say "Копия: $_b (в томе данных бэкенда)"
   fi
   step "Запускаю"
-  if [ -z "${MURMUR_NO_PULL:-}" ]; then dc pull -q || die "не скачал образы с ghcr.io (нет доступа к интернету?)"; fi
+  if [ -z "${MURMUR_NO_PULL:-}" ]; then
+    _pull=$(dc pull -q 2>&1) || {
+      printf '%s\n' "$_pull" >&2
+      case "$_pull" in
+        *"not found"*|*"manifest unknown"*) die "образов версии $VERSION на ghcr.io ещё нет — их собирает GitHub Actions после выпуска (6–10 минут). Повторите позже." ;;
+        *) die "не скачал образы с ghcr.io (нет доступа к интернету?)" ;;
+      esac
+    }
+  fi
   sh "$MURMUR_DIR/render.sh" >/dev/null
   dc up -d --no-build --remove-orphans >/dev/null 2>&1 || { dc up -d --no-build --remove-orphans; die "docker compose up не удался"; }
   wait_backend || die "бэкенд не ответил за 2 минуты. Журнал: murmur logs"
