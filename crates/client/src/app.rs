@@ -316,6 +316,11 @@ pub struct App {
     profile_about: String,
     /// ЛС и звонки другу.
     dms: crate::dms::Dms,
+    /// Групповые звонки и окно «кого позвать».
+    groupcalls: crate::groupcalls::GroupCalls,
+    call_picker: Option<CallPicker>,
+    /// Групповой звонок, о котором уже уведомили.
+    notified_group: Option<i64>,
     unread: crate::unread::Unread,
     /// Звонок в ЛС: с какого момента я в нём один и никто не звонит (через несколько секунд — выйти).
     call_alone_since: Option<Instant>,
@@ -421,6 +426,7 @@ impl App {
         let friends = crate::friends::Friends::new(rt.handle().clone(), ctx.clone(), api.clone());
         let members = crate::members_ui::Members::new(rt.handle().clone(), ctx.clone(), api.clone());
         let dms = crate::dms::Dms::new(rt.handle().clone(), ctx.clone(), api.clone());
+        let groupcalls = crate::groupcalls::GroupCalls::new(rt.handle().clone(), ctx.clone(), api.clone());
         let servers = ServersUi::new(rt.handle().clone(), ctx.clone(), api.clone());
         let channel_list = ChannelsUi::new(rt.handle().clone(), ctx.clone(), api.clone());
         let server_settings = crate::server_settings::ServerSettings::new(rt.handle().clone(), ctx.clone(), api.clone());
@@ -535,6 +541,9 @@ impl App {
             profile_about: String::new(),
             friends,
             dms,
+            groupcalls,
+            call_picker: None,
+            notified_group: None,
             unread: Default::default(),
             call_alone_since: None,
             ring_at: None,
@@ -595,6 +604,12 @@ impl App {
         #[cfg(debug_assertions)]
         if let Ok(tab) = std::env::var("MURMUR_OPEN_FRIENDS") {
             app.friends.debug_open(&tab);
+        }
+        // MURMUR_OPEN_CALLPICKER=1 — сразу открыть окно «кого позвать» (демо-друзья)
+        #[cfg(debug_assertions)]
+        if std::env::var_os("MURMUR_OPEN_CALLPICKER").is_some() {
+            app.friends.debug_fill();
+            app.call_picker = Some(CallPicker { mode: PickMode::New, selected: vec![11] });
         }
         app
     }
@@ -801,6 +816,8 @@ impl App {
         self.game_sent = None;
         self.summon = None;
         self.dms.set_api(api.clone());
+        self.groupcalls.set_api(api.clone());
+        self.call_picker = None;
         self.unread = Default::default();
         self.servers.set_api(api.clone());
         self.channel_list.set_api(api.clone());
@@ -1134,10 +1151,14 @@ impl App {
             && self.view == View::Voice
             && vs.channel.is_none()
         {
-            self.view = View::Dm(prev);
+            self.view = if prev > 0 { View::Dm(prev) } else { View::Friends };
         }
+        let group_in = in_call.filter(|id| *id < 0).map(|id| -id);
         self.last_call = in_call;
         let ringing_out = in_call.is_some_and(|id| {
+            if id < 0 {
+                return vs.peers.len() <= 1 && self.groupcalls.get(-id).is_some_and(|c| c.host_id == me && !c.ringing.is_empty());
+            }
             vs.peers.len() <= 1 && self.dms.get(id).and_then(|d| d.call.as_ref()).is_some_and(|c| c.ringing && c.caller_id == me)
         });
         self.streaming_now = vs.stream.is_some();
@@ -1178,15 +1199,71 @@ impl App {
                 }
                 None => {}
             }
+        } else if let Some(gc) = self.groupcalls.incoming(me, group_in).cloned() {
+            if self.settings.notify_call && !dnd {
+                self.ring(Sound::Ring, Duration::from_millis(2600));
+                if self.notified_group != Some(gc.id) {
+                    self.notified_group = Some(gc.id);
+                    if !ui.ctx().input(|i| i.focused) {
+                        let who = self.people.by_identity(&gc.host_id.to_string()).map(|u| u.shown_name().to_string()).unwrap_or_else(|| "Групповой звонок".into());
+                        if self.settings.notify_toast {
+                            self.notifier.toast(&who, "Зовёт в групповой звонок", &format!("call:{}", gc.id));
+                        }
+                        if self.settings.notify_flash {
+                            self.notifier.flash();
+                        }
+                    }
+                }
+            }
+            let host = self
+                .people
+                .by_identity(&gc.host_id.to_string())
+                .cloned()
+                .unwrap_or_else(|| proto::PublicUser { id: gc.host_id, name: "Звонок".into(), display_name: None, avatar: None });
+            let sub = if gc.participants.len() > 1 {
+                format!("зовёт в групповой звонок · {} в звонке", gc.participants.len())
+            } else {
+                "зовёт в групповой звонок".to_string()
+            };
+            match crate::dms::incoming_window_for(ui.ctx(), &self.people, ("incoming-group", gc.id), &host, &sub) {
+                Some(true) => {
+                    self.voice.send(Cmd::Join(crate::dms::group_channel(gc.id)));
+                    self.view = View::Voice;
+                }
+                Some(false) => {
+                    self.groupcalls.dismiss(gc.id);
+                    self.groupcalls.hang_up(gc.id);
+                }
+                None => {}
+            }
         } else if ringing_out {
             self.ring(Sound::RingBack, Duration::from_millis(3000));
         } else {
             self.ring_at = None;
         }
+        if self.groupcalls.incoming(me, group_in).is_none() {
+            self.notified_group = None;
+        }
+        self.ui_call_picker(ui.ctx());
+        if let Some(e) = self.groupcalls.error.clone() {
+            egui::Area::new(egui::Id::new("group-call-error")).order(egui::Order::Foreground).anchor(Align2::CENTER_TOP, vec2(0.0, 70.0)).show(ui.ctx(), |ui| {
+                Frame::new().fill(t::p().surface).stroke(Stroke::new(1.0, t::p().danger)).corner_radius(CornerRadius::same(kit::R_CARD)).inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{}  {e}", ph::WARNING_CIRCLE)).size(13.5).color(t::p().danger_text));
+                        if ui.small_button("ОК").clicked() {
+                            self.groupcalls.error = None;
+                        }
+                    });
+                });
+            });
+        }
 
         // Звонок в ЛС, а собеседника нет и никто не звонит (не ответили, отклонили, положил трубку) — через 5 с выйти.
         // Пауза нужна: ответивший заходит в комнату не мгновенно.
         let alone = in_call.filter(|_| vs.conn == Conn::Connected && vs.peers.len() <= 1).filter(|id| {
+            if *id < 0 {
+                return !self.groupcalls.get(-*id).is_some_and(|c| !c.ringing.is_empty());
+            }
             !self.dms.get(*id).and_then(|d| d.call.as_ref()).is_some_and(|c| c.ringing)
         });
         match alone {
@@ -1197,13 +1274,98 @@ impl App {
                     self.call_alone_since = None;
                     self.voice.send(Cmd::Leave);
                     if self.view == View::Voice {
-                        self.view = View::Dm(id);
+                        self.view = if id > 0 { View::Dm(id) } else { View::Friends };
                     }
                 } else {
                     ui.ctx().request_repaint_after(Duration::from_millis(500));
                 }
             }
             None => self.call_alone_since = None,
+        }
+    }
+
+    /// Окно выбора друзей для группового звонка.
+    fn ui_call_picker(&mut self, ctx: &egui::Context) {
+        let Some(mut pk) = self.call_picker.take() else { return };
+        let max = proto::limits::GROUP_CALL_MAX;
+        let (busy, used): (Vec<i64>, usize) = match pk.mode {
+            PickMode::New => (Vec::new(), 1),
+            PickMode::FromDm(p) => (vec![p], 2),
+            PickMode::Invite(id) => {
+                let mut v: Vec<i64> = self.groupcalls.get(id).map(|c| c.participants.iter().chain(c.ringing.iter()).copied().collect()).unwrap_or_default();
+                v.sort_unstable();
+                v.dedup();
+                let n = v.len();
+                (v, n)
+            }
+        };
+        let room = max.saturating_sub(used);
+        let mut friends: Vec<(proto::PublicUser, bool)> =
+            self.friends.list().iter().filter(|f| !busy.contains(&f.user.id)).map(|f| (f.user.clone(), f.online)).collect();
+        friends.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.shown_name().to_lowercase().cmp(&b.0.shown_name().to_lowercase())));
+        let (title, go_text) = match pk.mode {
+            PickMode::Invite(_) => ("Позвать в звонок", "Позвать"),
+            _ => ("Групповой звонок", "Позвонить"),
+        };
+        let p = t::p();
+        let (mut cancel, mut go) = (false, false);
+        egui::Area::new(egui::Id::new("call-picker")).order(egui::Order::Foreground).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ctx, |ui| {
+            Frame::new()
+                .fill(p.surface)
+                .stroke(Stroke::new(1.0, p.border))
+                .corner_radius(CornerRadius::same(kit::R_CARD))
+                .inner_margin(Margin::symmetric(18, 16))
+                .shadow(egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(70) })
+                .show(ui, |ui| {
+                    ui.set_width(340.0);
+                    ui.label(RichText::new(title).font(t::bold(17.0)));
+                    ui.label(RichText::new(format!("Выберите до {room} друзей · выбрано {}", pk.selected.len())).size(13.0).color(p.text_muted));
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+                        if friends.is_empty() {
+                            ui.label(RichText::new("Некого звать — друзей нет или все уже в звонке").size(13.0).color(p.text_muted));
+                        }
+                        for (u, online) in &friends {
+                            let mut on = pk.selected.contains(&u.id);
+                            let full = !on && pk.selected.len() >= room;
+                            ui.add_enabled_ui(!full, |ui| {
+                                let name = if *online { u.shown_name().to_string() } else { format!("{} · не в сети", u.shown_name()) };
+                                if ui.checkbox(&mut on, name).changed() {
+                                    if on {
+                                        pk.selected.push(u.id);
+                                    } else {
+                                        pk.selected.retain(|x| *x != u.id);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if kit::button(ui, kit::ButtonKind::Secondary, "Отмена", None).clicked() {
+                            cancel = true;
+                        }
+                        if kit::button_ex(ui, kit::ButtonKind::Primary, go_text, Some(egui_phosphor::fill::PHONE), !pk.selected.is_empty()).clicked() {
+                            go = true;
+                        }
+                    });
+                });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if go {
+            match pk.mode {
+                PickMode::New => self.groupcalls.create(pk.selected.clone()),
+                PickMode::Invite(id) => self.groupcalls.invite(id, pk.selected.clone()),
+                PickMode::FromDm(partner) => {
+                    let mut ids = vec![partner];
+                    ids.extend(pk.selected.iter().copied());
+                    self.groupcalls.create(ids);
+                }
+            }
+        } else if !cancel {
+            self.call_picker = Some(pk);
         }
     }
 
@@ -2338,7 +2500,9 @@ impl App {
                     self.pip_away = None;
                 }
                 self.focus = Some(id.clone());
-                if crate::dms::is_dm(&ch) {
+                if crate::dms::group_id(&ch).is_some() {
+                    self.view = View::Voice;
+                } else if crate::dms::is_dm(&ch) {
                     self.view = View::Dm(ch.id);
                 } else {
                     self.select_server(ch.server_id);
@@ -2364,7 +2528,9 @@ impl App {
             Conn::Connecting => "Подключение…",
             _ => "Нет связи…",
         };
-        let sub = if is_dm {
+        let sub = if crate::dms::group_id(&ch).is_some() {
+            ch.name.clone()
+        } else if is_dm {
             format!("Звонок: {}", ch.name)
         } else {
             match self.model.servers.iter().find(|s| s.id == ch.server_id) {
@@ -2406,7 +2572,9 @@ impl App {
         if leave {
             self.voice.send(Cmd::Leave);
         } else if go {
-            if is_dm {
+            if crate::dms::group_id(&ch).is_some() {
+                self.view = View::Voice;
+            } else if is_dm {
                 self.view = View::Dm(ch.id);
             } else {
                 self.select_server(ch.server_id);
@@ -2433,6 +2601,7 @@ impl App {
                     self.status_edit = Some(status.clone().unwrap_or_default());
                 }
                 let sub = match (&vs.conn, &vs.channel) {
+                    (Conn::Connected, Some(c)) if crate::dms::group_id(c).is_some() => c.name.clone(),
                     (Conn::Connected, Some(c)) if crate::dms::is_dm(c) => format!("звонок: {}", c.name),
                     (Conn::Connected, Some(c)) => format!("в {}", c.name),
                     (Conn::Connecting, Some(_)) => "подключение…".into(),
@@ -2750,6 +2919,9 @@ impl App {
                         ui.label(RichText::new("Друзья").font(t::xbold(18.0)));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.allocate_ui(vec2(320.0, 40.0), |ui| self.friends.header_tabs(ui));
+                            if crate::friends::outline_button(ui, ph::USERS_THREE, "Групповой звонок", !self.friends.list().is_empty()).clicked() {
+                                self.call_picker = Some(CallPicker { mode: PickMode::New, selected: Vec::new() });
+                            }
                         });
                     });
                     return;
@@ -2867,7 +3039,8 @@ impl App {
                 // ширина содержимого — чтобы капсула облегала кнопки
                 const GAP: f32 = 10.0;
                 let measure = |text: &str, font: egui::FontId| ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER).size().x;
-                let icons = 2 + usize::from(can_stream) + usize::from(streaming || can_stream) + usize::from(streaming);
+                let in_call_room = vs.channel.as_ref().is_some_and(crate::dms::is_dm);
+                let icons = 2 + usize::from(can_stream) + usize::from(can_stream && in_call_room) + usize::from(streaming || can_stream) + usize::from(streaming);
                 let mut w = icons as f32 * 46.0 + (icons - 1) as f32 * GAP;
                 if vs.ptt_enabled {
                     w += GAP + measure("Рация", t::font(13.0)) + 6.0 + measure(&key, t::bold(13.0)) + 18.0;
@@ -2901,6 +3074,18 @@ impl App {
                             };
                             if kit::dock_icon(ui, icon, style, tip).clicked() {
                                 self.voice.send(Cmd::SetCamera { on: !on, device: self.settings.camera_device.clone() });
+                            }
+                        }
+                        if can_stream && in_call_room && kit::dock_icon(ui, ph::USER_PLUS, DockStyle::Normal, "Позвать в звонок").clicked() {
+                            let mode = match vs.channel.as_ref() {
+                                Some(c) => match crate::dms::group_id(c) {
+                                    Some(id) => Some(PickMode::Invite(id)),
+                                    None => self.dms.get(c.id).map(|d| PickMode::FromDm(d.user.id)),
+                                },
+                                None => None,
+                            };
+                            if let Some(mode) = mode {
+                                self.call_picker = Some(CallPicker { mode, selected: Vec::new() });
                             }
                         }
                         if streaming {
@@ -2963,6 +3148,19 @@ impl App {
                     if kit::cat_state(ui, kit::Cat::Loading, &format!("Звоним: {name}…"), "Ждём ответа", Some("Отменить")) {
                         self.voice.send(Cmd::Leave);
                         self.view = View::Dm(id);
+                    }
+                });
+            }
+            // групповой звонок: звоним, пока никто не пришёл
+            (Conn::Connecting | Conn::Connected, Some(ch))
+                if crate::dms::group_id(ch).is_some_and(|id| vs.peers.len() <= 1 && self.groupcalls.get(id).is_some_and(|c| !c.ringing.is_empty())) =>
+            {
+                let n = crate::dms::group_id(ch).and_then(|id| self.groupcalls.get(id)).map(|c| c.ringing.len()).unwrap_or(0);
+                let area = Rect::from_center_size(r.center(), vec2(420.0, 220.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                    if kit::cat_state(ui, kit::Cat::Loading, &format!("Звоним: {}…", t::plural(n, "человеку", "людям", "людям")), "Ждём ответа", Some("Отменить")) {
+                        self.voice.send(Cmd::Leave);
+                        self.view = View::Friends;
                     }
                 });
             }
@@ -5116,6 +5314,7 @@ impl eframe::App for App {
         for e in self.chat.take_events() {
             self.friends.on_event(&e);
             self.dms.on_event(&e);
+            self.groupcalls.on_event(&e);
             match &e {
                 proto::ServerEvent::Summon { from, channel_id, .. } => {
                     self.people.learn(from.clone());
@@ -5170,6 +5369,11 @@ impl eframe::App for App {
         self.sync_activity();
         if let Some(id) = self.dms.poll(&mut self.unread, &mut self.people) {
             self.view = View::Dm(id);
+        }
+        // групповой звонок создан — войти в него (из звонка 1 на 1 это же закрывает старый)
+        if let Some(id) = self.groupcalls.poll() {
+            self.voice.send(Cmd::Join(crate::dms::group_channel(id)));
+            self.view = View::Voice;
         }
         if let Some(e) = self.dms.error.take() {
             self.friends.show_error(e);
@@ -5289,6 +5493,22 @@ fn demo_state(time: f64) -> VoiceState {
 }
 
 // ------------------------------------------------------------ мелкие виджеты
+
+/// Окно «кого позвать в звонок».
+struct CallPicker {
+    mode: PickMode,
+    selected: Vec<i64>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PickMode {
+    /// Новый групповой звонок из списка друзей.
+    New,
+    /// Позвать ещё людей в идущий групповой звонок (номер звонка).
+    Invite(i64),
+    /// «Добавить человека» в звонке 1 на 1: новый групповой звонок с собеседником (его id) и выбранными.
+    FromDm(i64),
+}
 
 /// Элемент сцены комнаты.
 #[derive(Clone, Copy)]

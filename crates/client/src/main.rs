@@ -49,6 +49,7 @@ mod stream;
 mod theme;
 mod tray;
 mod gif_picker;
+mod groupcalls;
 mod notify;
 mod unread;
 mod update;

@@ -289,6 +289,16 @@ impl Friends {
 
     /// Отладка (скриншоты): открыть экран сразу, `requests` / `all` — на этой вкладке.
     #[cfg(debug_assertions)]
+    /// Отладка: несколько друзей без сервера (окно выбора для звонка).
+    #[cfg(debug_assertions)]
+    pub fn debug_fill(&mut self) {
+        for (i, (n, on)) in [("Курису", true), ("Дару", true), ("Маюри", false), ("Фэйрис", true)].into_iter().enumerate() {
+            let user = PublicUser { id: 10 + i as i64, name: n.to_lowercase(), display_name: Some(n.into()), avatar: None };
+            self.list.friends.push(Friend { user, online: on, activity: None });
+        }
+        self.loaded = true;
+    }
+
     pub fn debug_open(&mut self, tab: &str) {
         self.open = true;
         self.tab = match tab {

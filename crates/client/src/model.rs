@@ -244,7 +244,8 @@ impl Model {
             | ServerEvent::FriendsChanged
             | ServerEvent::Summon { .. }
             | ServerEvent::ReadState { .. }
-            | ServerEvent::Call { .. } => {}
+            | ServerEvent::Call { .. }
+            | ServerEvent::GroupCall { .. } => {}
         }
     }
 

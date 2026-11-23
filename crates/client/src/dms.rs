@@ -24,6 +24,19 @@ pub fn is_dm(ch: &Channel) -> bool {
     ch.server_id == DM_SERVER
 }
 
+/// Название «канала» группового звонка.
+pub const GROUP_NAME: &str = "Групповой звонок";
+
+/// «Канал» группового звонка для голосового движка: тот же «сервер» ЛС, id — минус номер звонка.
+pub fn group_channel(call_id: i64) -> Channel {
+    Channel { id: -call_id, name: GROUP_NAME.into(), kind: ChannelKind::Voice, server_id: DM_SERVER, category_id: None, position: 0, user_limit: None }
+}
+
+/// Номер группового звонка, если это «канал» группового звонка.
+pub fn group_id(ch: &Channel) -> Option<i64> {
+    (is_dm(ch) && ch.id < 0).then_some(-ch.id)
+}
+
 fn channel(dm: &DmChannel, kind: ChannelKind) -> Channel {
     Channel { id: dm.id, name: dm.user.shown_name().to_string(), kind, server_id: DM_SERVER, category_id: None, position: 0, user_limit: None }
 }
@@ -293,9 +306,14 @@ pub fn header(ui: &mut Ui, people: &People, dm: &DmChannel, online: Option<bool>
 
 /// Окно входящего звонка поверх всего. Some(true) — принять, Some(false) — отклонить.
 pub fn incoming_window(ctx: &egui::Context, people: &People, dm: &DmChannel) -> Option<bool> {
+    incoming_window_for(ctx, people, ("incoming-call", dm.id), &dm.user, "звонит вам…")
+}
+
+/// То же для любого звонка: `key` — различает окна, `user` — чей аватар и имя, `sub` — подпись.
+pub fn incoming_window_for(ctx: &egui::Context, people: &People, key: (&str, i64), user: &proto::PublicUser, sub: &str) -> Option<bool> {
     let p = t::p();
     let mut out = None;
-    egui::Area::new(egui::Id::new(("incoming-call", dm.id)))
+    egui::Area::new(egui::Id::new(key))
         .order(egui::Order::Foreground)
         .anchor(Align2::CENTER_TOP, vec2(0.0, 112.0))
         .show(ctx, |ui| {
@@ -313,12 +331,12 @@ pub fn incoming_window(ctx: &egui::Context, people: &People, dm: &DmChannel) -> 
                         let time = ui.input(|i| i.time);
                         let k = ((time * 2.0).sin() * 0.5 + 0.5) as f32;
                         ui.painter().circle_stroke(rect.center(), 25.0 + 3.0 * k, Stroke::new(2.0, p.status_online.gamma_multiply(1.0 - 0.6 * k)));
-                        people.paint(ui.painter(), rect.center(), 24.0, &dm.user, 0.0, false);
+                        people.paint(ui.painter(), rect.center(), 24.0, user, 0.0, false);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
                             ui.add_space(4.0);
-                            ui.label(RichText::new(dm.user.shown_name()).font(t::bold(16.0)));
-                            ui.label(RichText::new("звонит вам…").size(13.0).color(p.text_muted));
+                            ui.label(RichText::new(user.shown_name()).font(t::bold(16.0)));
+                            ui.label(RichText::new(sub).size(13.0).color(p.text_muted));
                         });
                         ui.add_space(18.0);
                         if kit::button(ui, ButtonKind::Danger, "Отклонить", Some(phf::PHONE_X)).clicked() {

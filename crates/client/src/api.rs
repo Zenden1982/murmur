@@ -340,6 +340,31 @@ impl Api {
         self.call::<(), _>(Method::POST, &format!("/dms/{channel_id}/call"), None).await
     }
 
+    /// Начать групповой звонок: позвать друзей.
+    pub async fn group_create(&self, user_ids: Vec<i64>) -> ApiResult<proto::GroupCallJoin> {
+        self.call(Method::POST, "/calls", Some(&proto::CallInviteRequest { user_ids })).await
+    }
+
+    /// Войти в групповой звонок (ответить) — токен комнаты.
+    pub async fn group_join(&self, id: i64) -> ApiResult<proto::GroupCallJoin> {
+        self.call::<(), _>(Method::POST, &format!("/calls/{id}/join"), None).await
+    }
+
+    /// Позвать ещё друзей в идущий групповой звонок.
+    pub async fn group_invite(&self, id: i64, user_ids: Vec<i64>) -> ApiResult<()> {
+        self.call(Method::POST, &format!("/calls/{id}/invite"), Some(&proto::CallInviteRequest { user_ids })).await
+    }
+
+    /// Групповой звонок: отклонить или выйти.
+    pub async fn group_hang_up(&self, id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/calls/{id}"), None).await
+    }
+
+    /// Групповые звонки, в которые меня звали и которые ещё идут.
+    pub async fn group_calls(&self) -> ApiResult<Vec<proto::GroupCall>> {
+        self.call::<(), _>(Method::GET, "/calls", None).await
+    }
+
     /// Положить трубку: отменить, отклонить или выйти из звонка.
     pub async fn dm_hang_up(&self, channel_id: i64) -> ApiResult<()> {
         self.call::<(), _>(Method::DELETE, &format!("/dms/{channel_id}/call"), None).await

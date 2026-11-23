@@ -1042,7 +1042,11 @@ impl Engine {
         {
             let api = self.api.clone();
             tokio::spawn(async move {
-                if let Err(e) = api.dm_hang_up(cur.id).await {
+                let res = match crate::dms::group_id(&cur) {
+                    Some(call) => api.group_hang_up(call).await,
+                    None => api.dm_hang_up(cur.id).await,
+                };
+                if let Err(e) = res {
                     log::warn!("звонок {}: не удалось положить трубку: {e}", cur.id);
                 }
             });
@@ -1051,7 +1055,13 @@ impl Engine {
 
     /// Подключение к комнате (HTTP за токеном + LiveKit). Не трогает движок — его можно отменить, бросив future.
     async fn connect_room(api: crate::api::Api, ch: Channel, force_relay: bool) -> anyhow::Result<(Room, mpsc::UnboundedReceiver<livekit::RoomEvent>)> {
-        let join = if crate::dms::is_dm(&ch) { api.dm_call(ch.id).await? } else { api.join(ch.id).await? };
+        let join = if let Some(call) = crate::dms::group_id(&ch) {
+            api.group_join(call).await?.join
+        } else if crate::dms::is_dm(&ch) {
+            api.dm_call(ch.id).await?
+        } else {
+            api.join(ch.id).await?
+        };
         let mut opts = RoomOptions::default();
         // Подписки — вручную: голос всегда, трансляции (видео + звук) — только по «Смотреть» (канал зрителя не тратится).
         opts.auto_subscribe = false;
