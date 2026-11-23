@@ -38,6 +38,7 @@ mod picker;
 mod pip;
 mod server_settings;
 mod servers_ui;
+mod hotkeys;
 mod ptt;
 mod reactions;
 mod remote;

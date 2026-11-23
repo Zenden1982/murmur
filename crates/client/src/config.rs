@@ -122,6 +122,10 @@ pub struct Settings {
     pub noise: NoiseMode,
     pub auto_gain: bool,
     pub sounds: bool,
+    /// Горячие клавиши (микрофон, звук, выход, остановка трансляции).
+    pub hotkeys: crate::hotkeys::Bindings,
+    /// Звук при переключении горячими клавишами.
+    pub hotkey_sounds: bool,
     /// Громкость звуков интерфейса, 0–100.
     pub sounds_volume: u8,
     /// Громкость участников по id пользователя (identity), 1.0 = 100%.
@@ -200,6 +204,8 @@ impl Default for Settings {
             noise: NoiseMode::default(),
             auto_gain: true,
             sounds: true,
+            hotkeys: Default::default(),
+            hotkey_sounds: true,
             sounds_volume: 60,
             user_volume: HashMap::new(),
             user_muted: HashMap::new(),

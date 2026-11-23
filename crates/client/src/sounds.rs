@@ -31,6 +31,12 @@ pub enum Sound {
     Ring,
     /// Гудок у звонящего (повторяется, пока не ответили).
     RingBack,
+    /// Горячая клавиша: микрофон выключен / включён.
+    MuteOn,
+    MuteOff,
+    /// Горячая клавиша: звук выключен / включён.
+    DeafenOn,
+    DeafenOff,
 }
 
 const RATE: u32 = 44_100;
@@ -91,6 +97,10 @@ struct Bank {
     direct_message: Vec<u8>,
     ring: Vec<u8>,
     ring_back: Vec<u8>,
+    mute_on: Vec<u8>,
+    mute_off: Vec<u8>,
+    deafen_on: Vec<u8>,
+    deafen_off: Vec<u8>,
 }
 
 /// Банк звуков для громкости `step` (шаг 5 %; 60 % = прежняя громкость). PlaySound с SND_ASYNC читает WAV, пока играет,
@@ -120,6 +130,11 @@ fn bank() -> &'static Bank {
         ring: build(&[(1046.5, 110), (1318.51, 110), (1046.5, 110), (1318.51, 110), (1567.98, 260)], 0.2 * k),
         // гудок у звонящего — один тихий долгий тон
         ring_back: build(&[(440.0, 900)], 0.08 * k),
+        // микрофон: один короткий тон — вниз (выкл) и вверх (вкл); звук: два тона
+        mute_on: build(&[(659.25, 60), (440.0, 110)], 0.14 * k),
+        mute_off: build(&[(440.0, 60), (659.25, 110)], 0.14 * k),
+        deafen_on: build(&[(587.33, 55), (466.16, 55), (349.23, 120)], 0.14 * k),
+        deafen_off: build(&[(349.23, 55), (466.16, 55), (587.33, 120)], 0.14 * k),
     }));
     banks.push((step, b));
     b
@@ -142,6 +157,10 @@ pub fn play(s: Sound) {
         Sound::DirectMessage => &b.direct_message,
         Sound::Ring => &b.ring,
         Sound::RingBack => &b.ring_back,
+        Sound::MuteOn => &b.mute_on,
+        Sound::MuteOff => &b.mute_off,
+        Sound::DeafenOn => &b.deafen_on,
+        Sound::DeafenOff => &b.deafen_off,
     };
     #[cfg(windows)]
     unsafe {

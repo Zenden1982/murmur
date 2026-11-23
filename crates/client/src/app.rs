@@ -24,6 +24,7 @@ use crate::mictest::{self, MicTest};
 use crate::profile_card;
 use crate::people::{self, People};
 use crate::picker::{self, Picker};
+use crate::hotkeys::{self, Action as HkAction, Hotkeys};
 use crate::ptt::{self, Ptt};
 use crate::servers_ui::{self, ServersUi};
 use crate::kit::{self, DockStyle};
@@ -188,6 +189,11 @@ pub struct App {
     voice: VoiceHandle,
     ptt: Ptt,
     ptt_rx: std_mpsc::Receiver<u32>,
+    hotkeys: Hotkeys,
+    hotkeys_rx: std_mpsc::Receiver<hotkeys::Chord>,
+    /// Действие, которому сейчас назначают сочетание, и текст ошибки (конфликт).
+    hk_capture: Option<HkAction>,
+    hk_error: Option<String>,
     screen: Screen,
     boot_error: Option<String>,
     /// Когда повторить запрос профиля при старте с сохранённой сессией (сервер был недоступен), и сколько попыток уже было.
@@ -358,6 +364,7 @@ impl App {
             agc: settings.auto_gain,
             ptt_enabled: settings.ptt_enabled,
             sounds: settings.sounds,
+            hotkey_sounds: settings.hotkey_sounds,
             volumes: settings.user_volume.keys().map(|k| (k.clone(), settings.effective_volume(k))).collect::<HashMap<_, _>>(),
             stream_volumes: settings.stream_volume.clone(),
             output_volume: settings.output_volume,
@@ -382,7 +389,9 @@ impl App {
         let autostart_error = if desktop::is_installed() { desktop::set_autostart(settings.autostart).err() } else { None };
         let voice = voice::spawn(rt.handle(), api.clone(), prefs, video.clone(), repaint.clone());
         let (ptt_tx, ptt_rx) = std_mpsc::channel();
-        let ptt = Ptt::start(settings.ptt_key, settings.ptt_enabled, voice.sender(), ptt_tx, repaint);
+        let ptt = Ptt::start(settings.ptt_key, settings.ptt_enabled, voice.sender(), ptt_tx, repaint.clone());
+        let (hk_tx, hotkeys_rx) = std_mpsc::channel();
+        let hotkeys = Hotkeys::start(settings.hotkeys.clone(), voice.sender(), hk_tx, repaint);
         voice.send(Cmd::RcPttKey(settings.ptt_key));
         // Отладка: AMADEUS_START_DEAF=1 — второй клиент на том же ПК без заводки через колонки.
         #[cfg(debug_assertions)]
@@ -417,6 +426,10 @@ impl App {
             voice,
             ptt,
             ptt_rx,
+            hotkeys,
+            hotkeys_rx,
+            hk_capture: None,
+            hk_error: None,
             screen: if has_token { Screen::Boot } else { Screen::Login },
             boot_error: None,
             boot_retry: None,
@@ -889,6 +902,20 @@ impl App {
                 }
             }
         }
+        while let Ok(chord) = self.hotkeys_rx.try_recv() {
+            let Some(action) = self.hk_capture.take() else { continue };
+            if chord.vk == 0x1B && !chord.ctrl && !chord.alt && !chord.shift {
+                continue; // Esc — отмена
+            }
+            match hotkeys::apply_capture(&mut self.settings.hotkeys, self.settings.ptt_key, action, chord) {
+                Ok(()) => {
+                    self.hk_error = None;
+                    self.hotkeys.set_bindings(self.settings.hotkeys.clone());
+                    self.settings.save();
+                }
+                Err(e) => self.hk_error = Some(e),
+            }
+        }
         while let Ok(vk) = self.ptt_rx.try_recv() {
             if vk != 0x1B {
                 self.settings.ptt_key = vk;
@@ -1032,6 +1059,7 @@ impl App {
         self.channels.clear();
         self.settings_open = false;
         self.ptt.cancel_capture();
+        self.cancel_hotkey_capture();
         self.set_query.clear();
         self.stop_mic_test();
         self.popup = None;
@@ -4336,7 +4364,12 @@ impl App {
         });
     }
 
-    /// Настройки → «Горячие клавиши» (пока одна — рация).
+    fn cancel_hotkey_capture(&mut self) {
+        self.hotkeys.cancel_capture();
+        self.hk_capture = None;
+    }
+
+    /// Настройки → «Горячие клавиши»: рация и действия с сочетаниями.
     fn ui_settings_hotkeys(&mut self, ui: &mut Ui, w: f32) {
         toggle_row(ui, w, |ui| {
             ui.label("Рация — держать, чтобы говорить").on_hover_text("Работает, даже когда окно свёрнуто или вы в игре");
@@ -4348,12 +4381,64 @@ impl App {
                 ui.label(RichText::new("нажмите клавишу…").color(t::p().accent_text).size(13.0));
             } else {
                 if kit::button(ui, kit::ButtonKind::Secondary, "Изменить", None).clicked() {
+                    self.cancel_hotkey_capture();
                     self.ptt.begin_capture();
                 }
                 ui.add_space(8.0);
                 kit::keycap(ui, &ptt::key_name(self.settings.ptt_key));
             }
         });
+        for action in HkAction::ALL {
+            let cur = self.settings.hotkeys.get(action);
+            let capturing = self.hk_capture == Some(action);
+            toggle_row(ui, w, |ui| {
+                ui.label(action.label());
+            }, |ui| {
+                if capturing {
+                    if kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked() {
+                        self.cancel_hotkey_capture();
+                    }
+                    ui.label(RichText::new("нажмите сочетание…").color(t::p().accent_text).size(13.0));
+                } else {
+                    if kit::button(ui, kit::ButtonKind::Secondary, "Изменить", None).clicked() {
+                        self.ptt.cancel_capture();
+                        self.hk_error = None;
+                        self.hk_capture = Some(action);
+                        self.hotkeys.begin_capture();
+                    }
+                    if cur.is_some() && kit::button(ui, kit::ButtonKind::Ghost, "Сбросить", None).clicked() {
+                        self.settings.hotkeys.set(action, None);
+                        self.hotkeys.set_bindings(self.settings.hotkeys.clone());
+                        self.settings.save();
+                    }
+                    ui.add_space(8.0);
+                    match cur {
+                        Some(c) => {
+                            kit::keycap(ui, &hotkeys::chord_name(c));
+                        }
+                        None => {
+                            ui.label(RichText::new("не назначено").color(t::p().text_muted).size(13.0));
+                        }
+                    }
+                }
+            });
+        }
+        if let Some(e) = &self.hk_error {
+            ui.add_space(6.0);
+            ui.label(RichText::new(e).size(13.0).color(t::p().danger_text));
+        }
+        let mut hs = self.settings.hotkey_sounds;
+        toggle_row(ui, w, |ui| {
+            ui.label("Звук при переключении");
+        }, |ui| {
+            if kit::switch(ui, &mut hs).changed() {
+                self.settings.hotkey_sounds = hs;
+                self.settings.save();
+                self.voice.send(Cmd::SetHotkeySounds(hs));
+            }
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("Работают, даже когда окно свёрнуто. В полноэкранном режиме некоторые игры перехватывают клавиши — тогда включите в игре режим «окно без рамки».").size(12.5).color(t::p().text_muted));
     }
 
     /// Настройки → «Аккаунт» (пока — логин и сервер).
@@ -4409,7 +4494,7 @@ impl App {
         if self.mic_test.is_some() {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
-        let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape)) && !self.ptt.capturing();
+        let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape)) && !self.ptt.capturing() && !self.hotkeys.capturing();
         let full = ui.ctx().content_rect();
         let top = if self.fullscreen { full.top() } else { full.top() + crate::frame::HEIGHT };
         let r = Rect::from_min_max(pos2(full.left(), top), full.max);
@@ -4489,6 +4574,7 @@ impl App {
     fn close_settings(&mut self) {
         self.profile_flush();
         self.ptt.cancel_capture();
+        self.cancel_hotkey_capture();
         self.settings_open = false;
         self.set_query.clear();
         self.stop_mic_test();

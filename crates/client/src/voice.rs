@@ -61,12 +61,22 @@ impl StreamPause {
 /// Паузы между попытками вернуться в канал после разрыва.
 const REJOIN_BACKOFF: [u64; 6] = [1, 2, 3, 5, 10, 15];
 
+/// Новое значение «микрофон выключен» для горячей клавиши: как кнопка в интерфейсе (при выключенном звуке микрофон тоже считается выключенным).
+pub fn toggle_mute_target(self_muted: bool, deafened: bool) -> bool {
+    !(self_muted || deafened)
+}
+
 #[derive(Debug, Clone)]
 pub enum Cmd {
     Join(Channel),
     Leave,
     SetSelfMuted(bool),
     SetDeafened(bool),
+    /// Горячая клавиша: переключить микрофон (как кнопка в интерфейсе) / звук.
+    ToggleMute,
+    ToggleDeafen,
+    /// Звук при переключении горячими клавишами.
+    SetHotkeySounds(bool),
     SetPttEnabled(bool),
     PttHeld(bool),
     /// identity → громкость (1.0 = 100%, 0 = заглушён).
@@ -302,6 +312,8 @@ pub struct AudioPrefs {
     pub agc: bool,
     pub ptt_enabled: bool,
     pub sounds: bool,
+    /// Звук при переключении микрофона/звука горячими клавишами.
+    pub hotkey_sounds: bool,
     pub volumes: HashMap<String, f32>,
     /// Громкость звука трансляций по identity.
     pub stream_volumes: HashMap<String, f32>,
@@ -758,20 +770,19 @@ impl Engine {
             s.link = crate::link::LinkState::Fine;
                 });
             }
-            Cmd::SetSelfMuted(m) => {
-                self.self_muted = m;
-                if !m && self.deafened {
-                    // Включить микрофон в «наушниках выкл» = снять и глушение звука (как в Discord).
-                    self.deafened = false;
-                    self.apply_volumes();
-                }
-                self.apply_mic();
+            Cmd::SetSelfMuted(m) => self.set_self_muted(m),
+            Cmd::SetDeafened(d) => self.set_deafened(d),
+            Cmd::ToggleMute => {
+                let target = toggle_mute_target(self.self_muted, self.deafened);
+                self.set_self_muted(target);
+                self.play_hotkey(if target { Sound::MuteOn } else { Sound::MuteOff });
             }
-            Cmd::SetDeafened(d) => {
-                self.deafened = d;
-                self.apply_volumes();
-                self.apply_mic();
+            Cmd::ToggleDeafen => {
+                let target = !self.deafened;
+                self.set_deafened(target);
+                self.play_hotkey(if target { Sound::DeafenOn } else { Sound::DeafenOff });
             }
+            Cmd::SetHotkeySounds(on) => self.prefs.hotkey_sounds = on,
             Cmd::SetPttEnabled(on) => {
                 self.prefs.ptt_enabled = on;
                 self.ptt_held = false;
@@ -880,6 +891,28 @@ impl Engine {
                 self.views.insert(identity.clone(), (visible, width, height));
                 self.apply_view(&identity);
             }
+        }
+    }
+
+    fn set_self_muted(&mut self, m: bool) {
+        self.self_muted = m;
+        if !m && self.deafened {
+            // Включить микрофон в «наушниках выкл» = снять и глушение звука (как в Discord).
+            self.deafened = false;
+            self.apply_volumes();
+        }
+        self.apply_mic();
+    }
+
+    fn set_deafened(&mut self, d: bool) {
+        self.deafened = d;
+        self.apply_volumes();
+        self.apply_mic();
+    }
+
+    fn play_hotkey(&self, s: Sound) {
+        if self.prefs.hotkey_sounds {
+            self.play(s);
         }
     }
 
@@ -2376,6 +2409,14 @@ fn pick_active_outbound<'a>(outs: &[&'a OutboundRtpStats], prev: &HashMap<u32, u
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn toggle_mute_when_deafened() {
+        // звук выключен, микрофон «включён» → клавиша снимает глушение микрофона (как кнопка в интерфейсе)
+        assert!(!super::toggle_mute_target(false, true));
+        assert!(super::toggle_mute_target(false, false));
+        assert!(!super::toggle_mute_target(true, false));
+    }
+
     use super::*;
 
     fn out(ssrc: u32, bytes: u64, w: u32) -> OutboundRtpStats {

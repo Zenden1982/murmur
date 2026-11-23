@@ -97,7 +97,7 @@ fn pick_down(watched: bool, real: bool, async_state: bool) -> bool {
 }
 
 #[cfg(windows)]
-fn is_down(vk: u32) -> bool {
+pub(crate) fn is_down(vk: u32) -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     if vk == 0 {
         return false;
@@ -107,7 +107,7 @@ fn is_down(vk: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_down(_vk: u32) -> bool {
+pub(crate) fn is_down(_vk: u32) -> bool {
     false
 }
 
