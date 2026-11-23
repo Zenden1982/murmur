@@ -193,7 +193,10 @@ async fn register(
         .await?;
     tx.commit().await?;
     tracing::info!(user_id = id, %name, server_id, "registered by invite");
-    invites::announce_join(&state, server_id, id).await?;
+    // Пользователь уже создан: сбой рассылки не должен превращать успех в 500.
+    if let Err(e) = invites::announce_join(&state, server_id, id).await {
+        tracing::warn!(user_id = id, server_id, "announce_join после регистрации: {e:?}");
+    }
 
     let resp = new_session(
         &state,

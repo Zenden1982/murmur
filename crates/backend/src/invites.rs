@@ -131,7 +131,10 @@ pub async fn join(State(state): State<AppState>, user: AuthUser, Path(code): Pat
         Err(e) => return Err(e.into()),
     }
     tracing::info!(server_id = sid, user_id = user.id, "joined server by invite");
-    announce_join(&state, sid, user.id).await?;
+    // Вступление уже состоялось: сбой рассылки не должен превращать успех в 500.
+    if let Err(e) = announce_join(&state, sid, user.id).await {
+        tracing::warn!(server_id = sid, user_id = user.id, "announce_join после вступления: {e:?}");
+    }
     Ok(Json(servers::server_for(&state.inner.db, sid, user.id).await?))
 }
 
