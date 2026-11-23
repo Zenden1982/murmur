@@ -1,5 +1,5 @@
 <h1 align="center">Murmur</h1>
-<p align="center"><b>Your own Discord for friends: voice, chat, screen sharing and remote control.<br>The server installs with one command.</b></p>
+<p align="center"><b>Voice, chat and screen sharing with sound — on your own server.<br>You can even let a friend take the controls of your computer. The server installs with one command.</b></p>
 <p align="center"><b>English</b> · <a href="README.md">Русский</a> · <a href="#self-hosting">Self-hosting</a> · <a href="https://github.com/Zenden1982/murmur/releases">Download</a></p>
 
 <p align="center"><img src="docs/screenshots/voice.gif" alt="Murmur voice channel" width="720"></p>
@@ -10,7 +10,7 @@
 </p>
 <p align="center"><sub>Screenshots are from the client's demo mode, the data is fake.</sub></p>
 
-I'm building Murmur for myself and my friends, so we can talk, play and show each other our screens without depending on someone else's service. It's a regular voice chat with channels, text, friends and DMs, but the focus is on what these apps usually do worst: **screen sharing**.
+I'm building Murmur for myself and my friends, so we can talk, play and show each other our screens without depending on someone else's service: the server is yours, and so is the data. It has voice channels, text, friends and DMs, but the main point is what it was all started for: **screen sharing** that is easy on both the streamer and the viewers.
 
 ## Screen sharing
 
