@@ -247,7 +247,7 @@ async fn download_and_swap(base: &str, info: &ReleaseInfo, progress: &AtomicU64,
             return Err(format!("скачано {got} байт из {}", info.size));
         }
         let sum = hex(&hasher.finalize());
-        if sum != info.sha256 {
+        if !sum.eq_ignore_ascii_case(info.sha256.trim()) {
             return Err("контрольная сумма не совпала — файл повреждён".into());
         }
         Ok(())
