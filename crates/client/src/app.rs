@@ -3794,7 +3794,7 @@ impl App {
                 self.spawn(async move { api.delete_avatar().await.map(Some).map_err(|e| e.message) }, Msg::Profile);
             }
         });
-        hint(ui, "PNG, JPG, GIF или видео · итог до 2 МБ · обрежется в круг 256 px");
+        hint(ui, "PNG, JPG, GIF или видео · итог до 5 МБ · обрежется в круг 256 px");
         ui.add_space(12.0);
         // баннер
         caps(ui, "БАННЕР", None);
@@ -3812,7 +3812,7 @@ impl App {
                 self.spawn(async move { api.delete_banner().await.map(Some).map_err(|e| e.message) }, Msg::Profile);
             }
         });
-        hint(ui, "5:2, лучше 960×384 · GIF или видео · итог до 4 МБ");
+        hint(ui, "5:2, лучше 960×384 · GIF или видео · итог до 5 МБ");
         ui.add_space(14.0);
         // имя
         caps(ui, "ОТОБРАЖАЕМОЕ ИМЯ", Some((self.profile_name.chars().count(), proto::limits::DISPLAY_NAME_MAX)));
