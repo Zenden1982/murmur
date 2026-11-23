@@ -185,12 +185,17 @@ impl GifPicker {
                 // Запрос уходит на сервер только по Enter или кнопке «Найти» — не на каждую набранную букву.
                 let mut go = false;
                 ui.horizontal(|ui| {
-                    let btn = ui.add(egui::Button::new(RichText::new(ph::MAGNIFYING_GLASS).size(16.0)).min_size(vec2(30.0, 28.0))).on_hover_text("Найти");
-                    let edit = ui.add(
+                    const H: f32 = 34.0;
+                    let edit = ui.add_sized(
+                        vec2(W - H - ui.spacing().item_spacing.x, H),
                         TextEdit::singleline(&mut self.query)
-                            .desired_width(W - 30.0 - ui.spacing().item_spacing.x)
-                            .hint_text(RichText::new("Найти GIF (Enter)").color(t::p().text_muted)),
+                            .margin(Margin::symmetric(10, 8))
+                            .vertical_align(egui::Align::Center)
+                            .hint_text(RichText::new("Найти GIF…").color(t::p().text_muted)),
                     );
+                    let btn = ui
+                        .add_sized(vec2(H, H), egui::Button::new(RichText::new(ph::MAGNIFYING_GLASS).size(15.0)).corner_radius(CornerRadius::same(8)))
+                        .on_hover_text("Найти (Enter)");
                     if !self.focused {
                         edit.request_focus();
                         self.focused = true;
