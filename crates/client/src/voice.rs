@@ -618,7 +618,14 @@ impl Engine {
             ..Default::default()
         };
         match lp.publish_track(LocalTrack::Audio(track), publish).await {
-            Ok(p) => Some(p),
+            Ok(p) => {
+                // Сразу заглушаем, если звук не должен идти: дальше в connect идут долгие await'ы
+                // (публикация трансляции), и до apply_mic микрофон был бы в эфире.
+                if !self.mic_should_send() {
+                    p.mute();
+                }
+                Some(p)
+            }
             Err(e) => {
                 log::error!("публикация микрофона: {e}");
                 self.set(|s| s.audio_error = Some(format!("Микрофон не опубликован: {e}")));
