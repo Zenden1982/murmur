@@ -12,6 +12,7 @@
 use msvc_shim as _;
 
 pub mod app_audio;
+pub mod camera;
 pub mod capture;
 pub mod diag;
 pub mod h264qp;
