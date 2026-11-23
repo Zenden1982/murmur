@@ -909,6 +909,8 @@ impl HwCapture {
             let (enc, sink) = (enc.clone(), sink.clone());
             std::thread::Builder::new().name("mft-events".into()).spawn(move || enc.run_events(sink)).map_err(e("поток"))?
         };
+        // Любая ошибка ниже (`?`) снимает поток событий, энкодеры (сессии NVENC и т.п.) и захват — иначе они копятся.
+        let mut guard = StartGuard { shared: shared.clone(), events: Some(events), pool: None, session: None, armed: true };
         if let Some(l) = &shared.low {
             let (enc, sink) = (l.enc.clone(), l.sink.clone());
             let h = std::thread::Builder::new().name("mft-events-low".into()).spawn(move || enc.run_events(sink)).map_err(e("поток"))?;
@@ -918,7 +920,9 @@ impl HwCapture {
         let d3d = windows_capture::d3d11::create_direct3d_device(&device).map_err(e("IDirect3DDevice"))?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size)
             .map_err(e("FramePool"))?;
+        guard.pool = Some(pool.clone());
         let session = pool.CreateCaptureSession(&item).map_err(e("CaptureSession"))?;
+        guard.session = Some(session.clone());
         if GraphicsCaptureApi::is_cursor_settings_supported().unwrap_or(false) {
             let _ = session.SetIsCursorCaptureEnabled(true);
         }
@@ -1032,6 +1036,8 @@ impl HwCapture {
             std::thread::Builder::new().name("hw-pump".into()).spawn(move || pump(shared, source)).map_err(e("поток"))?
         };
         log::info!("захват {source:?} (аппаратный путь): {w}×{h} {fps} к/с");
+        let events = guard.events.take();
+        guard.armed = false;
         Ok(HwCapture {
             source,
             shared,
@@ -1039,7 +1045,7 @@ impl HwCapture {
             session: Sx(session),
             _item: Sx(item),
             pump: Some(pump),
-            events: Some(events),
+            events,
             encoder_name: enc.name.clone(),
             size: (w, h),
         })
@@ -1088,6 +1094,46 @@ impl HwCapture {
             }
         }
         log::info!("захват {:?} (аппаратный путь): стоп", self.source);
+    }
+}
+
+/// Откат неудачного запуска `start_sized`: останавливает всё, что уже запущено.
+struct StartGuard {
+    shared: Arc<Shared>,
+    events: Option<JoinHandle<()>>,
+    pool: Option<Direct3D11CaptureFramePool>,
+    session: Option<GraphicsCaptureSession>,
+    armed: bool,
+}
+
+impl Drop for StartGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        log::warn!("запуск аппаратного захвата не удался — освобождаю энкодер");
+        self.shared.stop.store(true, Ordering::Relaxed);
+        if let Some(s) = self.session.take() {
+            let _ = s.Close();
+        }
+        if let Some(p) = self.pool.take() {
+            let _ = p.Close();
+        }
+        self.shared.enc.shutdown();
+        let mut handles: Vec<JoinHandle<()>> = self.events.take().into_iter().collect();
+        if let Some(l) = &self.shared.low {
+            l.enc.shutdown();
+            handles.extend(l.events.lock().unwrap().take());
+        }
+        let t = Instant::now();
+        for ev in handles {
+            while !ev.is_finished() && t.elapsed() < Duration::from_millis(800) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if ev.is_finished() {
+                let _ = ev.join();
+            }
+        }
     }
 }
 
