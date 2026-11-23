@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc as std_mpsc;
-use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, ColorImage, CornerRadius, Frame, Id, Key, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, TextureHandle, TextureOptions, Ui, vec2};
 use egui_phosphor::regular as ph;
@@ -13,7 +12,6 @@ use crate::theme as t;
 
 const W: f32 = 372.0;
 const COLS: usize = 3;
-const DEBOUNCE: Duration = Duration::from_millis(400);
 
 enum Ev {
     Page { epoch: u64, page: u32, res: Result<GifPage, String> },
@@ -49,7 +47,6 @@ pub struct GifPicker {
     thumbs: HashMap<String, Thumb>,
     /// Номер поиска: ответы на устаревшие запросы отбрасываются.
     epoch: u64,
-    edited_at: Option<Instant>,
     started: bool,
     focused: bool,
 }
@@ -72,7 +69,6 @@ impl GifPicker {
             error: None,
             thumbs: HashMap::new(),
             epoch: 0,
-            edited_at: None,
             started: false,
             focused: false,
         }
@@ -97,7 +93,6 @@ impl GifPicker {
         self.error = None;
         self.thumbs.clear();
         self.epoch += 1;
-        self.edited_at = None;
         self.started = false;
         self.focused = false;
     }
@@ -183,32 +178,36 @@ impl GifPicker {
             self.started = true;
             self.search_now();
         }
-        if let Some(at) = self.edited_at {
-            if at.elapsed() >= DEBOUNCE {
-                self.edited_at = None;
-                let q = self.query.split_whitespace().collect::<Vec<_>>().join(" ");
-                if q != self.searched {
-                    self.search_now();
-                }
-            } else {
-                ctx.request_repaint_after(DEBOUNCE);
-            }
-        }
         let mut out = GifOut::None;
         let area = egui::Area::new(id).order(egui::Order::Foreground).pivot(pivot).fixed_pos(pos).show(ctx, |ui| {
             Frame::new().fill(t::p().surface).stroke(Stroke::new(1.0, t::p().border)).corner_radius(CornerRadius::same(12)).inner_margin(Margin::same(8)).show(ui, |ui| {
                 ui.set_width(W);
-                let edit = ui.add(
-                    TextEdit::singleline(&mut self.query)
-                        .desired_width(W)
-                        .hint_text(RichText::new(format!("{}  Найти GIF", ph::MAGNIFYING_GLASS)).color(t::p().text_muted)),
-                );
-                if !self.focused {
-                    edit.request_focus();
-                    self.focused = true;
-                }
-                if edit.changed() {
-                    self.edited_at = Some(Instant::now());
+                // Запрос уходит на сервер только по Enter или кнопке «Найти» — не на каждую набранную букву.
+                let mut go = false;
+                ui.horizontal(|ui| {
+                    let btn = ui.add(egui::Button::new(RichText::new(ph::MAGNIFYING_GLASS).size(16.0)).min_size(vec2(30.0, 28.0))).on_hover_text("Найти");
+                    let edit = ui.add(
+                        TextEdit::singleline(&mut self.query)
+                            .desired_width(W - 30.0 - ui.spacing().item_spacing.x)
+                            .hint_text(RichText::new("Найти GIF (Enter)").color(t::p().text_muted)),
+                    );
+                    if !self.focused {
+                        edit.request_focus();
+                        self.focused = true;
+                    }
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        go = true;
+                        edit.request_focus();
+                    }
+                    if btn.clicked() {
+                        go = true;
+                    }
+                });
+                if go {
+                    let q = self.query.split_whitespace().collect::<Vec<_>>().join(" ");
+                    if q != self.searched || self.error.is_some() {
+                        self.search_now();
+                    }
                 }
                 ui.add_space(6.0);
                 if let Some(i) = self.grid(ui) {
