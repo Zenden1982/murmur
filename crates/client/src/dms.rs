@@ -326,7 +326,7 @@ pub fn incoming_window(ctx: &egui::Context, people: &People, dm: &DmChannel) -> 
                         }
                     });
                 });
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         });
     out
 }

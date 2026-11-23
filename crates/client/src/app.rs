@@ -4328,7 +4328,10 @@ impl App {
 
     fn ui_settings(&mut self, ui: &mut Ui, vs: &VoiceState) {
         self.sync_mic_test(vs);
-        ui.ctx().request_repaint_after(Duration::from_millis(50)); // живой индикатор уровня
+        // живой индикатор уровня — только пока идёт проверка микрофона
+        if self.mic_test.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        }
         let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape)) && !self.ptt.capturing();
         let full = ui.ctx().content_rect();
         let top = if self.fullscreen { full.top() } else { full.top() + crate::frame::HEIGHT };
@@ -4492,15 +4495,18 @@ fn now_ms() -> u64 {
 }
 
 /// Сторожок: если UI-поток не отрисовывал кадр больше 3 с при видимом окне — пишет в лог (раз в 5 с).
-/// Сам тоже просит кадр раз в 0,5 с: простой окна (egui не рисует без событий) не должен выглядеть как зависание.
+/// Сам тоже просит кадр раз в секунду (пока окно видимо): простой окна (egui не рисует без событий) не должен выглядеть как зависание.
 pub fn start_watchdog(ctx: egui::Context) {
     use std::sync::atomic::Ordering::Relaxed;
     now_ms();
     let _ = std::thread::Builder::new().name("amadeus-watchdog".into()).spawn(move || {
         let mut warned = 0u64;
         loop {
-            std::thread::sleep(Duration::from_millis(500));
-            ctx.request_repaint();
+            std::thread::sleep(Duration::from_millis(1000));
+            // скрытое/свёрнутое окно не будим: кадров нет, и зависанием это не считается
+            if UI_VISIBLE.load(Relaxed) {
+                ctx.request_repaint();
+            }
             let beat = UI_BEAT.load(Relaxed);
             let stalled = now_ms().saturating_sub(beat);
             if UI_VISIBLE.load(Relaxed) && beat > 0 && stalled > 3000 {
