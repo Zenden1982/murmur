@@ -156,7 +156,10 @@ impl Dms {
                     self.list = l;
                     self.sort();
                 }
-                Ev::List(Err(e)) => log::warn!("ЛС: {e}"),
+                Ev::List(Err(e)) => {
+                    log::warn!("ЛС: {e}");
+                    self.error = Some(format!("Не удалось загрузить список личных сообщений: {e}"));
+                }
                 Ev::Unread(Ok(u)) => unread.set(u),
                 Ev::Unread(Err(e)) => log::warn!("непрочитанные: {e}"),
                 Ev::Opened(Ok(d)) => {
