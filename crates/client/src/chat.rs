@@ -100,6 +100,9 @@ struct Draft {
     error: Option<String>,
 }
 
+/// Сколько байт текстур вложений держим в памяти (RGBA).
+const IMAGE_TEXTURE_BUDGET: usize = 128 * 1024 * 1024;
+
 enum Img {
     Loading,
     Ready(TextureHandle),
@@ -115,6 +118,8 @@ pub struct Chat {
     logs: HashMap<i64, Log>,
     drafts: HashMap<i64, Draft>,
     images: HashMap<i64, Img>,
+    /// Бюджет текстур вложений (вытесняются давно не показанные; при показе загружаются заново).
+    image_lru: crate::anim_img::Lru,
     stream: Option<tokio::task::JoinHandle<()>>,
     online: bool,
     stream_error: Option<String>,
@@ -169,6 +174,7 @@ impl Chat {
             logs: HashMap::new(),
             drafts: HashMap::new(),
             images: HashMap::new(),
+            image_lru: crate::anim_img::Lru::new(IMAGE_TEXTURE_BUDGET),
             stream: None,
             online: false,
             stream_error: None,
@@ -272,6 +278,7 @@ impl Chat {
         self.logs.clear();
         self.drafts.clear();
         self.images.clear();
+        self.image_lru.clear();
         self.online = false;
         self.stream_error = None;
         self.unauthorized = false;
@@ -636,6 +643,17 @@ impl Chat {
             let _ = tx.send(Ev::Attach { channel, res });
             ctx.request_repaint();
         });
+    }
+
+    /// Отметить показ текстуры вложения; давние сверх бюджета выгружаются.
+    fn touch_image(&mut self, id: i64) {
+        let Some(Img::Ready(tex)) = self.images.get(&id) else { return };
+        let (bytes, frame) = (tex.byte_size(), self.ctx.cumulative_pass_nr());
+        for gone in self.image_lru.touch_at(&id.to_string(), bytes, frame) {
+            if let Ok(g) = gone.parse::<i64>() {
+                self.images.remove(&g);
+            }
+        }
     }
 
     fn request_image(&mut self, id: i64) {
@@ -1060,6 +1078,7 @@ impl Chat {
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         let p = ui.painter();
         let mut act = None;
+        self.touch_image(a.id);
         match self.images.get(&a.id) {
             Some(Img::Ready(tex)) => {
                 egui::Image::new(tex).corner_radius(CornerRadius::same(kit::R_ROW)).paint_at(ui, rect);
@@ -1395,6 +1414,7 @@ impl Chat {
         egui::Area::new(Id::new("lightbox")).order(egui::Order::Foreground).fixed_pos(screen.min).show(&ctx, |ui| {
             let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
             ui.painter().rect_filled(r, CornerRadius::ZERO, Color32::from_black_alpha(215));
+            self.touch_image(id);
             match self.images.get(&id) {
                 Some(Img::Ready(tex)) => {
                     let area = r.shrink2(vec2(48.0, 56.0));
@@ -1688,6 +1708,15 @@ fn encode(img: &image::DynamicImage, fmt: image::ImageFormat) -> Result<Vec<u8>,
 fn prepare(bytes: Vec<u8>) -> Result<Prepared, String> {
     let fmt = image::guess_format(&bytes).map_err(|_| "Можно прикрепить только картинку (PNG, JPEG, GIF, WebP).".to_string())?;
     let img = image::load_from_memory_with_format(&bytes, fmt).map_err(|e| format!("Картинка не читается: {e}"))?;
+    // Анимацию не пережать в картинку незаметно (раньше GIF > 8 МБ молча становился статичным JPEG): честная ошибка.
+    if fmt == image::ImageFormat::Gif {
+        if bytes.len() > limits::IMAGE_MAX_BYTES {
+            return Err(format!("GIF больше {} МБ — выберите файл поменьше.", limits::IMAGE_MAX_BYTES / (1024 * 1024)));
+        }
+        if img.width() > limits::IMAGE_MAX_SIDE || img.height() > limits::IMAGE_MAX_SIDE {
+            return Err(format!("GIF больше {0}×{0} — выберите файл поменьше.", limits::IMAGE_MAX_SIDE));
+        }
+    }
     let sendable = matches!(fmt, image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::Gif | image::ImageFormat::WebP);
     let side = limits::IMAGE_MAX_SIDE;
     let mut work = img;
