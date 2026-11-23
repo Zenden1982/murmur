@@ -456,7 +456,7 @@ impl Api {
     }
 
     pub async fn revoke_invite(&self, code: &str) -> ApiResult<()> {
-        self.call::<(), _>(Method::DELETE, &format!("/invites/{code}"), None).await
+        self.call::<(), _>(Method::DELETE, &format!("/invites/{}", normalize_invite(code)), None).await
     }
 
     pub async fn server_invites(&self, id: i64) -> ApiResult<Vec<Invite>> {
