@@ -1146,6 +1146,10 @@ impl Engine {
                 log::info!("+ {} ({})", p.name(), p.identity());
                 self.play(Sound::JoinOther);
                 self.refresh_peers(false);
+                // Стример вернулся (его реконнект) — он не знает, что мы смотрим (V9).
+                if self.watching.contains(p.identity().as_str()) {
+                    self.announce_watch(p.identity().as_str(), true);
+                }
                 // новичку — сразу, если картинка на паузе
                 if self.pause_sent.is_some_and(|(p, _)| p.is_some()) {
                     self.pause_sent = None;
@@ -1297,6 +1301,10 @@ impl Engine {
             RoomEvent::Reconnecting => self.set(|s| s.conn = Conn::Reconnecting),
             RoomEvent::Reconnected => {
                 self.set(|s| s.conn = Conn::Connected);
+                // Стример после нашего обрыва мог забыть зрителей — повторяем «смотрю» (V9).
+                for id in self.watching.clone() {
+                    self.announce_watch(&id, true);
+                }
                 self.apply_mic();
                 self.apply_volumes();
                 self.refresh_peers(false);
@@ -2051,7 +2059,11 @@ impl Engine {
         }
         self.sync_subscriptions();
         self.publish_watching();
-        // Стримеру — для звука «зритель пришёл/ушёл» и счётчика зрителей.
+        self.announce_watch(identity, on);
+    }
+
+    /// Стримеру — для звука «зритель пришёл/ушёл» и счётчика зрителей. Повторяется после реконнекта (V9).
+    fn announce_watch(&self, identity: &str, on: bool) {
         if let Some((room, _)) = &self.room {
             let lp = room.local_participant();
             let packet = livekit::DataPacket {
