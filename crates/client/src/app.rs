@@ -170,6 +170,9 @@ pub struct App {
     ptt_rx: std_mpsc::Receiver<u32>,
     screen: Screen,
     boot_error: Option<String>,
+    /// Когда повторить запрос профиля при старте с сохранённой сессией (сервер был недоступен), и сколько попыток уже было.
+    boot_retry: Option<Instant>,
+    boot_attempts: u32,
     login: LoginForm,
     me: Option<User>,
     /// Серверы, раскладки, участники, голос (фаза 9.1).
@@ -392,6 +395,8 @@ impl App {
             ptt_rx,
             screen: if has_token { Screen::Boot } else { Screen::Login },
             boot_error: None,
+            boot_retry: None,
+            boot_attempts: 0,
             login,
             me: None,
             model: Default::default(),
@@ -581,6 +586,7 @@ impl App {
 
     fn fetch_me(&mut self) {
         self.boot_error = None;
+        self.boot_retry = None;
         let api = self.api.clone();
         self.spawn(async move { api.me().await }, Msg::Me);
     }
@@ -710,6 +716,7 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Me(Ok(user)) => {
+                    self.boot_attempts = 0;
                     self.set_me(user);
                     self.screen = Screen::Main;
                     self.fetch_channels();
@@ -722,6 +729,10 @@ impl App {
                         self.screen = Screen::Login;
                     } else {
                         self.boot_error = Some(e.message);
+                        // автоповтор с нарастающей паузой: 3, 6, 12, 30 с (и дальше 30 с)
+                        let wait = [3u64, 6, 12, 30][(self.boot_attempts as usize).min(3)];
+                        self.boot_attempts += 1;
+                        self.boot_retry = Some(Instant::now() + Duration::from_secs(wait));
                     }
                 }
                 Msg::ProfileField(i, res) => {
@@ -1043,6 +1054,15 @@ impl App {
     // ------------------------------------------------------------ экран входа
 
     fn ui_boot(&mut self, ui: &mut Ui) {
+        if self.boot_error.is_some()
+            && let Some(at) = self.boot_retry
+        {
+            if Instant::now() >= at {
+                self.fetch_me();
+            } else {
+                ui.ctx().request_repaint_after(at - Instant::now());
+            }
+        }
         egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
             let r = ui.max_rect();
             let area = Rect::from_center_size(r.center(), vec2(460.0, 320.0));
