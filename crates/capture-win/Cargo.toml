@@ -1,6 +1,6 @@
 [package]
 name = "capture-win"
-description = "Amadeus — захват окна/экрана на Windows (WGC) с конвертацией в I420"
+description = "Murmur — захват окна/экрана на Windows (WGC) с конвертацией в I420"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

@@ -16,7 +16,7 @@ path = "src/main.rs"
 # Название продукта — Murmur (редизайн 2026-11-19); exe — murmur.exe (с 0.3.4, раньше amadeus.exe); identifier и папка
 # настроек %APPDATA%\Amadeus — прежние (иначе пропадут вход и настройки).
 productName = "Murmur"
-identifier = "ru.steins-gate.amadeus"
+identifier = "ru.murmurchat.murmur"
 publisher = "Murmur"
 formats = ["nsis"]
 icons = ["assets/icon.ico"]
@@ -70,16 +70,16 @@ Section "-RenameExeToMurmur"
   run_done:
   IfFileExists "$SMPROGRAMS\Murmur\Murmur.lnk" 0 sm_done
   CreateShortcut "$SMPROGRAMS\Murmur\Murmur.lnk" "$INSTDIR\murmur.exe"
-  ApplicationID::Set "$SMPROGRAMS\Murmur\Murmur.lnk" "ru.steins-gate.amadeus"
+  ApplicationID::Set "$SMPROGRAMS\Murmur\Murmur.lnk" "ru.murmurchat.murmur"
   sm_done:
   IfFileExists "$DESKTOP\Amadeus.lnk" 0 dold_done
   Delete "$DESKTOP\Amadeus.lnk"
   CreateShortcut "$DESKTOP\Murmur.lnk" "$INSTDIR\murmur.exe"
-  ApplicationID::Set "$DESKTOP\Murmur.lnk" "ru.steins-gate.amadeus"
+  ApplicationID::Set "$DESKTOP\Murmur.lnk" "ru.murmurchat.murmur"
   dold_done:
   IfFileExists "$DESKTOP\Murmur.lnk" 0 d_done
   CreateShortcut "$DESKTOP\Murmur.lnk" "$INSTDIR\murmur.exe"
-  ApplicationID::Set "$DESKTOP\Murmur.lnk" "ru.steins-gate.amadeus"
+  ApplicationID::Set "$DESKTOP\Murmur.lnk" "ru.murmurchat.murmur"
   d_done:
 SectionEnd
 '''
@@ -131,7 +131,18 @@ unicode-segmentation = "1"
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.26"
 # Видео → GIF для профиля (Media Foundation; та же версия, что в capture-win).
-windows = { version = "0.62.2", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
+windows = { version = "0.62.2", features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    # уведомления: toast, число на значке в панели задач
+    "Foundation",
+    "Data_Xml_Dom",
+    "UI_Notifications",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_Input_KeyboardAndMouse",

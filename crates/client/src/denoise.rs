@@ -206,7 +206,7 @@ pub fn set_mode(mode: NoiseMode) {
     if !matches!(mode, NoiseMode::Light | NoiseMode::Neural) {
         return;
     }
-    let _ = std::thread::Builder::new().name("amadeus-denoise-init".into()).spawn(move || {
+    let _ = std::thread::Builder::new().name("murmur-denoise-init".into()).spawn(move || {
         let t0 = Instant::now();
         let Some(proc) = Processor::new(mode) else { return };
         log::info!("шумодав {mode:?} готов за {} мс", t0.elapsed().as_millis());
@@ -410,11 +410,11 @@ mod tests {
         10.0 * (a / b).log10()
     }
 
-    /// Сравнение на настоящей речи: AMADEUS_SPEECH_WAV=путь к моно 48 кГц 16 бит; рядом пишет *_out_*.wav.
+    /// Сравнение на настоящей речи: MURMUR_SPEECH_WAV=путь к моно 48 кГц 16 бит; рядом пишет *_out_*.wav.
     #[test]
     #[ignore]
     fn speech_report() {
-        let Ok(path) = std::env::var("AMADEUS_SPEECH_WAV") else { return };
+        let Ok(path) = std::env::var("MURMUR_SPEECH_WAV") else { return };
         // 2 с тишины в начале: там будет только шум — мера подавления.
         let mut clean = vec![0.0f32; 96_000];
         clean.extend(read_wav(&path));

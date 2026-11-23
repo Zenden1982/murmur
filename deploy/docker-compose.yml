@@ -1,4 +1,4 @@
-# Amadeus — серверная часть. Настройка — только через deploy/.env (см. .env.example).
+# Murmur — серверная часть. Настройка — только через deploy/.env (см. .env.example).
 # Запуск: sh deploy/up.sh   (render.sh + docker compose up -d)
 name: amadeus
 

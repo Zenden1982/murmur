@@ -1,4 +1,4 @@
-//! HTTP-клиент бэкенда Amadeus (типы — из `proto`).
+//! HTTP-клиент бэкенда Murmur (типы — из `proto`).
 
 use std::time::Duration;
 
@@ -90,16 +90,22 @@ impl std::fmt::Debug for Api {
 
 impl Api {
     pub fn new(base: &str, token: Option<String>) -> Self {
+        // имя компьютера — подпись сеанса в Настройки → Аккаунт
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(v) = std::env::var("COMPUTERNAME").unwrap_or_default().parse() {
+            headers.insert("x-murmur-device", v);
+        }
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(20))
-            .user_agent(concat!("Amadeus/", env!("CARGO_PKG_VERSION")))
+            .default_headers(headers)
+            .user_agent(concat!("Murmur/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client");
         let stream_http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(8))
             .read_timeout(STREAM_READ_TIMEOUT)
-            .user_agent(concat!("Amadeus/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("Murmur/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client");
         Self { http, stream_http, base: base.trim_end_matches('/').to_string(), token }
@@ -182,6 +188,28 @@ impl Api {
     /// «Выйти везде»: закрывает все сеансы этого человека, включая текущий.
     pub async fn logout_all(&self) -> ApiResult<()> {
         self.call::<(), _>(Method::POST, "/auth/logout-all", None).await
+    }
+
+    /// Мои сеансы входа.
+    pub async fn sessions(&self) -> ApiResult<Vec<proto::SessionInfo>> {
+        self.call::<(), _>(Method::GET, "/auth/sessions", None).await
+    }
+
+    /// Завершить другой сеанс.
+    pub async fn revoke_session(&self, id: &str) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/auth/sessions/{id}"), None).await
+    }
+
+    /// Смена пароля; остальные сеансы закрываются.
+    pub async fn change_password(&self, old: &str, new: &str) -> ApiResult<()> {
+        let body = proto::ChangePasswordRequest { old_password: old.to_string(), new_password: new.to_string() };
+        self.call(Method::POST, "/auth/password", Some(&body)).await
+    }
+
+    /// Удалить аккаунт (по паролю).
+    pub async fn delete_account(&self, password: &str) -> ApiResult<()> {
+        let body = proto::DeleteAccountRequest { password: password.to_string() };
+        self.call(Method::POST, "/auth/delete", Some(&body)).await
     }
 
     pub async fn me(&self) -> ApiResult<User> {

@@ -1,5 +1,5 @@
 //! Диагностический режим (сборка «с отладкой» для владельца): подробные логи трансляции раз в секунду.
-//! Включается фичей `diag` (`cargo build -p client --release --features diag`) или `AMADEUS_DIAG=1`.
+//! Включается фичей `diag` (`cargo build -p client --release --features diag`) или `MURMUR_DIAG=1`.
 
 use std::mem::size_of;
 use std::sync::OnceLock;
@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowText
 /// Включён ли диагностический режим.
 pub fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| cfg!(feature = "diag") || std::env::var("AMADEUS_DIAG").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| cfg!(feature = "diag") || std::env::var("MURMUR_DIAG").is_ok_and(|v| v == "1"))
 }
 
 const SAMPLE: i32 = 64;

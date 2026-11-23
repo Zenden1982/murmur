@@ -309,9 +309,9 @@ pub struct Started {
     pub encoder: String,
 }
 
-/// `AMADEUS_NO_HW=1` — принудительно программное кодирование (диагностика).
+/// `MURMUR_NO_HW=1` — принудительно программное кодирование (диагностика).
 pub fn hw_allowed() -> bool {
-    std::env::var_os("AMADEUS_NO_HW").is_none() && ENCODER_PREF.load(Ordering::Relaxed) != EncoderPref::Cpu as u8
+    std::env::var_os("MURMUR_NO_HW").is_none() && ENCODER_PREF.load(Ordering::Relaxed) != EncoderPref::Cpu as u8
 }
 
 /// Новый захват с новым источником видео: сначала видеокарта, если нельзя — процессор.
@@ -341,9 +341,9 @@ pub fn start(
     Ok(Started { capture: AnyCapture::Cpu(c), video, low: None, hw: false, encoder: "OpenH264 (процессор)".into() })
 }
 
-/// Экономный слой публикуется по умолчанию (зритель выбирает слой сам); `AMADEUS_NO_LOW=1` — выключить.
+/// Экономный слой публикуется по умолчанию (зритель выбирает слой сам); `MURMUR_NO_LOW=1` — выключить.
 pub fn low_allowed() -> bool {
-    !std::env::var("AMADEUS_NO_LOW").is_ok_and(|v| v == "1")
+    !std::env::var("MURMUR_NO_LOW").is_ok_and(|v| v == "1")
 }
 
 fn start_hw(

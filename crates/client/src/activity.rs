@@ -42,7 +42,7 @@ pub fn start(ctx: eframe::egui::Context) -> Detector {
     let (tx, rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
-    let _ = std::thread::Builder::new().name("amadeus-activity".into()).spawn(move || {
+    let _ = std::thread::Builder::new().name("murmur-activity".into()).spawn(move || {
         let known = known_games();
         let mut cur: Game = None;
         let mut first = true;

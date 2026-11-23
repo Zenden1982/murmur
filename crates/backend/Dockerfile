@@ -1,5 +1,5 @@
-# Бэкенд Amadeus. Сборка из корня репозитория:
-#   docker build -f crates/backend/Dockerfile -t amadeus/backend .
+# Бэкенд Murmur. Сборка из корня репозитория:
+#   docker build -f crates/backend/Dockerfile -t murmur/backend .
 # (или через deploy/docker-compose.yml, профиль backend). Прокси для сборки — --build-arg HTTP(S)_PROXY.
 
 ARG RUST_VERSION=1.100

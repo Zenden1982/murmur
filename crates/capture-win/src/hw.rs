@@ -37,11 +37,11 @@ const RING: usize = 4;
 /// Как часто повторять последний кадр, когда картинка стоит. Повтор нужен не только «для живости»: запрос ключевого кадра
 /// (PLI после потери) доходит до нас только вместе с очередным кадром через WebRTC, а приёмник замечает потерю хвоста
 /// кадра только по следующему пакету — поэтому редкий повтор (раньше 1 с) затягивал восстановление после потерь.
-/// Опыты: `AMADEUS_REPEAT_MS=N`.
+/// Опыты: `MURMUR_REPEAT_MS=N`.
 fn repeat_every() -> Duration {
     static V: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        let ms = std::env::var("AMADEUS_REPEAT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(250);
+        let ms = std::env::var("MURMUR_REPEAT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(250);
         Duration::from_millis(ms.clamp(50, 5000))
     })
 }
@@ -441,19 +441,19 @@ impl MfEncoder {
                     }
                 };
                 set(&CODECAPI_AVLowLatencyMode, variant_bool(true), "LowLatencyMode");
-                // Опыты (AMADEUS_ENC_RC=cbr|pcvbr|uvbr|ldvbr, AMADEUS_ENC_MAXQP=N): режим контроля битрейта и потолок QP.
+                // Опыты (MURMUR_ENC_RC=cbr|pcvbr|uvbr|ldvbr, MURMUR_ENC_MAXQP=N): режим контроля битрейта и потолок QP.
                 // CBR: только он следует цели WebRTC на ходу. VBR (LowDelay/PeakConstrained/Unconstrained) у NVIDIA MFT смену
                 // MeanBitRate после старта не применяет: при цели 12/4/2 Мбит/с одинаково ~1 Мбит/с и QP 46–50 в динамичных
-                // сценах (замер rcprobe 2026-11-21). Для опытов: AMADEUS_ENC_RC=ldvbr|pcvbr|uvbr, AMADEUS_ENC_MAXQP=N.
-                let rc = match std::env::var("AMADEUS_ENC_RC").as_deref() {
+                // сценах (замер rcprobe 2026-11-21). Для опытов: MURMUR_ENC_RC=ldvbr|pcvbr|uvbr, MURMUR_ENC_MAXQP=N.
+                let rc = match std::env::var("MURMUR_ENC_RC").as_deref() {
                     Ok("ldvbr") => eAVEncCommonRateControlMode_LowDelayVBR,
                     Ok("pcvbr") => eAVEncCommonRateControlMode_PeakConstrainedVBR,
                     Ok("uvbr") => eAVEncCommonRateControlMode_UnconstrainedVBR,
                     _ => eAVEncCommonRateControlMode_CBR,
                 };
                 set(&CODECAPI_AVEncCommonRateControlMode, variant_u32(rc.0 as u32), "RateControlMode");
-                if let Some(q) = std::env::var("AMADEUS_ENC_MAXQP").ok().and_then(|v| v.parse::<u32>().ok()) {
-                    log::info!("{name}: MaxQP из AMADEUS_ENC_MAXQP: {q}");
+                if let Some(q) = std::env::var("MURMUR_ENC_MAXQP").ok().and_then(|v| v.parse::<u32>().ok()) {
+                    log::info!("{name}: MaxQP из MURMUR_ENC_MAXQP: {q}");
                     set(&CODECAPI_AVEncVideoMaxQP, variant_u32(q), "MaxQP");
                 }
                 set(&CODECAPI_AVEncCommonMaxBitRate, variant_u32(start_bitrate.saturating_mul(3) / 2), "MaxBitRate");

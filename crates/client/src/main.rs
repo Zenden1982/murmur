@@ -1,4 +1,4 @@
-//! Amadeus — голосовой чат для своих. Десктоп-клиент (Windows).
+//! Murmur — голосовой чат для своих. Десктоп-клиент (Windows).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod activity;
@@ -47,6 +47,7 @@ mod sounds;
 mod stream;
 mod theme;
 mod tray;
+mod notify;
 mod unread;
 mod update;
 mod video;
@@ -65,7 +66,7 @@ fn main() -> eframe::Result {
             let _ = std::fs::create_dir_all(dir);
         }
         if std::fs::metadata(&p).is_ok_and(|m| m.len() > 2_000_000) {
-            let _ = std::fs::rename(&p, p.with_file_name("amadeus.old.log"));
+            let _ = std::fs::rename(&p, p.with_file_name("murmur.old.log"));
         }
         if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
             logger.target(env_logger::Target::Pipe(Box::new(f)));
@@ -88,14 +89,14 @@ fn main() -> eframe::Result {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
-        .thread_name("amadeus-rt")
+        .thread_name("murmur-rt")
         .build()
         .expect("tokio runtime");
     #[allow(unused_mut)]
     let mut viewport = eframe::egui::ViewportBuilder::default();
-    // Отладка (тестовые окна на втором мониторе владельца): AMADEUS_WINDOW_POS="x,y" — где открыть окно, без фокуса.
+    // Отладка (тестовые окна на втором мониторе владельца): MURMUR_WINDOW_POS="x,y" — где открыть окно, без фокуса.
     #[cfg(debug_assertions)]
-    if let Some((x, y)) = std::env::var("AMADEUS_WINDOW_POS").ok().and_then(|v| {
+    if let Some((x, y)) = std::env::var("MURMUR_WINDOW_POS").ok().and_then(|v| {
         let (x, y) = v.split_once(',')?;
         Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
     }) {

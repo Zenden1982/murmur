@@ -8,7 +8,7 @@ use backend::{AppState, ClientAddr, config::Config, proxy_protocol::ProxyProtoco
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-/// Бэкенд Amadeus.
+/// Бэкенд Murmur.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {

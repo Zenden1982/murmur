@@ -1,7 +1,7 @@
 ﻿<#
-  Приёмка бэкенда Amadeus: вход -> канал -> токен LiveKit.
+  Приёмка бэкенда Murmur: вход -> канал -> токен LiveKit.
   Запуск:  powershell -ExecutionPolicy Bypass -File scripts\smoke-api.ps1 -Name <ник> [-Api https://api.example.com] [-Invite]
-  Пароль спрашивается в консоли (или из $env:AMADEUS_PASSWORD). Токен LiveKit копируется в буфер обмена.
+  Пароль спрашивается в консоли (или из $env:MURMUR_PASSWORD). Токен LiveKit копируется в буфер обмена.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Name,
@@ -30,7 +30,7 @@ function Call([string]$Method, [string]$Path, $Body = $null, [string]$Token = $n
 $health = Call GET '/health'
 Write-Host "1. /health: ok=$($health.ok) version=$($health.version)" -ForegroundColor Green
 
-$pw = $env:AMADEUS_PASSWORD
+$pw = $env:MURMUR_PASSWORD
 if (-not $pw) {
     $sec = Read-Host "Пароль для $Name" -AsSecureString
     $pw = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))

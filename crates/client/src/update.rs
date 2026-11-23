@@ -33,7 +33,7 @@ pub struct Updater {
     api: Api,
     tx: std_mpsc::Sender<Ev>,
     rx: std_mpsc::Receiver<Ev>,
-    /// Проверять самим (в release; в debug — только с AMADEUS_UPDATE_CHECK=1).
+    /// Проверять самим (в release; в debug — только с MURMUR_UPDATE_CHECK=1).
     auto: bool,
     next_check: Instant,
     pub checking: bool,
@@ -52,7 +52,7 @@ impl Updater {
     pub fn new(rt: tokio::runtime::Handle, ctx: egui::Context, api: Api) -> Self {
         cleanup_old();
         let (tx, rx) = std_mpsc::channel();
-        let auto = !cfg!(debug_assertions) || std::env::var_os("AMADEUS_UPDATE_CHECK").is_some();
+        let auto = !cfg!(debug_assertions) || std::env::var_os("MURMUR_UPDATE_CHECK").is_some();
         Self {
             rt,
             ctx,
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn swap_replaces_and_keeps_old() {
-        let dir = std::env::temp_dir().join(format!("amadeus-swap-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("murmur-swap-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("murmur.exe");

@@ -33,10 +33,10 @@ impl Window {
 
 /// Имя «метки» копии приложения: своя для каждого каталога настроек (второй тестовый клиент на том же ПК — отдельно).
 fn instance_tag() -> String {
-    let dir = std::env::var("AMADEUS_CONFIG_DIR").unwrap_or_default();
+    let dir = std::env::var("MURMUR_CONFIG_DIR").unwrap_or_default();
     // FNV-1a: стабильно между запусками (DefaultHasher — нет)
     let h = dir.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
-    format!("Amadeus.Instance.{h:016x}")
+    format!("Murmur.Instance.{h:016x}")
 }
 
 #[cfg(windows)]
@@ -416,6 +416,6 @@ mod tests {
     #[test]
     fn instance_tag_is_stable() {
         assert_eq!(instance_tag(), instance_tag());
-        assert!(instance_tag().starts_with("Amadeus.Instance."));
+        assert!(instance_tag().starts_with("Murmur.Instance."));
     }
 }

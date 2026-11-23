@@ -177,7 +177,7 @@ pub struct Chat {
     /// Подсказка :кодов: — выбранная строка и скрытый по Esc запрос.
     suggest_sel: usize,
     suggest_hidden: Option<String>,
-    /// Отладка: шаги AMADEUS_CHAT_SCRIPT и время последнего шага.
+    /// Отладка: шаги MURMUR_CHAT_SCRIPT и время последнего шага.
     #[cfg(debug_assertions)]
     script: (std::collections::VecDeque<String>, f64),
     #[cfg(debug_assertions)]
@@ -220,7 +220,7 @@ impl Chat {
             suggest_hidden: None,
             #[cfg(debug_assertions)]
             script: (
-                std::env::var("AMADEUS_CHAT_SCRIPT").map(|s| s.split('|').map(str::to_string).collect()).unwrap_or_default(),
+                std::env::var("MURMUR_CHAT_SCRIPT").map(|s| s.split('|').map(str::to_string).collect()).unwrap_or_default(),
                 0.0,
             ),
             #[cfg(debug_assertions)]
@@ -228,7 +228,7 @@ impl Chat {
         }
     }
 
-    /// Отладка без мыши и клавиатуры (debug): AMADEUS_CHAT_SCRIPT="wait|send:текст|paste|top|lightbox|close|send"
+    /// Отладка без мыши и клавиатуры (debug): MURMUR_CHAT_SCRIPT="wait|send:текст|paste|top|lightbox|close|send"
     /// — по шагу раз в 2 с: отправить, вставить из буфера, прокрутить ленту к началу, открыть/закрыть последнюю картинку.
     #[cfg(debug_assertions)]
     fn debug_script(&mut self, ui: &Ui, channel: i64) {
@@ -242,7 +242,7 @@ impl Chat {
         }
         self.script.1 = now;
         let step = self.script.0.pop_front().unwrap_or_default();
-        log::info!("AMADEUS_CHAT_SCRIPT: {step}");
+        log::info!("MURMUR_CHAT_SCRIPT: {step}");
         match step.split_once(':').unwrap_or((step.as_str(), "")) {
             ("send", text) => {
                 if !text.is_empty() {
@@ -275,7 +275,7 @@ impl Chat {
     }
 
     /// Новый сервер/сессия: всё забываем, старые задачи пишут в закрытый канал.
-    /// Отладка (AMADEUS_DEMO): готовая лента без сервера.
+    /// Отладка (MURMUR_DEMO): готовая лента без сервера.
     #[cfg(debug_assertions)]
     pub fn demo_seed(&mut self, channel: i64, msgs: Vec<Message>) {
         let log = self.logs.entry(channel).or_default();
@@ -738,7 +738,7 @@ impl Chat {
                     let Some(path) = rfd::FileDialog::new()
                         .set_title("Сохранить картинку")
                         .set_parent(&crate::desktop::main_window())
-                        .set_file_name(format!("amadeus-{id}.{ext}"))
+                        .set_file_name(format!("murmur-{id}.{ext}"))
                         .add_filter("Картинка", &[ext])
                         .save_file()
                     else {

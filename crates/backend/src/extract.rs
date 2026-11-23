@@ -51,6 +51,14 @@ impl FromRequestParts<AppState> for AuthUser {
         .fetch_optional(&state.inner.db)
         .await?;
         let (id, name, is_admin) = row.ok_or(AppError::Unauthorized)?;
+        // «последняя активность» — не чаще раза в минуту на сеанс
+        let t = now();
+        sqlx::query("UPDATE sessions SET last_seen = ? WHERE token_hash = ? AND last_seen < ?")
+            .bind(t)
+            .bind(&token_hash)
+            .bind(t - 60)
+            .execute(&state.inner.db)
+            .await?;
         Ok(AuthUser {
             id,
             name,

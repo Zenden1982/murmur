@@ -7,15 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::stream::Preset;
 
-/// Адрес сервера по умолчанию (переопределяется при сборке: `AMADEUS_SERVER=https://… cargo build`).
-pub const DEFAULT_SERVER: &str = match option_env!("AMADEUS_SERVER") {
+/// Адрес сервера по умолчанию (переопределяется при сборке: `MURMUR_SERVER=https://… cargo build`).
+pub const DEFAULT_SERVER: &str = match option_env!("MURMUR_SERVER") {
     Some(s) => s,
     None => "https://api.murmurchat.ru",
 };
-
-/// Прежние адреса сервера по умолчанию: сохранённый в settings.json такой адрес при загрузке меняется на [`DEFAULT_SERVER`]
-/// (переезд на murmurchat.ru, 2026-11-22).
-const OLD_DEFAULT_SERVERS: &[&str] = &["https://api.steins-gate.ru"];
 
 /// Клавиша рации по умолчанию — V (виртуальный код Windows).
 pub const DEFAULT_PTT_KEY: u32 = 0x56;
@@ -126,6 +122,16 @@ pub struct Settings {
     pub hotkeys: crate::hotkeys::Bindings,
     /// Звук при переключении горячими клавишами.
     pub hotkey_sounds: bool,
+    /// Уведомлять: о личных сообщениях, об @упоминаниях, о входящих звонках.
+    pub notify_dm: bool,
+    pub notify_mention: bool,
+    pub notify_call: bool,
+    /// Способы: toast Windows (окно не в фокусе), мигание в панели задач, число на значке.
+    pub notify_toast: bool,
+    pub notify_flash: bool,
+    pub notify_badge: bool,
+    /// «Не беспокоить»: без звуков и toast.
+    pub dnd: crate::notify::Dnd,
     /// Громкость звуков интерфейса, 0–100.
     pub sounds_volume: u8,
     /// Громкость участников по id пользователя (identity), 1.0 = 100%.
@@ -206,6 +212,13 @@ impl Default for Settings {
             sounds: true,
             hotkeys: Default::default(),
             hotkey_sounds: true,
+            notify_dm: true,
+            notify_mention: true,
+            notify_call: true,
+            notify_toast: true,
+            notify_flash: true,
+            notify_badge: true,
+            dnd: Default::default(),
             sounds_volume: 60,
             user_volume: HashMap::new(),
             user_muted: HashMap::new(),
@@ -242,9 +255,9 @@ impl Default for Settings {
     }
 }
 
-/// Каталог настроек: `AMADEUS_CONFIG_DIR` (например, второй клиент на том же ПК) или %APPDATA%\\Amadeus.
+/// Каталог настроек: `MURMUR_CONFIG_DIR` (например, второй клиент на том же ПК) или %APPDATA%\\Amadeus.
 fn path() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("AMADEUS_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os("MURMUR_CONFIG_DIR") {
         return Some(PathBuf::from(dir).join("settings.json"));
     }
     directories::ProjectDirs::from("", "", "Amadeus").map(|d| d.config_dir().join("settings.json"))
@@ -252,7 +265,7 @@ fn path() -> Option<PathBuf> {
 
 /// Файл лога рядом с настройками (при старте больше 2 МБ — начинается заново).
 pub fn log_path() -> Option<PathBuf> {
-    path().map(|p| p.with_file_name("amadeus.log"))
+    path().map(|p| p.with_file_name("murmur.log"))
 }
 
 impl Settings {
@@ -269,10 +282,6 @@ impl Settings {
                     }
                     Self::lenient(&bytes)
                 });
-                if s.migrate_server() {
-                    log::info!("адрес сервера заменён на {}", s.server_url);
-                    s.save();
-                }
                 s
             }
             Err(_) => Self::default(),
@@ -298,16 +307,6 @@ impl Settings {
             }
         }
         serde_json::from_value(serde_json::Value::Object(ok)).unwrap_or_default()
-    }
-
-    /// Старый адрес сервера по умолчанию → новый. true — если поменяли.
-    fn migrate_server(&mut self) -> bool {
-        let cur = self.server_url.trim().trim_end_matches('/');
-        if OLD_DEFAULT_SERVERS.iter().any(|o| o.eq_ignore_ascii_case(cur)) && cur != DEFAULT_SERVER {
-            self.server_url = DEFAULT_SERVER.to_string();
-            return true;
-        }
-        false
     }
 
     pub fn save(&self) {
@@ -388,16 +387,6 @@ mod tests {
     fn old_settings_default_voice() {
         let s: Settings = serde_json::from_str(r#"{"sounds":true}"#).unwrap();
         assert_eq!((s.mic_volume, s.output_volume, s.vad_auto, s.vad_threshold), (1.0, 1.0, true, crate::gate::DEFAULT_THRESHOLD));
-    }
-
-    #[test]
-    fn old_server_migrates() {
-        let mut s: Settings = serde_json::from_str(r#"{"server_url":"https://api.steins-gate.ru/"}"#).unwrap();
-        assert!(s.migrate_server());
-        assert_eq!(s.server_url, DEFAULT_SERVER);
-        let mut own: Settings = serde_json::from_str(r#"{"server_url":"https://chat.example.com"}"#).unwrap();
-        assert!(!own.migrate_server());
-        assert_eq!(own.server_url, "https://chat.example.com");
     }
 
     #[test]

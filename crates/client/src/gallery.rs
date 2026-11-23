@@ -1,4 +1,4 @@
-//! Витрина набора деталей (debug, `AMADEUS_GALLERY=1`): все детали в одном окне, тема переключается сверху.
+//! Витрина набора деталей (debug, `MURMUR_GALLERY=1`): все детали в одном окне, тема переключается сверху.
 
 use eframe::egui::{self, CornerRadius, Frame, Margin, Rect, RichText, Sense, Ui, vec2};
 use egui_phosphor::regular as ph;
@@ -44,9 +44,9 @@ pub fn ui(ui: &mut Ui, s: &mut GalleryState, theme: &mut ThemePref) {
     }
     egui::CentralPanel::default().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::same(24))).show(ui, |ui| {
         let mut area = egui::ScrollArea::vertical();
-        // Отладка: AMADEUS_GALLERY=2 — сразу прокрутить к нижней половине (для скриншота).
-        // AMADEUS_GALLERY=<число больше 2> — прокрутить на столько px.
-        match std::env::var("AMADEUS_GALLERY").ok().and_then(|v| v.parse::<f32>().ok()) {
+        // Отладка: MURMUR_GALLERY=2 — сразу прокрутить к нижней половине (для скриншота).
+        // MURMUR_GALLERY=<число больше 2> — прокрутить на столько px.
+        match std::env::var("MURMUR_GALLERY").ok().and_then(|v| v.parse::<f32>().ok()) {
             Some(2.0) => area = area.vertical_scroll_offset(1000.0),
             Some(px) if px > 2.0 => area = area.vertical_scroll_offset(px),
             _ => {}

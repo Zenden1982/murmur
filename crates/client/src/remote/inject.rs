@@ -290,7 +290,7 @@ impl Injector for SendInputInjector {
     }
 }
 
-/// Стенд (`AMADEUS_RC_DRYRUN=1`): вместо ввода — строки в журнал. Настоящий курсор не двигается.
+/// Стенд (`MURMUR_RC_DRYRUN=1`): вместо ввода — строки в журнал. Настоящий курсор не двигается.
 #[derive(Default, Clone)]
 pub struct DryRun {
     n: Arc<AtomicUsize>,
@@ -324,7 +324,7 @@ impl Injector for DryRun {
 }
 
 pub fn dry_run() -> bool {
-    std::env::var("AMADEUS_RC_DRYRUN").is_ok_and(|v| v == "1")
+    std::env::var("MURMUR_RC_DRYRUN").is_ok_and(|v| v == "1")
 }
 
 pub fn injector() -> Box<dyn Injector> {

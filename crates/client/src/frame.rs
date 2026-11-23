@@ -338,11 +338,11 @@ fn cat_pose(ctx: &egui::Context) -> t::MarkPose {
     pose
 }
 
-/// Отладка вёрстки (только debug): AMADEUS_FRAME_HOVER=min|max|close — кнопка как при наведении.
+/// Отладка вёрстки (только debug): MURMUR_FRAME_HOVER=min|max|close — кнопка как при наведении.
 fn forced_hover() -> Option<Btn> {
     #[cfg(debug_assertions)]
     {
-        match std::env::var("AMADEUS_FRAME_HOVER").ok()?.as_str() {
+        match std::env::var("MURMUR_FRAME_HOVER").ok()?.as_str() {
             "min" => Some(Btn::Min),
             "max" => Some(Btn::Max),
             "close" => Some(Btn::Close),
@@ -353,9 +353,9 @@ fn forced_hover() -> Option<Btn> {
     None
 }
 
-/// Отладка (только debug): AMADEUS_FRAME_FOCUS=1 — рисовать как активное окно (для скриншотов из фона).
+/// Отладка (только debug): MURMUR_FRAME_FOCUS=1 — рисовать как активное окно (для скриншотов из фона).
 fn forced_focus() -> bool {
-    cfg!(debug_assertions) && std::env::var_os("AMADEUS_FRAME_FOCUS").is_some()
+    cfg!(debug_assertions) && std::env::var_os("MURMUR_FRAME_FOCUS").is_some()
 }
 
 /// Цвета кнопки рамки: `lit` 0..1 — наведение. «Закрыть» — красная подложка и белый значок.

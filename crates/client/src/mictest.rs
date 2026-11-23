@@ -89,7 +89,7 @@ pub fn start(
     let error = Arc::new(Mutex::new(None));
     let (input_name, output_name) = (input_name.map(str::to_owned), output_name.map(str::to_owned));
     let (ready2, error2) = (ready.clone(), error.clone());
-    let spawned = std::thread::Builder::new().name("amadeus-mictest".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name("murmur-mictest".into()).spawn(move || {
         let t0 = std::time::Instant::now();
         match open(input_name.as_deref(), output_name.as_deref(), noise, agc, playback, level, error2.clone()) {
             Ok(streams) => {

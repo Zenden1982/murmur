@@ -450,7 +450,7 @@ async fn join_issues_valid_livekit_token() {
 
 #[tokio::test]
 async fn backup_makes_consistent_copy() {
-    let dir = std::env::temp_dir().join(format!("amadeus-backup-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("murmur-backup-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let src = dir.join("src.db");
     let url = format!("sqlite://{}", src.to_str().unwrap().replace('\\', "/"));
@@ -463,7 +463,7 @@ async fn backup_makes_consistent_copy() {
     backend::backup(&pool, &out).await.unwrap();
     let copy_url = format!("sqlite://{}", out.to_str().unwrap().replace('\\', "/"));
     let copy = backend::connect(&copy_url).await.unwrap();
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(&copy).await.unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id > 0").fetch_one(&copy).await.unwrap();
     assert_eq!(n, 2);
     copy.close().await;
     pool.close().await;
@@ -859,14 +859,14 @@ async fn releases_version_and_download() {
 
     let dir = t.uploads.join("releases");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("amadeus-0.2.0.exe"), b"MZ-new-client").unwrap();
+    std::fs::write(dir.join("murmur-0.2.0.exe"), b"MZ-new-client").unwrap();
     let info = json!({
         "version": "0.2.0",
         "notes": "Трей и автообновление",
-        "file": "amadeus-0.2.0.exe",
+        "file": "murmur-0.2.0.exe",
         "sha256": "0".repeat(64),
         "size": 13,
-        "installer": "amadeus-setup-0.2.0.exe"
+        "installer": "murmur-setup-0.2.0.exe"
     });
     std::fs::write(dir.join("latest.json"), info.to_string()).unwrap();
 
@@ -878,13 +878,13 @@ async fn releases_version_and_download() {
     assert_eq!(got.version, "0.2.0");
     assert_eq!(got.size, 13);
 
-    let (st, _, _, bytes) = t.call_raw(Method::GET, "/download/amadeus-0.2.0.exe", None, vec![]).await;
+    let (st, _, _, bytes) = t.call_raw(Method::GET, "/download/murmur-0.2.0.exe", None, vec![]).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(bytes, b"MZ-new-client");
 
     let (st, _, headers, _) = t.call_raw(Method::GET, "/get", None, vec![]).await;
     assert_eq!(st, StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(headers[header::LOCATION], "download/amadeus-setup-0.2.0.exe");
+    assert_eq!(headers[header::LOCATION], "download/murmur-setup-0.2.0.exe");
 
     // наружу из папки не выйти
     for bad in ["/download/../api.rs", "/download/..%2F..%2FCargo.toml", "/download/missing.exe"] {

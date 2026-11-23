@@ -236,7 +236,7 @@ pub struct StreamInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioStatus {
     Off,
-    /// Захватывается: «звук приложения» / «весь звук, кроме Amadeus».
+    /// Захватывается: «звук приложения» / «весь звук, кроме Murmur».
     On(&'static str),
     Failed(String),
 }
@@ -387,7 +387,7 @@ pub fn spawn(
         counters: Default::default(),
         metrics_at: None,
         dump_stats: false,
-        force_relay: std::env::var("AMADEUS_FORCE_RELAY").is_ok_and(|v| v == "1"),
+        force_relay: std::env::var("MURMUR_FORCE_RELAY").is_ok_and(|v| v == "1"),
         pause_sent: None,
         viewers: HashSet::new(),
         rc: RcEngine::new(hook_tx),
@@ -454,7 +454,7 @@ struct Engine {
     /// Время прошлого опроса для метрик (интервал для скоростей).
     metrics_at: Option<Instant>,
     dump_stats: bool,
-    /// `AMADEUS_FORCE_RELAY=1`: только через TURN (проверка запасного пути).
+    /// `MURMUR_FORCE_RELAY=1`: только через TURN (проверка запасного пути).
     force_relay: bool,
     /// Очередь команд: живёт в движке, чтобы вход в канал мог принимать «Отключиться» (см. `join`).
     rx: Option<mpsc::UnboundedReceiver<Cmd>>,
@@ -604,7 +604,7 @@ impl Engine {
             return; // предыдущее перечисление ещё не вернулось
         }
         let (state, repaint) = (self.state.clone(), self.repaint.clone());
-        let spawned = std::thread::Builder::new().name("amadeus-devices".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name("murmur-devices".into()).spawn(move || {
             // Флаг снимается и при панике внутри драйвера (V17).
             struct BusyGuard(&'static std::sync::atomic::AtomicBool);
             impl Drop for BusyGuard {
@@ -1027,7 +1027,7 @@ impl Engine {
         opts.adaptive_stream = true;
         opts.dynacast = true;
         if force_relay {
-            log::warn!("AMADEUS_FORCE_RELAY=1: подключение только через TURN");
+            log::warn!("MURMUR_FORCE_RELAY=1: подключение только через TURN");
             opts.rtc_config.ice_transport_type = livekit::webrtc::prelude::IceTransportsType::Relay;
         }
         let connect = Room::connect(&join.livekit_url, &join.livekit_token, opts);

@@ -1,7 +1,7 @@
 //! Опыт: как аппаратный энкодер держит битрейт и QP на живом окне. 1440p60, старт 2,5 Мбит/с, через 1 с — запрос
 //! цели (по умолчанию 12 Мбит/с), как это делает WebRTC. Раз в секунду: кадры, кбит/с, средний QP.
 //! cargo run -p capture-win --example rcprobe --release -- <подстрока заголовка окна> [секунд] [цель кбит/с]
-//! Режим: AMADEUS_ENC_RC=cbr|pcvbr|uvbr (по умолчанию LowDelayVBR), AMADEUS_ENC_MAXQP=N.
+//! Режим: MURMUR_ENC_RC=cbr|pcvbr|uvbr (по умолчанию LowDelayVBR), MURMUR_ENC_MAXQP=N.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +20,7 @@ struct Sink {
     parser: Mutex<QpParser>,
     want: AtomicU32,
     sent: AtomicBool,
-    /// Запрос ключевого кадра (AMADEUS_PROBE_KEY_EVERY=N — раз в N с; размер и задержка — в строках «ДИАГ ключевой кадр»).
+    /// Запрос ключевого кадра (MURMUR_PROBE_KEY_EVERY=N — раз в N с; размер и задержка — в строках «ДИАГ ключевой кадр»).
     key: AtomicBool,
 }
 
@@ -75,7 +75,7 @@ fn main() {
         sent: AtomicBool::new(false),
         key: AtomicBool::new(false),
     });
-    let key_every: u64 = std::env::var("AMADEUS_PROBE_KEY_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let key_every: u64 = std::env::var("MURMUR_PROBE_KEY_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let cfg = CaptureConfig { max_width: 2560, max_height: 1440, fps: 60 };
     let cap = HwCapture::start(src.id, cfg, 12_000_000, sink.clone()).expect("старт");
     println!("энкодер «{}», {:?}", cap.encoder_name, cap.size);

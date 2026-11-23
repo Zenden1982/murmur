@@ -55,7 +55,7 @@ async fn setup_inner(limit: u32, upstream: Option<backend::releases::Upstream>) 
     };
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let uploads = std::env::temp_dir().join(format!(
-        "amadeus-test-uploads-{}-{}",
+        "murmur-test-uploads-{}-{}",
         std::process::id(),
         N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));

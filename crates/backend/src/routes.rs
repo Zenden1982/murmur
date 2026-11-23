@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{delete, get, post},
 };
 use proto::{
@@ -10,7 +10,7 @@ use proto::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    AppState, SESSION_TTL, channels, chat, dm, events, friends, images, invites, profile, releases, servers, voice,
+    AppState, SESSION_TTL, account, channels, chat, dm, events, friends, images, invites, profile, releases, servers, voice,
     db::{self},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
@@ -30,6 +30,10 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
         .route("/auth/logout-all", post(logout_all))
+        .route("/auth/sessions", get(account::list_sessions))
+        .route("/auth/sessions/{id}", delete(account::revoke_session))
+        .route("/auth/password", post(account::change_password))
+        .route("/auth/delete", post(account::delete_account))
         .route("/me", get(profile::me).patch(profile::update))
         .route(
             "/me/avatar",
@@ -113,16 +117,27 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-async fn new_session(state: &AppState, user: User) -> AppResult<AuthResponse> {
+/// Название устройства: заголовок клиента X-Murmur-Device, иначе User-Agent; без управляющих символов, до 60 знаков.
+fn device_name(headers: &HeaderMap) -> String {
+    let raw = ["x-murmur-device", "user-agent"]
+        .iter()
+        .find_map(|h| headers.get(*h).and_then(|v| v.to_str().ok()).filter(|s| !s.trim().is_empty()))
+        .unwrap_or("");
+    raw.chars().filter(|c| !c.is_control()).take(60).collect::<String>().trim().to_string()
+}
+
+async fn new_session(state: &AppState, user: User, device: &str) -> AppResult<AuthResponse> {
     let token = security::new_session_token();
     let expires_at = now() + SESSION_TTL.as_secs() as i64;
     sqlx::query(
-        "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO sessions (token_hash, user_id, created_at, expires_at, device, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(security::token_hash(&token))
     .bind(user.id)
     .bind(now())
     .bind(expires_at)
+    .bind(device)
+    .bind(now())
     .execute(&state.inner.db)
     .await?;
     Ok(AuthResponse {
@@ -148,7 +163,7 @@ pub(crate) fn limiter_key(ip: std::net::IpAddr) -> std::net::IpAddr {
     }
 }
 
-fn rate_limit(state: &AppState, ip: std::net::IpAddr) -> AppResult<()> {
+pub(crate) fn rate_limit(state: &AppState, ip: std::net::IpAddr) -> AppResult<()> {
     let ip = limiter_key(ip);
     state
         .inner
@@ -163,6 +178,7 @@ fn rate_limit(state: &AppState, ip: std::net::IpAddr) -> AppResult<()> {
 async fn register(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    headers: HeaderMap,
     ApiJson(req): ApiJson<RegisterRequest>,
 ) -> AppResult<(StatusCode, Json<AuthResponse>)> {
     rate_limit(&state, ip)?;
@@ -205,6 +221,7 @@ async fn register(
     let resp = new_session(
         &state,
         profile::load_user(&state.inner.db, id).await?,
+        &device_name(&headers),
     )
     .await?;
     Ok((StatusCode::CREATED, Json(resp)))
@@ -213,6 +230,7 @@ async fn register(
 async fn login(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    headers: HeaderMap,
     ApiJson(req): ApiJson<LoginRequest>,
 ) -> AppResult<Json<AuthResponse>> {
     rate_limit(&state, ip)?;
@@ -236,7 +254,7 @@ async fn login(
         .execute(&state.inner.db)
         .await?;
     Ok(Json(
-        new_session(&state, profile::load_user(&state.inner.db, id).await?).await?,
+        new_session(&state, profile::load_user(&state.inner.db, id).await?, &device_name(&headers)).await?,
     ))
 }
 

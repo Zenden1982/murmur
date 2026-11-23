@@ -1,4 +1,4 @@
-//! Общие типы HTTP API Amadeus (бэкенд ↔ клиент).
+//! Общие типы HTTP API Murmur (бэкенд ↔ клиент).
 //!
 //! Все тела запросов/ответов — JSON. Авторизация — заголовок `Authorization: Bearer <session token>`.
 
@@ -214,6 +214,31 @@ pub struct RegisterRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginRequest {
     pub name: String,
+    pub password: String,
+}
+
+/// Сеанс входа (Настройки → Аккаунт).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// Короткий id для завершения сеанса.
+    pub id: String,
+    /// Устройство (имя компьютера из клиента или User-Agent); пусто у старых сеансов.
+    pub device: String,
+    pub created_at: i64,
+    /// Последняя активность, unix-секунды.
+    pub last_seen: i64,
+    /// Этот самый сеанс.
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteAccountRequest {
     pub password: String,
 }
 
@@ -920,10 +945,10 @@ mod tests {
         let mut r = ReleaseInfo {
             version: "0.2.0".into(),
             notes: String::new(),
-            file: "amadeus-0.2.0.exe".into(),
+            file: "murmur-0.2.0.exe".into(),
             sha256: "a".repeat(64),
             size: 1,
-            installer: Some("amadeus-setup-0.2.0.exe".into()),
+            installer: Some("murmur-setup-0.2.0.exe".into()),
             min_server: None,
             sig: None,
         };

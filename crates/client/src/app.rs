@@ -59,6 +59,11 @@ enum Msg {
     Me(ApiResult<User>),
     /// Ответ «выйти везде».
     LogoutAll(Result<(), String>),
+    /// Аккаунт: сеансы, смена пароля, завершение сеанса, удаление.
+    Sessions(Result<Vec<proto::SessionInfo>, String>),
+    PasswordChanged(Result<(), String>),
+    SessionRevoked(Result<(), String>),
+    AccountDeleted(Result<(), String>),
     Auth(ApiResult<AuthResponse>),
     /// Ответ входа для уже сменённого адреса сервера — только снять «занято».
     AuthStale,
@@ -100,6 +105,32 @@ enum View {
     Friends,
 }
 
+#[derive(Default, Clone)]
+struct PwForm {
+    old: String,
+    new: String,
+    again: String,
+    busy: bool,
+    error: Option<String>,
+}
+
+#[derive(Default, Clone)]
+struct DelForm {
+    password: String,
+    busy: bool,
+    error: Option<String>,
+}
+
+/// «5 мин назад», «2 ч назад», «3 дн назад».
+fn ago(secs: i64) -> String {
+    match secs {
+        s if s < 90 => "только что".into(),
+        s if s < 3600 => format!("{} мин назад", s / 60),
+        s if s < 86_400 => format!("{} ч назад", s / 3600),
+        s => format!("{} дн назад", s / 86_400),
+    }
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Login,
@@ -135,12 +166,12 @@ impl SetTab {
 /// (раздел, группа, название, подпись, слова для поиска — строки раздела, в нижнем регистре).
 const SET_TABS: [(SetTab, &str, &str, &str, &str); 7] = [
     (SetTab::Profile, "ПОЛЬЗОВАТЕЛЬ", "Профиль", "Как вас видят другие", "аватар имя отображаемое о себе активность игра личные сообщения"),
-    (SetTab::Account, "ПОЛЬЗОВАТЕЛЬ", "Аккаунт", "Логин, сервер и вход", "логин сервер пароль сеансы выйти"),
+    (SetTab::Account, "ПОЛЬЗОВАТЕЛЬ", "Аккаунт", "Логин, пароль, сеансы и удаление", "логин сервер пароль сеансы выйти"),
     (SetTab::Voice, "ПРИЛОЖЕНИЕ", "Голос и видео", "Устройства, микрофон и шумоподавление", "микрофон вывод звука наушники проверка рация голосом порог чувствительность шумоподавление эхоподавление громкость"),
     (SetTab::Stream, "ПРИЛОЖЕНИЕ", "Стрим экрана", "Качество, кодировщик, звук и окно в окне", "трансляция качество разрешение кадры звук"),
     (SetTab::Hotkeys, "ПРИЛОЖЕНИЕ", "Горячие клавиши", "Работают, даже когда окно свёрнуто", "клавиша рация сочетание"),
     (SetTab::Look, "ПРИЛОЖЕНИЕ", "Внешний вид", "Тема, анимации и звуки интерфейса", "тема тёмная светлая анимации индикатор речи пинг плитки кот звуки"),
-    (SetTab::Notify, "ПРИЛОЖЕНИЕ", "Уведомления", "Трей, автозапуск и обновления", "трей автозапуск windows обновления версия"),
+    (SetTab::Notify, "ПРИЛОЖЕНИЕ", "Уведомления", "Сообщения, звонки, трей и обновления", "уведомления toast мигание значок не беспокоить упоминания звонок трей автозапуск windows обновления версия"),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -217,6 +248,12 @@ pub struct App {
     set_tab: SetTab,
     /// Окно «Выйти на всех устройствах» в настройках аккаунта: (идёт запрос, ошибка).
     logout_all: Option<(bool, Option<String>)>,
+    /// Настройки → Аккаунт: сеансы и формы смены пароля / удаления.
+    sessions: Option<Vec<proto::SessionInfo>>,
+    sessions_loading: bool,
+    sessions_error: Option<String>,
+    pw_form: Option<PwForm>,
+    del_form: Option<DelForm>,
     set_query: String,
     /// Отладочный оверлей метрик (F3).
     metrics_open: bool,
@@ -286,6 +323,14 @@ pub struct App {
     ring_at: Option<Instant>,
     /// В каком звонке ЛС был на прошлом кадре (звонок кончился — вернуться к диалогу).
     last_call: Option<i64>,
+    /// Уведомления: toast, мигание, число на значке.
+    notifier: crate::notify::Notifier,
+    /// Непрочитанные упоминания по каналам (для числа на значке).
+    mention_counts: HashMap<i64, u32>,
+    /// Я сейчас веду трансляцию (для «Не беспокоить: авто»).
+    streaming_now: bool,
+    /// Звонок, о котором уже уведомили.
+    notified_call: Option<i64>,
     /// Настройки → Профиль: поле имени, идёт сохранение, ошибка.
     profile_name: String,
     /// Настройки → Профиль: свой статус.
@@ -317,7 +362,7 @@ pub struct App {
     autostart_error: Option<String>,
     /// Запуск из автозагрузки: до этого момента держать окно спрятанным (eframe показывает его после первого кадра).
     hide_until: Option<Instant>,
-    /// Демо-режим без сервера (только debug, AMADEUS_DEMO).
+    /// Демо-режим без сервера (только debug, MURMUR_DEMO).
     demo: bool,
     /// Запущены из старой установки Amadeus — окно «поставьте Murmur» (legacy.rs).
     legacy: bool,
@@ -342,9 +387,9 @@ impl App {
         let mut settings = Settings::load();
         let (pip_panel, pip_window) = (settings.pip_panel, settings.pip_window);
         crate::stream::set_prefs(settings.stream_encoder, settings.stream_bitrate_mbps);
-        // Отладка: AMADEUS_THEME=dark|light — тема для скриншотов (не сохраняется).
+        // Отладка: MURMUR_THEME=dark|light — тема для скриншотов (не сохраняется).
         #[cfg(debug_assertions)]
-        match std::env::var("AMADEUS_THEME").as_deref() {
+        match std::env::var("MURMUR_THEME").as_deref() {
             Ok("dark") => settings.theme = ThemePref::Dark,
             Ok("light") => settings.theme = ThemePref::Light,
             _ => {}
@@ -383,6 +428,7 @@ impl App {
         let window = Window::from_cc(cc);
         desktop::mark_window(window);
         let tray = Tray::new(window, ctx.clone());
+        let notify_ctx = ctx.clone();
         if tray.is_none() {
             desktop::show(window); // без трея окно не прячем (даже при запуске из автозагрузки)
         }
@@ -393,9 +439,9 @@ impl App {
         let (hk_tx, hotkeys_rx) = std_mpsc::channel();
         let hotkeys = Hotkeys::start(settings.hotkeys.clone(), voice.sender(), hk_tx, repaint);
         voice.send(Cmd::RcPttKey(settings.ptt_key));
-        // Отладка: AMADEUS_START_DEAF=1 — второй клиент на том же ПК без заводки через колонки.
+        // Отладка: MURMUR_START_DEAF=1 — второй клиент на том же ПК без заводки через колонки.
         #[cfg(debug_assertions)]
-        if std::env::var_os("AMADEUS_START_DEAF").is_some() {
+        if std::env::var_os("MURMUR_START_DEAF").is_some() {
             voice.send(Cmd::SetDeafened(true));
         }
         let (tx, rx) = std_mpsc::channel();
@@ -447,6 +493,11 @@ impl App {
             settings_open: false,
             set_tab: SetTab::Voice,
             logout_all: None,
+            sessions: None,
+            sessions_loading: false,
+            sessions_error: None,
+            pw_form: None,
+            del_form: None,
             set_query: String::new(),
             metrics_open: false,
             metrics_init: false,
@@ -488,6 +539,10 @@ impl App {
             call_alone_since: None,
             ring_at: None,
             last_call: None,
+            notifier: crate::notify::Notifier::new(window, notify_ctx),
+            mention_counts: HashMap::new(),
+            streaming_now: false,
+            notified_call: None,
             profile_name: String::new(),
             profile_status: String::new(),
             profile_saves: Default::default(),
@@ -526,25 +581,25 @@ impl App {
             app.fetch_me();
         }
         #[cfg(debug_assertions)]
-        if std::env::var_os("AMADEUS_DEMO").is_some() {
+        if std::env::var_os("MURMUR_DEMO").is_some() {
             app.start_demo();
         }
         #[cfg(debug_assertions)]
-        if std::env::var_os("AMADEUS_OPEN_SETTINGS").is_some() {
+        if std::env::var_os("MURMUR_OPEN_SETTINGS").is_some() {
             app.open_settings();
-            // AMADEUS_SETTINGS_TAB=<номер раздела 0–6> — какой раздел открыть
-            if let Some(i) = std::env::var("AMADEUS_SETTINGS_TAB").ok().and_then(|v| v.parse::<usize>().ok()) {
+            // MURMUR_SETTINGS_TAB=<номер раздела 0–6> — какой раздел открыть
+            if let Some(i) = std::env::var("MURMUR_SETTINGS_TAB").ok().and_then(|v| v.parse::<usize>().ok()) {
                 app.set_tab = SET_TABS[i.min(SET_TABS.len() - 1)].0;
             }
         }
         #[cfg(debug_assertions)]
-        if let Ok(tab) = std::env::var("AMADEUS_OPEN_FRIENDS") {
+        if let Ok(tab) = std::env::var("MURMUR_OPEN_FRIENDS") {
             app.friends.debug_open(&tab);
         }
         app
     }
 
-    /// Отладка: AMADEUS_DEMO=1 — главный экран без сервера (фиктивные «я», каналы и чат) для скриншотов.
+    /// Отладка: MURMUR_DEMO=1 — главный экран без сервера (фиктивные «я», каналы и чат) для скриншотов.
     #[cfg(debug_assertions)]
     fn start_demo(&mut self) {
         self.demo = true;
@@ -585,7 +640,7 @@ impl App {
             reactions: if id == 2 { vec![proto::Reaction { name: "fire".into(), users: vec![1, 2] }, proto::Reaction { name: "+1".into(), users: vec![3] }, proto::Reaction { name: "🦆".into(), users: vec![2] }] } else { Vec::new() },
             sticker: None,
         };
-        if let Some(n) = std::env::var("AMADEUS_DEMO_MSGS").ok().and_then(|v| v.parse::<i64>().ok()) {
+        if let Some(n) = std::env::var("MURMUR_DEMO_MSGS").ok().and_then(|v| v.parse::<i64>().ok()) {
             let texts = ["Туттуру!", "Го в катку через 5 минут? 😎🎮 Кто не придёт — тот 🐢.", "Я после пар, часов в восемь, а потом ещё надо сделать лабораторную по физике и сходить в магазин за хлебом и молоком, так что не ждите.", "🔥🔥"];
             let v: Vec<proto::Message> = (0..n).map(|i| msg(100 + i, ((i % 3) + 1, ["tester", "mayuri", "kurisu"][(i % 3) as usize]), texts[(i % 4) as usize], (n - i) / 2)).collect();
             self.chat.demo_seed(3, v);
@@ -597,16 +652,16 @@ impl App {
             msg(5, (3, "kurisu"), "🔥🔥", 1),
             proto::Message { sticker: Some("cat-hello".into()), ..msg(4, (2, "mayuri"), "[стикер: Кот машет]", 1) },
         ]); }
-        // Отладка (скриншоты): AMADEUS_OPEN_STICKERS=1 — открыть выбор стикеров.
-        if std::env::var_os("AMADEUS_OPEN_STICKERS").is_some() {
+        // Отладка (скриншоты): MURMUR_OPEN_STICKERS=1 — открыть выбор стикеров.
+        if std::env::var_os("MURMUR_OPEN_STICKERS").is_some() {
             self.chat.debug_open_stickers();
         }
-        // AMADEUS_OPEN_EMOJI=1 — открыть панель эмодзи.
-        if std::env::var_os("AMADEUS_OPEN_EMOJI").is_some() {
+        // MURMUR_OPEN_EMOJI=1 — открыть панель эмодзи.
+        if std::env::var_os("MURMUR_OPEN_EMOJI").is_some() {
             self.chat.debug_open_emoji();
         }
         self.chat.demo_seed(4, Vec::new());
-        if let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
+        if let Some(id) = std::env::var("MURMUR_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
             self.view = View::Text(id);
         }
         self.screen = Screen::Main;
@@ -647,9 +702,9 @@ impl App {
             self.model.set_active(id);
         }
         self.sync_channels();
-        // Отладка: AMADEUS_AUTOJOIN=<id канала> — сразу зайти (только debug-сборка).
+        // Отладка: MURMUR_AUTOJOIN=<id канала> — сразу зайти (только debug-сборка).
         #[cfg(debug_assertions)]
-        if let Some(id) = std::env::var("AMADEUS_AUTOJOIN").ok().and_then(|v| v.parse::<i64>().ok()) {
+        if let Some(id) = std::env::var("MURMUR_AUTOJOIN").ok().and_then(|v| v.parse::<i64>().ok()) {
             let all = self.model.servers.iter().flat_map(|s| self.model.channels(s.id)).collect::<Vec<_>>();
             if let Some(ch) = all.into_iter().find(|c| c.id == id) {
                 self.model.set_active(ch.server_id);
@@ -657,19 +712,19 @@ impl App {
                 self.voice.send(Cmd::Join(ch));
             }
         }
-        // Отладка: AMADEUS_OPEN_TEXT=<id канала> — сразу открыть текстовый канал.
+        // Отладка: MURMUR_OPEN_TEXT=<id канала> — сразу открыть текстовый канал.
         #[cfg(debug_assertions)]
-        if let Some(id) = std::env::var("AMADEUS_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
+        if let Some(id) = std::env::var("MURMUR_OPEN_TEXT").ok().and_then(|v| v.parse::<i64>().ok()) {
             self.view = View::Text(id);
         }
-        // Отладка (скриншоты): AMADEUS_OPEN_SERVER_SETTINGS=1 — настройки активного сервера;
-        // AMADEUS_OPEN_PROFILE=<id> — карточка профиля человека с активного сервера.
+        // Отладка (скриншоты): MURMUR_OPEN_SERVER_SETTINGS=1 — настройки активного сервера;
+        // MURMUR_OPEN_PROFILE=<id> — карточка профиля человека с активного сервера.
         #[cfg(debug_assertions)]
         if let Some(sid) = self.model.active {
-            if std::env::var_os("AMADEUS_OPEN_SERVER_SETTINGS").is_some() {
+            if std::env::var_os("MURMUR_OPEN_SERVER_SETTINGS").is_some() {
                 self.server_settings.open(&self.model, sid);
             }
-            if let Some(uid) = std::env::var("AMADEUS_OPEN_PROFILE").ok().and_then(|v| v.parse::<i64>().ok()) {
+            if let Some(uid) = std::env::var("MURMUR_OPEN_PROFILE").ok().and_then(|v| v.parse::<i64>().ok()) {
                 self.members.open_card(uid, pos2(560.0, 120.0), Some(sid));
             }
         }
@@ -782,6 +837,42 @@ impl App {
                 Msg::LogoutAll(Ok(())) => {
                     self.logout_all = None;
                     self.logout();
+                }
+                Msg::Sessions(res) => {
+                    self.sessions_loading = false;
+                    match res {
+                        Ok(list) => {
+                            self.sessions = Some(list);
+                            self.sessions_error = None;
+                        }
+                        Err(e) => self.sessions_error = Some(e),
+                    }
+                }
+                Msg::PasswordChanged(Ok(())) => {
+                    self.pw_form = None;
+                    self.sessions = None; // остальные сеансы закрыты — перечитать
+                }
+                Msg::PasswordChanged(Err(e)) => {
+                    if let Some(f) = &mut self.pw_form {
+                        f.busy = false;
+                        f.error = Some(e);
+                    }
+                }
+                Msg::SessionRevoked(res) => {
+                    self.sessions = None;
+                    if let Err(e) = res {
+                        self.sessions_error = Some(e);
+                    }
+                }
+                Msg::AccountDeleted(Ok(())) => {
+                    self.del_form = None;
+                    self.logout();
+                }
+                Msg::AccountDeleted(Err(e)) => {
+                    if let Some(f) = &mut self.del_form {
+                        f.busy = false;
+                        f.error = Some(e);
+                    }
                 }
                 Msg::LogoutAll(Err(e)) => {
                     if let Some(s) = &mut self.logout_all {
@@ -940,12 +1031,74 @@ impl App {
             self.dms.fetch_list();
         }
         self.unread.on_message(m, server, me);
-        if server.is_none() && Some(m.author.id) != me {
-            let viewing = self.view == View::Dm(m.channel_id) && self.ctx.input(|i| i.focused);
-            if !viewing {
-                crate::sounds::play(crate::sounds::Sound::DirectMessage);
+        if Some(m.author.id) == me {
+            self.mention_counts.remove(&m.channel_id);
+            return;
+        }
+        let focused = self.ctx.input(|i| i.focused);
+        let open = matches!(self.view, View::Dm(id) | View::Text(id) if id == m.channel_id);
+        if open && focused {
+            return; // смотрю прямо сейчас
+        }
+        let mention = server.is_some() && self.me.as_ref().is_some_and(|u| crate::notify::mentions(m, u));
+        let wanted = if server.is_none() { self.settings.notify_dm } else { mention && self.settings.notify_mention };
+        if !wanted {
+            return;
+        }
+        if mention {
+            *self.mention_counts.entry(m.channel_id).or_insert(0) += 1;
+        }
+        if self.settings.dnd.active(self.streaming_now) {
+            return;
+        }
+        crate::sounds::play(crate::sounds::Sound::DirectMessage);
+        if !focused {
+            if self.settings.notify_toast {
+                let who = m.author.display_name.clone().unwrap_or_else(|| m.author.name.clone());
+                let (title, tag) = match server {
+                    None => (who, format!("dm:{}", m.channel_id)),
+                    Some(s) => {
+                        let ch = self.model.channels(s).iter().find(|c| c.id == m.channel_id).map(|c| c.name.clone()).unwrap_or_default();
+                        (format!("{who} · #{ch}"), format!("ch:{}", m.channel_id))
+                    }
+                };
+                self.notifier.toast(&title, &crate::notify::preview(m), &tag);
+            }
+            if self.settings.notify_flash {
+                self.notifier.flash();
             }
         }
+    }
+
+    /// Клик по toast — открыть чат; число на значке в панели задач.
+    fn sync_notifications(&mut self) {
+        if let Some(tag) = crate::notify::take_click() {
+            if let Some(id) = tag.strip_prefix("dm:").and_then(|s| s.parse::<i64>().ok()) {
+                self.view = View::Dm(id);
+            } else if let Some(id) = tag.strip_prefix("ch:").and_then(|s| s.parse::<i64>().ok())
+                && let Some(s) = self.model.servers.iter().map(|s| s.id).find(|s| self.model.channels(*s).iter().any(|c| c.id == id))
+            {
+                self.select_server(s);
+                self.view = View::Text(id);
+            }
+        }
+        let unread = &self.unread;
+        self.mention_counts.retain(|ch, _| unread.count(*ch) > 0);
+        let n = if self.settings.notify_badge && self.screen == Screen::Main {
+            self.unread.dm_total() + self.mention_counts.values().sum::<u32>()
+        } else {
+            0
+        };
+        // отладка: MURMUR_NOTIFY_TEST=1 — toast, мигание и число 7 на значке
+        static TEST: std::sync::Once = std::sync::Once::new();
+        let test = std::env::var_os("MURMUR_NOTIFY_TEST").is_some();
+        if test {
+            TEST.call_once(|| {
+                self.notifier.toast("Тест · #общий", "Проверка уведомления <&>", "dm:0");
+                self.notifier.flash();
+            });
+        }
+        self.notifier.set_badge(if test { 7 } else { n });
     }
 
     /// Открытый канал на виду — прочитан; прочитанное — на сервер.
@@ -987,8 +1140,28 @@ impl App {
         let ringing_out = in_call.is_some_and(|id| {
             vs.peers.len() <= 1 && self.dms.get(id).and_then(|d| d.call.as_ref()).is_some_and(|c| c.ringing && c.caller_id == me)
         });
+        self.streaming_now = vs.stream.is_some();
+        let dnd = self.settings.dnd.active(self.streaming_now);
+        let incoming = self.dms.incoming(me).filter(|d| Some(d.id) != in_call).map(|d| d.id);
+        if incoming.is_none() {
+            self.notified_call = None;
+        }
         if let Some(dm) = self.dms.incoming(me).filter(|d| Some(d.id) != in_call).cloned() {
-            self.ring(Sound::Ring, Duration::from_millis(2600));
+            if self.settings.notify_call && !dnd {
+                self.ring(Sound::Ring, Duration::from_millis(2600));
+                if self.notified_call != Some(dm.id) {
+                    self.notified_call = Some(dm.id);
+                    if !ui.ctx().input(|i| i.focused) {
+                        if self.settings.notify_toast {
+                            let who = dm.user.shown_name().to_string();
+                            self.notifier.toast(&who, "Входящий звонок", &format!("dm:{}", dm.id));
+                        }
+                        if self.settings.notify_flash {
+                            self.notifier.flash();
+                        }
+                    }
+                }
+            }
             match crate::dms::incoming_window(ui.ctx(), &self.people, &dm) {
                 Some(true) => {
                     self.voice.send(Cmd::Join(crate::dms::call_channel(&dm)));
@@ -1167,10 +1340,10 @@ impl App {
 
     fn ui_login(&mut self, ui: &mut Ui) {
         self.check_server_health();
-        // Отладка (скриншоты): AMADEUS_LOGIN_SUBMIT="ник|пароль" — через 2 с заполнить форму и нажать «Войти».
+        // Отладка (скриншоты): MURMUR_LOGIN_SUBMIT="ник|пароль" — через 2 с заполнить форму и нажать «Войти».
         #[cfg(debug_assertions)]
         if ui.input(|i| i.time) > 2.0
-            && let Some(v) = std::env::var("AMADEUS_LOGIN_SUBMIT").ok()
+            && let Some(v) = std::env::var("MURMUR_LOGIN_SUBMIT").ok()
             && !self.login.busy
             && self.login.error.is_none()
             && let Some((n, pw)) = v.split_once('|')
@@ -1444,12 +1617,12 @@ impl App {
         // Стримим окно — своё окно «почти непрозрачное», чтобы браузер под ним не считал себя перекрытым и не замирал.
         crate::frame::keep_layered(vs.stream.as_ref().is_some_and(|s| s.source.is_window()));
         #[cfg(debug_assertions)]
-        if std::env::var_os("AMADEUS_DEMO").is_some() {
+        if std::env::var_os("MURMUR_DEMO").is_some() {
             let watching = std::mem::take(&mut vs.watching);
             vs = demo_state(ui.input(|i| i.time));
             vs.watching = watching;
-            // AMADEUS_DEMO_WATCH=1 — «смотрим» все трансляции демо; =2 — ещё и мини-плеер включён вручную (скриншоты окна в окне)
-            if let Ok(v) = std::env::var("AMADEUS_DEMO_WATCH") {
+            // MURMUR_DEMO_WATCH=1 — «смотрим» все трансляции демо; =2 — ещё и мини-плеер включён вручную (скриншоты окна в окне)
+            if let Ok(v) = std::env::var("MURMUR_DEMO_WATCH") {
                 vs.watching = vs.peers.iter().filter(|p| p.streaming).map(|p| p.identity.clone()).collect();
                 if v == "2" {
                     self.pip.force();
@@ -1582,9 +1755,9 @@ impl App {
         }
     }
 
-    /// Отладка управления (debug): AMADEUS_RC_ASK=pointer|control — зритель сам просит доступ у первого стримера, которого смотрит;
-    /// AMADEUS_RC_GRANT=pointer|control|deny — стример сам отвечает; AMADEUS_RC_DRIVE=1 — зритель берёт управление и водит
-    /// указку по кругу, раз в 3 с кликает и печатает «a». С AMADEUS_RC_DRYRUN=1 у стримера ввод идёт в журнал, курсор не двигается.
+    /// Отладка управления (debug): MURMUR_RC_ASK=pointer|control — зритель сам просит доступ у первого стримера, которого смотрит;
+    /// MURMUR_RC_GRANT=pointer|control|deny — стример сам отвечает; MURMUR_RC_DRIVE=1 — зритель берёт управление и водит
+    /// указку по кругу, раз в 3 с кликает и печатает «a». С MURMUR_RC_DRYRUN=1 у стримера ввод идёт в журнал, курсор не двигается.
     #[cfg(debug_assertions)]
     fn debug_rc(&mut self, vs: &VoiceState) {
         use crate::remote::proto::{Btn, InputEv, Level};
@@ -1595,16 +1768,16 @@ impl App {
             "pointer" => Some(Level::Pointer),
             _ => None,
         };
-        if let Ok(g) = std::env::var("AMADEUS_RC_GRANT")
+        if let Ok(g) = std::env::var("MURMUR_RC_GRANT")
             && let Some((who, _)) = vs.rc_host.pending.first()
         {
             self.voice.send(Cmd::RcRespond { identity: who.clone(), grant: level(&g) });
         }
-        // AMADEUS_RC_REVOKE_AFTER=<с> — стример сам жмёт «Забрать» через столько секунд после начала управления (один раз).
+        // MURMUR_RC_REVOKE_AFTER=<с> — стример сам жмёт «Забрать» через столько секунд после начала управления (один раз).
         {
             static SINCE: Mutex<Option<Instant>> = Mutex::new(None);
             static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if let Some(secs) = std::env::var("AMADEUS_RC_REVOKE_AFTER").ok().and_then(|v| v.parse::<u64>().ok())
+            if let Some(secs) = std::env::var("MURMUR_RC_REVOKE_AFTER").ok().and_then(|v| v.parse::<u64>().ok())
                 && vs.rc_host.controller.is_some()
                 && !DONE.load(Ordering::Relaxed)
             {
@@ -1617,7 +1790,7 @@ impl App {
             }
         }
         let mut st = STATE.lock().unwrap();
-        if let Ok(a) = std::env::var("AMADEUS_RC_ASK")
+        if let Ok(a) = std::env::var("MURMUR_RC_ASK")
             && st.is_none()
             && let Some(w) = vs.watching.first()
             && self.video.frame(w).is_some()
@@ -1626,7 +1799,7 @@ impl App {
             self.voice.send(Cmd::RcRequest { identity: w.clone(), level: l });
             *st = Some((w.clone(), Instant::now(), 0));
         }
-        if std::env::var_os("AMADEUS_RC_DRIVE").is_none() {
+        if std::env::var_os("MURMUR_RC_DRIVE").is_none() {
             return;
         }
         let Some((w, at, n)) = st.as_mut() else { return };
@@ -1653,14 +1826,14 @@ impl App {
         self.ctx.request_repaint_after(Duration::from_millis(30));
     }
 
-    /// Отладка: AMADEUS_AUTOWATCH=1 — сразу смотреть каждую трансляцию в канале
-    /// (+ AMADEUS_AUTOFULLSCREEN=1 — развернуть на весь экран, когда придёт первый кадр).
+    /// Отладка: MURMUR_AUTOWATCH=1 — сразу смотреть каждую трансляцию в канале
+    /// (+ MURMUR_AUTOFULLSCREEN=1 — развернуть на весь экран, когда придёт первый кадр).
     #[cfg(debug_assertions)]
     fn debug_autowatch(&mut self, ui: &Ui, vs: &VoiceState) {
         use std::sync::Mutex;
         static ASKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
         static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if std::env::var_os("AMADEUS_AUTOWATCH").is_none() || vs.conn != Conn::Connected {
+        if std::env::var_os("MURMUR_AUTOWATCH").is_none() || vs.conn != Conn::Connected {
             return;
         }
         let mut asked = ASKED.lock().unwrap();
@@ -1668,8 +1841,8 @@ impl App {
             if !asked.contains(&p.identity) {
                 asked.push(p.identity.clone());
                 self.watch(&p.identity);
-                // AMADEUS_QUALITY=low|high — сразу этот слой; =cycle — через 12 с «Экономное», 27 с «Исходное», 42 с «Авто».
-                let fixed = match std::env::var("AMADEUS_QUALITY").as_deref() {
+                // MURMUR_QUALITY=low|high — сразу этот слой; =cycle — через 12 с «Экономное», 27 с «Исходное», 42 с «Авто».
+                let fixed = match std::env::var("MURMUR_QUALITY").as_deref() {
                     Ok("low") => Some(Quality::Low),
                     Ok("high") => Some(Quality::High),
                     _ => None,
@@ -1677,21 +1850,21 @@ impl App {
                 if let Some(quality) = fixed {
                     self.voice.send(Cmd::SetStreamQuality { identity: p.identity.clone(), quality });
                 }
-                if std::env::var("AMADEUS_QUALITY").as_deref() == Ok("cycle") {
+                if std::env::var("MURMUR_QUALITY").as_deref() == Ok("cycle") {
                     let (tx, identity) = (self.voice.sender(), p.identity.clone());
                     std::thread::spawn(move || {
                         for (at, quality) in [(12, Quality::Low), (15, Quality::High), (15, Quality::Auto)] {
                             std::thread::sleep(Duration::from_secs(at));
-                            log::info!("AMADEUS_QUALITY=cycle: {}", quality.label());
+                            log::info!("MURMUR_QUALITY=cycle: {}", quality.label());
                             let _ = tx.send(Cmd::SetStreamQuality { identity: identity.clone(), quality });
                         }
                     });
                 }
             }
         }
-        // AMADEUS_AUTOMAX=1 — сначала развернуть окно, полный экран — через 2 с (как у пользователя: из развёрнутого).
+        // MURMUR_AUTOMAX=1 — сначала развернуть окно, полный экран — через 2 с (как у пользователя: из развёрнутого).
         static MAXED: Mutex<Option<Instant>> = Mutex::new(None);
-        if std::env::var_os("AMADEUS_AUTOMAX").is_some() {
+        if std::env::var_os("MURMUR_AUTOMAX").is_some() {
             let mut m = MAXED.lock().unwrap();
             if m.is_none() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(true));
@@ -1702,17 +1875,17 @@ impl App {
                 return;
             }
         }
-        if std::env::var_os("AMADEUS_AUTOFULLSCREEN").is_some()
+        if std::env::var_os("MURMUR_AUTOFULLSCREEN").is_some()
             && let Some(f) = self.focus.clone()
             && self.video.frame(&f).is_some()
             && !FULL.swap(true, Ordering::Relaxed)
         {
-            log::info!("AMADEUS_AUTOFULLSCREEN: полный экран");
+            log::info!("MURMUR_AUTOFULLSCREEN: полный экран");
             self.set_fullscreen(ui.ctx(), true);
         }
     }
 
-    /// Демо-кадры для просматриваемых «трансляций» (AMADEUS_DEMO), ~10 к/с.
+    /// Демо-кадры для просматриваемых «трансляций» (MURMUR_DEMO), ~10 к/с.
     #[cfg(debug_assertions)]
     fn demo_frames(&mut self, ui: &Ui, vs: &VoiceState) {
         use std::sync::Mutex;
@@ -1729,30 +1902,30 @@ impl App {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
 
-    /// Отладка: AMADEUS_AUTOSTREAM=screen | <часть заголовка окна> [+ AMADEUS_STREAM_PRESET=720|1080|1080p60|native] —
+    /// Отладка: MURMUR_AUTOSTREAM=screen | <часть заголовка окна> [+ MURMUR_STREAM_PRESET=720|1080|1080p60|native] —
     /// начать трансляцию сразу после входа в канал (один раз).
     #[cfg(debug_assertions)]
     fn debug_autostream(&mut self, vs: &VoiceState) {
         use std::sync::atomic::AtomicBool;
         static DONE: AtomicBool = AtomicBool::new(false);
         static PICKER: AtomicBool = AtomicBool::new(false);
-        // AMADEUS_OPEN_PICKER=1 — открыть пикер сразу после входа (скриншоты).
-        if vs.conn == Conn::Connected && std::env::var_os("AMADEUS_OPEN_PICKER").is_some() && !PICKER.swap(true, Ordering::Relaxed) {
+        // MURMUR_OPEN_PICKER=1 — открыть пикер сразу после входа (скриншоты).
+        if vs.conn == Conn::Connected && std::env::var_os("MURMUR_OPEN_PICKER").is_some() && !PICKER.swap(true, Ordering::Relaxed) {
             self.open_picker(vs);
         }
-        let Ok(want) = std::env::var("AMADEUS_AUTOSTREAM") else { return };
+        let Ok(want) = std::env::var("MURMUR_AUTOSTREAM") else { return };
         if vs.conn != Conn::Connected || DONE.swap(true, Ordering::Relaxed) {
             return;
         }
-        let preset = match std::env::var("AMADEUS_STREAM_PRESET").as_deref() {
+        let preset = match std::env::var("MURMUR_STREAM_PRESET").as_deref() {
             Ok("720") => crate::stream::Preset::P720_30,
             Ok("1080p60") => crate::stream::Preset::P1080_60,
             Ok("1440") => crate::stream::Preset::P1440_60,
             Ok("native") => crate::stream::Preset::Native,
             _ => crate::stream::Preset::P1080_30,
         };
-        // AMADEUS_STREAM_AUDIO=0 — без звука.
-        let audio = std::env::var("AMADEUS_STREAM_AUDIO").map(|v| v != "0").unwrap_or(self.settings.stream_audio);
+        // MURMUR_STREAM_AUDIO=0 — без звука.
+        let audio = std::env::var("MURMUR_STREAM_AUDIO").map(|v| v != "0").unwrap_or(self.settings.stream_audio);
         let tx = self.voice.sender();
         std::thread::spawn(move || {
             let list = capture_win::list_sources(64, 36);
@@ -1765,10 +1938,10 @@ impl App {
                 Some(s) => {
                     let _ = tx.send(Cmd::StartStream { source: s.id, title: s.title, width: s.width, height: s.height, preset, audio });
                 }
-                None => log::warn!("AMADEUS_AUTOSTREAM: источник «{want}» не найден"),
+                None => log::warn!("MURMUR_AUTOSTREAM: источник «{want}» не найден"),
             }
-            // AMADEUS_AUTOSTREAM_THEN=<часть заголовка> — через 15 с сменить источник на лету.
-            if let Ok(next) = std::env::var("AMADEUS_AUTOSTREAM_THEN") {
+            // MURMUR_AUTOSTREAM_THEN=<часть заголовка> — через 15 с сменить источник на лету.
+            if let Ok(next) = std::env::var("MURMUR_AUTOSTREAM_THEN") {
                 std::thread::sleep(Duration::from_secs(15));
                 let list = capture_win::list_sources(64, 36);
                 if let Some(s) = list.into_iter().find(|s| s.title.to_lowercase().contains(&next.to_lowercase())) {
@@ -3274,10 +3447,10 @@ impl App {
         let _ = screen;
     }
 
-    /// Отладочный оверлей (F3): путь до SFU, RTT и строка на каждый поток. `AMADEUS_METRICS=1` — открыт при старте.
+    /// Отладочный оверлей (F3): путь до SFU, RTT и строка на каждый поток. `MURMUR_METRICS=1` — открыт при старте.
     fn ui_metrics(&mut self, ui: &mut Ui) {
         let f3 = ui.input(|i| i.key_pressed(egui::Key::F3));
-        if f3 || (!self.metrics_init && std::env::var_os("AMADEUS_METRICS").is_some()) {
+        if f3 || (!self.metrics_init && std::env::var_os("MURMUR_METRICS").is_some()) {
             self.metrics_open = !self.metrics_open;
             self.voice.send(Cmd::Metrics(self.metrics_open));
         }
@@ -3534,18 +3707,18 @@ impl App {
         }
     }
 
-    /// Отладка (только debug): AMADEUS_AUTO_UPDATE=1 — сразу ставить найденное обновление (кроме копии, только что
-    /// перезапущенной после обновления); AMADEUS_TRAY_QUIT_IN=<с> — «Выйти» из трея через N секунд (из другого потока).
+    /// Отладка (только debug): MURMUR_AUTO_UPDATE=1 — сразу ставить найденное обновление (кроме копии, только что
+    /// перезапущенной после обновления); MURMUR_TRAY_QUIT_IN=<с> — «Выйти» из трея через N секунд (из другого потока).
     #[cfg(debug_assertions)]
     fn debug_update_hooks(&mut self) {
         let after_update = std::env::args().any(|a| a == desktop::ARG_AFTER_UPDATE);
-        if std::env::var_os("AMADEUS_AUTO_UPDATE").is_some() && !after_update && self.updater.available.is_some() && !self.update_open {
+        if std::env::var_os("MURMUR_AUTO_UPDATE").is_some() && !after_update && self.updater.available.is_some() && !self.update_open {
             log::info!("отладка: ставлю обновление");
             self.update_open = true;
             self.updater.install();
         }
         static ARMED: std::sync::Once = std::sync::Once::new();
-        if let (Some(secs), Some(tray)) = (std::env::var("AMADEUS_TRAY_QUIT_IN").ok().and_then(|s| s.parse::<u64>().ok()), &self.tray) {
+        if let (Some(secs), Some(tray)) = (std::env::var("MURMUR_TRAY_QUIT_IN").ok().and_then(|s| s.parse::<u64>().ok()), &self.tray) {
             ARMED.call_once(|| tray.debug_quit_in(Duration::from_secs(secs), self.ctx.clone()));
         }
     }
@@ -3685,6 +3858,43 @@ impl App {
         if close || (modal.should_close() && !self.updater.installing) {
             self.update_open = false;
         }
+    }
+
+    /// Настройки → «Уведомления»: поводы, способы, «Не беспокоить».
+    fn ui_settings_notify(&mut self, ui: &mut Ui, w: f32) {
+        use crate::notify::Dnd;
+        let mut changed = false;
+        let mut dnd = self.settings.dnd;
+        toggle_row(ui, w, |ui| {
+            ui.label("Не беспокоить").on_hover_text("Без звуков и всплывающих уведомлений; звонок молча виден в окне");
+        }, |ui| {
+            if kit::segmented(ui, &mut dnd, &[(Dnd::Off, "Выкл."), (Dnd::On, "Вкл."), (Dnd::Auto, "На стриме")]) {
+                self.settings.dnd = dnd;
+                changed = true;
+            }
+        });
+        let s = &mut self.settings;
+        for (text, tip, val) in [
+            ("Личные сообщения", "", &mut s.notify_dm),
+            ("Упоминания (@ник, @все)", "В каналах уведомляют только упоминания; остальное — просто счётчик непрочитанных", &mut s.notify_mention),
+            ("Входящие звонки", "", &mut s.notify_call),
+            ("Всплывающее окно Windows", "Когда окно Murmur не в фокусе; клик открывает чат", &mut s.notify_toast),
+            ("Мигание в панели задач", "", &mut s.notify_flash),
+            ("Число непрочитанных на значке", "Личные сообщения и упоминания", &mut s.notify_badge),
+        ] {
+            toggle_row(ui, w, |ui| {
+                let r = ui.label(text);
+                if !tip.is_empty() {
+                    r.on_hover_text(tip);
+                }
+            }, |ui| {
+                changed |= kit::switch(ui, val).changed();
+            });
+        }
+        if changed {
+            self.settings.save();
+        }
+        ui.add_space(4.0);
     }
 
     /// Раздел настроек «Приложение»: автозапуск, трей, версия и обновления.
@@ -4486,6 +4696,124 @@ impl App {
                 self.logout_all = None;
             }
         }
+        self.ui_account_more(ui, w);
+    }
+
+    /// Аккаунт: смена пароля, список сеансов, удаление.
+    fn ui_account_more(&mut self, ui: &mut Ui, w: f32) {
+        // пароль
+        toggle_row(ui, w, |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label("Пароль");
+                ui.label(RichText::new("Остальные устройства после смены выйдут из аккаунта").size(12.5).color(t::p().text_muted));
+            });
+        }, |ui| {
+            if kit::button(ui, kit::ButtonKind::Ghost, "Сменить пароль", None).clicked() {
+                self.pw_form = Some(PwForm::default());
+            }
+        });
+        // сеансы
+        ui.add_space(14.0);
+        ui.label(RichText::new("Сеансы").font(t::bold(16.0)));
+        if self.sessions.is_none() && !self.sessions_loading {
+            self.sessions_loading = true;
+            let api = self.api.clone();
+            self.spawn(async move { api.sessions().await.map_err(|e| e.message) }, Msg::Sessions);
+        }
+        if let Some(e) = &self.sessions_error {
+            ui.label(RichText::new(e).size(12.5).color(t::p().danger_text));
+        }
+        let mut revoke: Option<String> = None;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        for s in self.sessions.clone().unwrap_or_default() {
+            toggle_row(ui, w, |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let name = if s.device.is_empty() { "Устройство неизвестно" } else { s.device.as_str() };
+                    ui.label(name);
+                    let when = if s.current { "Этот сеанс".to_string() } else { format!("Активность: {}", ago(now - s.last_seen)) };
+                    ui.label(RichText::new(when).size(12.5).color(t::p().text_muted));
+                });
+            }, |ui| {
+                if !s.current && kit::button(ui, kit::ButtonKind::Ghost, "Завершить", None).clicked() {
+                    revoke = Some(s.id.clone());
+                }
+            });
+        }
+        if let Some(id) = revoke {
+            let api = self.api.clone();
+            self.spawn(async move { api.revoke_session(&id).await.map_err(|e| e.message) }, Msg::SessionRevoked);
+        }
+        // удаление
+        ui.add_space(14.0);
+        toggle_row(ui, w, |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label("Удалить аккаунт");
+                ui.label(RichText::new("Сообщения останутся, автор станет «Удалённый пользователь»").size(12.5).color(t::p().text_muted));
+            });
+        }, |ui| {
+            if kit::button(ui, kit::ButtonKind::Danger, "Удалить", None).clicked() {
+                self.del_form = Some(DelForm::default());
+            }
+        });
+
+        if let Some(mut f) = self.pw_form.clone() {
+            let (mut go, mut cancel) = (false, false);
+            let res = kit::modal(ui.ctx(), "change-pw", "Смена пароля", 420.0, |ui| {
+                for (label, val, id) in [("Текущий пароль", &mut f.old, "pw-old"), ("Новый пароль", &mut f.new, "pw-new"), ("Новый пароль ещё раз", &mut f.again, "pw-again")] {
+                    ui.label(RichText::new(label).size(13.0).color(t::p().text_muted));
+                    ui.add(login_field(val, 376.0, Id::new(id)).password(true));
+                    ui.add_space(8.0);
+                }
+                if let Some(e) = &f.error {
+                    ui.label(RichText::new(e).size(13.0).color(t::p().danger_text));
+                }
+                ui.add_space(10.0);
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    let ready = !f.busy && !f.old.is_empty() && !f.new.is_empty();
+                    go = kit::button_ex(ui, kit::ButtonKind::Primary, if f.busy { "Подождите…" } else { "Сменить" }, None, ready).clicked();
+                    cancel = kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked();
+                });
+            });
+            if go {
+                if f.new != f.again {
+                    f.error = Some("Новые пароли не совпадают".into());
+                } else {
+                    f.busy = true;
+                    f.error = None;
+                    let (api, old, new) = (self.api.clone(), f.old.clone(), f.new.clone());
+                    self.spawn(async move { api.change_password(&old, &new).await.map_err(|e| e.message) }, Msg::PasswordChanged);
+                }
+            }
+            self.pw_form = if res != kit::ModalResult::Open || cancel { None } else { Some(f) };
+        }
+        if let Some(mut f) = self.del_form.clone() {
+            let (mut go, mut cancel) = (false, false);
+            let res = kit::modal(ui.ctx(), "delete-account", "Удалить аккаунт", 420.0, |ui| {
+                ui.label(RichText::new("Это нельзя отменить. Личные диалоги и дружба исчезнут, ваши сообщения в каналах останутся от имени «Удалённый пользователь». Если вы владелец сервера — сначала передайте владение или удалите сервер.").size(14.0));
+                ui.add_space(10.0);
+                ui.label(RichText::new("Пароль для подтверждения").size(13.0).color(t::p().text_muted));
+                ui.add(login_field(&mut f.password, 376.0, Id::new("del-pw")).password(true));
+                if let Some(e) = &f.error {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(e).size(13.0).color(t::p().danger_text));
+                }
+                ui.add_space(14.0);
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    go = kit::button_ex(ui, kit::ButtonKind::Danger, if f.busy { "Подождите…" } else { "Удалить навсегда" }, None, !f.busy && !f.password.is_empty()).clicked();
+                    cancel = kit::button(ui, kit::ButtonKind::Ghost, "Отмена", None).clicked();
+                });
+            });
+            if go {
+                f.busy = true;
+                f.error = None;
+                let (api, pw) = (self.api.clone(), f.password.clone());
+                self.spawn(async move { api.delete_account(&pw).await.map_err(|e| e.message) }, Msg::AccountDeleted);
+            }
+            self.del_form = if res != kit::ModalResult::Open || cancel { None } else { Some(f) };
+        }
     }
 
     fn ui_settings(&mut self, ui: &mut Ui, vs: &VoiceState) {
@@ -4544,9 +4872,9 @@ impl App {
                 ui.add_space(18.0);
                 #[allow(unused_mut)]
                 let mut area = egui::ScrollArea::vertical().id_salt(("settings-scroll", tab as u8)).auto_shrink([false, false]);
-                // Отладка: AMADEUS_OPEN_SETTINGS=<px> — открыть настройки прокрученными (скриншоты).
+                // Отладка: MURMUR_OPEN_SETTINGS=<px> — открыть настройки прокрученными (скриншоты).
                 #[cfg(debug_assertions)]
-                if let Some(px) = std::env::var("AMADEUS_OPEN_SETTINGS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|px| *px > 1.0) {
+                if let Some(px) = std::env::var("MURMUR_OPEN_SETTINGS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|px| *px > 1.0) {
                     area = area.vertical_scroll_offset(px);
                 }
                 area.show(ui, |ui| {
@@ -4559,7 +4887,11 @@ impl App {
                         SetTab::Stream => self.ui_settings_stream(ui, w, vs),
                         SetTab::Hotkeys => self.ui_settings_hotkeys(ui, w),
                         SetTab::Look => self.ui_settings_look(ui, w),
-                        SetTab::Notify => self.ui_settings_app(ui, w),
+                        SetTab::Notify => {
+                            self.ui_settings_notify(ui, w);
+                            ui.add_space(14.0);
+                            self.ui_settings_app(ui, w);
+                        }
                     }
                     ui.add_space(24.0);
                 });
@@ -4662,7 +4994,7 @@ fn now_ms() -> u64 {
 pub fn start_watchdog(ctx: egui::Context) {
     use std::sync::atomic::Ordering::Relaxed;
     now_ms();
-    let _ = std::thread::Builder::new().name("amadeus-watchdog".into()).spawn(move || {
+    let _ = std::thread::Builder::new().name("murmur-watchdog".into()).spawn(move || {
         let mut warned = 0u64;
         loop {
             std::thread::sleep(Duration::from_millis(1000));
@@ -4708,9 +5040,9 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        // Отладка: AMADEUS_GALLERY=1 — только витрина набора деталей.
+        // Отладка: MURMUR_GALLERY=1 — только витрина набора деталей.
         #[cfg(debug_assertions)]
-        if std::env::var_os("AMADEUS_GALLERY").is_some() {
+        if std::env::var_os("MURMUR_GALLERY").is_some() {
             if !std::ptr::eq(t::resolve(self.settings.theme, ui.ctx().system_theme()), t::p()) {
                 t::set_theme(ui.ctx(), self.settings.theme);
             }
@@ -4812,6 +5144,7 @@ impl eframe::App for App {
         if self.screen == Screen::Main {
             self.sync_read(ui.input(|i| i.focused));
         }
+        self.sync_notifications();
         crate::frame::set_cat_asleep(self.friends.all_offline());
         self.channel_list.poll(&mut self.model);
         self.server_settings.poll();
@@ -4880,11 +5213,11 @@ impl eframe::App for App {
     }
 }
 
-/// Отладка вёрстки без сервера голоса: AMADEUS_DEMO=1 (только debug-сборка).
+/// Отладка вёрстки без сервера голоса: MURMUR_DEMO=1 (только debug-сборка).
 #[cfg(debug_assertions)]
 fn demo_state(time: f64) -> VoiceState {
-    // AMADEUS_DEMO_TALK=0|1|2 — сколько человек говорит (по умолчанию 1: mayuri), для замеров CPU.
-    let talk: usize = std::env::var("AMADEUS_DEMO_TALK").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    // MURMUR_DEMO_TALK=0|1|2 — сколько человек говорит (по умолчанию 1: mayuri), для замеров CPU.
+    let talk: usize = std::env::var("MURMUR_DEMO_TALK").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     let peer = |id: &str, local: bool, speaking: bool, muted: bool| Peer {
         identity: id.into(),
         name: id.into(),
@@ -4892,10 +5225,10 @@ fn demo_state(time: f64) -> VoiceState {
         speaking,
         level: if speaking { (0.15 + 0.15 * (time * 7.0).sin().abs()) as f32 } else { 0.0 },
         mic_muted: muted,
-        streaming: id == "kurisu" || (id == "daru" && std::env::var_os("AMADEUS_DEMO_STREAMS").is_some()),
+        streaming: id == "kurisu" || (id == "daru" && std::env::var_os("MURMUR_DEMO_STREAMS").is_some()),
     };
     VoiceState {
-        conn: if std::env::var_os("AMADEUS_DEMO_RECONNECT").is_some() { Conn::Reconnecting } else { Conn::Connected },
+        conn: if std::env::var_os("MURMUR_DEMO_RECONNECT").is_some() { Conn::Reconnecting } else { Conn::Connected },
         channel: Some(Channel {
             id: 1,
             name: "General".into(),

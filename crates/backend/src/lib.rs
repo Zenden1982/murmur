@@ -1,4 +1,4 @@
-//! Бэкенд Amadeus: аккаунты (только по инвайтам), каналы, выдача LiveKit-токенов, чат.
+//! Бэкенд Murmur: аккаунты (только по инвайтам), каналы, выдача LiveKit-токенов, чат.
 
 pub mod config;
 pub mod error;
@@ -6,6 +6,7 @@ pub mod proxy_protocol;
 pub mod ratelimit;
 pub mod security;
 
+mod account;
 mod channels;
 pub mod chat;
 mod db;

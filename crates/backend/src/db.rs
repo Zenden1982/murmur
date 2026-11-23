@@ -142,7 +142,7 @@ pub async fn create_user(
     // Новый инстанс: первый админ получает первый сервер (как сервер №1 после миграции).
     let servers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM servers").fetch_one(&mut *tx).await?;
     if is_admin && servers == 0 {
-        crate::servers::insert_server(&mut tx, "Amadeus", id, false).await?;
+        crate::servers::insert_server(&mut tx, "Murmur", id, false).await?;
     }
     tx.commit().await?;
     Ok(User { id, name, is_admin, display_name: None, avatar: None, dm_from_servers: false, about: None, status: None, banner: None })
