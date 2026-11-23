@@ -50,6 +50,8 @@ if [ -n "${LK_RTC_INTERFACES:-}" ]; then IPCONF="${IPCONF}
 cat > generated/livekit.yaml <<EOF
 # СГЕНЕРИРОВАНО deploy/render.sh — не править руками
 port: 7880
+# Сигнальный порт — только для Caddy на этом же хосте (127.0.0.1:7880); наружу его не выставляем
+bind_addresses: ["127.0.0.1"]
 rtc:
   tcp_port: ${LK_TCP_PORT}
   udp_port: ${LK_UDP_PORT}
