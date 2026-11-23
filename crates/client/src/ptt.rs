@@ -41,6 +41,13 @@ impl Ptt {
                 loop {
                     std::thread::sleep(Duration::from_millis(10));
                     if p.capture.load(Ordering::Relaxed) {
+                        if held {
+                            // Клавишу назначают, пока рация зажата: отпускаем, иначе микрофон останется открытым.
+                            held = false;
+                            if voice.send(Cmd::PttHeld(false)).is_err() {
+                                break;
+                            }
+                        }
                         if let Some(vk) = scan_new_press(&mut prev_down) {
                             p.capture.store(false, Ordering::Relaxed);
                             let _ = captured.send(vk);
