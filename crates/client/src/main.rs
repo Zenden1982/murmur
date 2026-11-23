@@ -35,6 +35,7 @@ mod model;
 mod people;
 mod profile_card;
 mod picker;
+mod pip;
 mod server_settings;
 mod servers_ui;
 mod ptt;
