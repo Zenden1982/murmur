@@ -567,13 +567,18 @@ impl App {
             reactions: if id == 2 { vec![proto::Reaction { name: "fire".into(), users: vec![1, 2] }, proto::Reaction { name: "+1".into(), users: vec![3] }, proto::Reaction { name: "🦆".into(), users: vec![2] }] } else { Vec::new() },
             sticker: None,
         };
+        if let Some(n) = std::env::var("AMADEUS_DEMO_MSGS").ok().and_then(|v| v.parse::<i64>().ok()) {
+            let texts = ["Туттуру!", "Го в катку через 5 минут? 😎🎮 Кто не придёт — тот 🐢.", "Я после пар, часов в восемь, а потом ещё надо сделать лабораторную по физике и сходить в магазин за хлебом и молоком, так что не ждите.", "🔥🔥"];
+            let v: Vec<proto::Message> = (0..n).map(|i| msg(100 + i, ((i % 3) + 1, ["tester", "mayuri", "kurisu"][(i % 3) as usize]), texts[(i % 4) as usize], (n - i) / 2)).collect();
+            self.chat.demo_seed(3, v);
+        } else {
         self.chat.demo_seed(3, vec![
             msg(1, (2, "mayuri"), "Туттуру! Кто сегодня в катку?", 42),
             msg(2, (3, "kurisu"), "Я после пар, часов в восемь.", 40),
             msg(3, (1, "tester"), "Го в катку через 5 минут? 😎🎮 Кто не придёт — тот 🐢. Флаг 🇷🇺, семья 👨‍👩‍👧, 1️⃣ и ❤ — всё цветное.", 2),
             msg(5, (3, "kurisu"), "🔥🔥", 1),
             proto::Message { sticker: Some("cat-hello".into()), ..msg(4, (2, "mayuri"), "[стикер: Кот машет]", 1) },
-        ]);
+        ]); }
         // Отладка (скриншоты): AMADEUS_OPEN_STICKERS=1 — открыть выбор стикеров.
         if std::env::var_os("AMADEUS_OPEN_STICKERS").is_some() {
             self.chat.debug_open_stickers();

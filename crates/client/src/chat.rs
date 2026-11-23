@@ -29,6 +29,8 @@ const DECODE_MAX_SIDE: u32 = 2048;
 const THUMB: f32 = 88.0;
 /// Подгружать старые сообщения, когда до верха осталось меньше.
 const LOAD_OLDER_MARGIN: f32 = 400.0;
+/// Запас вокруг видимой области ленты, внутри которого строки ещё рисуются (подгрузка картинок до появления на экране).
+const CULL_MARGIN: f32 = 600.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
@@ -91,6 +93,26 @@ struct Log {
     last_content_h: f32,
     /// Сколько кадров лента уже показана (в первых кадрах прокрутка ещё не встала вниз — старое не грузим).
     shown_frames: u32,
+    /// Высоты уже нарисованных сообщений: невидимые за экраном строки не рисуем, а пропускаем на эту высоту.
+    heights: std::collections::HashMap<i64, RowHeight>,
+}
+
+/// Запомненная высота строки ленты и то, при чём она получена (ширина, группировка, содержимое).
+#[derive(Clone, Copy, PartialEq)]
+struct RowKey {
+    width: i32,
+    grouped: bool,
+    new_day: bool,
+    content: usize,
+    edited: Option<i64>,
+    reactions: usize,
+    attachments: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RowHeight {
+    key: RowKey,
+    h: f32,
 }
 
 #[derive(Default)]
@@ -840,6 +862,7 @@ impl Chat {
         let reached_start = log.reached_start;
         let loading_older = log.loading_older;
         let msgs = std::mem::take(&mut log.msgs);
+        let mut heights = std::mem::take(&mut log.heights);
         let outbox = std::mem::take(&mut log.outbox);
         let mut act = FeedAct::None;
         let out = egui::ScrollArea::vertical()
@@ -866,15 +889,34 @@ impl Chat {
                 let mut prev: Option<&Message> = None;
                 for m in &msgs {
                     let new_day = prev.is_none_or(|p| day_of(p.created_at) != day_of(m.created_at));
+                    let grouped = !new_day
+                        && prev.is_some_and(|p| p.author.id == m.author.id && m.created_at - p.created_at < GROUP_GAP_SECS);
+                    prev = Some(m);
+                    // Строка целиком за пределами видимой области (с запасом) и её высота известна — не рисуем, только отступ.
+                    let key = RowKey {
+                        width: ui.available_width() as i32,
+                        grouped,
+                        new_day,
+                        content: m.content.len(),
+                        edited: m.edited_at,
+                        reactions: m.reactions.len(),
+                        attachments: m.attachments.len(),
+                    };
+                    let top = ui.cursor().min.y;
+                    if let Some(rh) = heights.get(&m.id).filter(|rh| rh.key == key) {
+                        let clip = ui.clip_rect();
+                        if top + rh.h < clip.top() - CULL_MARGIN || top > clip.bottom() + CULL_MARGIN {
+                            ui.add_space(rh.h);
+                            continue;
+                        }
+                    }
                     if new_day {
                         day_separator(ui, m.created_at);
                     }
-                    let grouped = !new_day
-                        && prev.is_some_and(|p| p.author.id == m.author.id && m.created_at - p.created_at < GROUP_GAP_SECS);
                     if let Some(a) = self.message_row(ui, m, grouped, people) {
                         act = a;
                     }
-                    prev = Some(m);
+                    heights.insert(m.id, RowHeight { key, h: ui.cursor().min.y - top });
                 }
                 for o in &outbox {
                     if let Some(a) = outgoing_row(ui, o) {
@@ -885,6 +927,7 @@ impl Chat {
             });
         let log = self.logs.entry(ch.id).or_default();
         log.msgs = msgs;
+        log.heights = heights;
         log.outbox = outbox;
         // старые сообщения добавились сверху — сдвигаем прокрутку на их высоту (кадр перерисовывается без скачка)
         if let Some(prev_h) = log.prepended_from.take() {
