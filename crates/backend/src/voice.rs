@@ -72,12 +72,12 @@ pub struct Presence {
 
 impl Presence {
     pub fn roster(&self, room: &str) -> Vec<i64> {
-        self.rooms.lock().unwrap().get(room).map(|s| s.keys().copied().collect()).unwrap_or_default()
+        self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(room).map(|s| s.keys().copied().collect()).unwrap_or_default()
     }
 
     /// Все непустые голосовые каналы сервера.
     pub fn of_server(&self, server_id: i64) -> Vec<VoiceRoster> {
-        let rooms = self.rooms.lock().unwrap();
+        let rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut v: Vec<VoiceRoster> = rooms
             .iter()
             .filter_map(|(room, ids)| {
@@ -93,7 +93,7 @@ impl Presence {
     pub fn rooms_of(&self, server_id: i64, user_id: i64) -> Vec<String> {
         self.rooms
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|(room, ids)| parse_room(room).is_some_and(|(s, _)| s == server_id) && ids.contains_key(&user_id))
             .map(|(r, _)| r.clone())
@@ -102,7 +102,7 @@ impl Presence {
 
     /// Изменить состав комнаты; true — если поменялся список людей.
     fn update(&self, room: &str, f: impl FnOnce(&mut BTreeMap<i64, String>)) -> bool {
-        let mut rooms = self.rooms.lock().unwrap();
+        let mut rooms = self.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let set = rooms.entry(room.to_string()).or_default();
         let before: Vec<i64> = set.keys().copied().collect();
         f(set);
@@ -160,7 +160,7 @@ pub fn room_finished(state: &AppState, room: &str) {
 pub async fn reconcile(state: &AppState) -> anyhow::Result<()> {
     let listing = state.inner.rooms.list().await?;
     let changed: Vec<String> = {
-        let mut rooms = state.inner.presence.rooms.lock().unwrap();
+        let mut rooms = state.inner.presence.rooms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut fresh: HashMap<String, BTreeMap<i64, String>> = HashMap::new();
         for (room, ids) in listing {
             if !is_ours(&room) {

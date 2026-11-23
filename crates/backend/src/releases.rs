@@ -126,7 +126,7 @@ impl Upstream {
     /// Последний выпуск, который можно отдать клиентам этого сервера. Никогда не ждёт чужой запрос к upstream.
     async fn latest(&self) -> Option<ReleaseInfo> {
         let stale = {
-            let s = self.state.lock().expect("upstream state");
+            let s = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some((at, info)) = &s.ok
                 && at.elapsed() < self.fresh
             {
@@ -142,7 +142,7 @@ impl Upstream {
             return stale;
         };
         let res = self.fetch().await;
-        let mut s = self.state.lock().expect("upstream state");
+        let mut s = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match res {
             Ok(Some(info)) => {
                 s.ok = Some((Instant::now(), info.clone()));
