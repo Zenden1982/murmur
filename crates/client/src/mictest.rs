@@ -91,7 +91,7 @@ pub fn start(
     let (ready2, error2) = (ready.clone(), error.clone());
     let spawned = std::thread::Builder::new().name("amadeus-mictest".into()).spawn(move || {
         let t0 = std::time::Instant::now();
-        match open(input_name.as_deref(), output_name.as_deref(), noise, agc, playback, level) {
+        match open(input_name.as_deref(), output_name.as_deref(), noise, agc, playback, level, error2.clone()) {
             Ok(streams) => {
                 log::info!("проверка микрофона: запущена за {} мс", t0.elapsed().as_millis());
                 ready2.store(true, Ordering::Relaxed);
@@ -117,6 +117,7 @@ fn open(
     agc: bool,
     playback: bool,
     level: Arc<AtomicU32>,
+    error: Arc<Mutex<Option<String>>>,
 ) -> Result<Streams, String> {
     let host = cpal::default_host();
     let input = find(host.input_devices().map_err(|e| e.to_string())?, input_name)
@@ -163,7 +164,13 @@ fn open(
                         frame.fill(s.unwrap_or(0.0));
                     }
                 },
-                |e| log::warn!("проверка микрофона, вывод: {e}"),
+                {
+                    let error = error.clone();
+                    move |e| {
+                        log::warn!("проверка микрофона, вывод: {e}");
+                        *error.lock().unwrap() = Some(format!("вывод: {e}"));
+                    }
+                },
                 None,
             )
             .map_err(|e| format!("вывод: {e}"))?;
@@ -235,7 +242,10 @@ fn open(
                     }
                 }
             },
-            |e| log::warn!("проверка микрофона, захват: {e}"),
+            move |e| {
+                log::warn!("проверка микрофона, захват: {e}");
+                *error.lock().unwrap() = Some(format!("микрофон: {e}"));
+            },
             None,
         )
         .map_err(|e| format!("микрофон: {e}"))?;
