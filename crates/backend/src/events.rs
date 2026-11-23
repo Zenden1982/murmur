@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 use proto::ServerEvent;
 use tokio::sync::broadcast::{Receiver, error::RecvError};
 
-use crate::{AppState, extract::AuthUser};
+use crate::{AppState, error::AppError, extract::AuthUser};
 
 const SSE_KEEPALIVE: Duration = Duration::from_secs(20);
 
@@ -71,22 +71,54 @@ struct Feed {
     rx: Receiver<Scoped>,
     state: AppState,
     me: i64,
+    /// Хеш токена сессии потока: после выхода/истечения поток закрывается (см. SESSION_RECHECK).
+    token_hash: String,
     servers: HashSet<i64>,
     /// Пока поток жив — человек «в сети» для друзей.
     _online: crate::friends::OnlineGuard,
 }
 
+/// Не больше стольких потоков событий на человека.
+const MAX_STREAMS: usize = 8;
+/// Как часто открытый поток перепроверяет, что сессия не завершена.
+const SESSION_RECHECK: Duration = Duration::from_secs(60);
+
+async fn session_alive(state: &AppState, token_hash: &str) -> bool {
+    let r: Result<Option<i64>, _> = sqlx::query_scalar("SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?")
+        .bind(token_hash)
+        .bind(crate::now())
+        .fetch_optional(&state.inner.db)
+        .await;
+    // ошибка БД — не повод рвать поток
+    r.map(|v| v.is_some()).unwrap_or(true)
+}
+
 /// `GET /events` — поток событий (SSE). Первое событие — `hello`; при отставании — `resync`.
 pub async fn events(State(state): State<AppState>, user: AuthUser) -> Response {
+    // Не больше MAX_STREAMS потоков на человека (зависшие/забытые вкладки и клиенты не копятся).
+    if state.inner.online.streams_of(user.id) >= MAX_STREAMS {
+        return AppError::RateLimited { retry_after_secs: 5 }.into_response();
+    }
     let rx = state.inner.events.subscribe();
     let mut shutdown = state.inner.shutdown.subscribe();
     let servers = my_servers(&state, user.id).await;
     tracing::debug!(user_id = user.id, "events stream opened");
     let online = crate::friends::OnlineGuard::new(&state, user.id);
-    let feed = Feed { rx, state, me: user.id, servers, _online: online };
+    let feed = Feed { rx, state, me: user.id, token_hash: user.token_hash.clone(), servers, _online: online };
     let live = futures_util::stream::unfold(feed, |mut f| async move {
         loop {
-            match f.rx.recv().await {
+            let got = match tokio::time::timeout(SESSION_RECHECK, f.rx.recv()).await {
+                Ok(r) => r,
+                Err(_) => {
+                    // тихо: проверяем, что сессия ещё действует
+                    if !session_alive(&f.state, &f.token_hash).await {
+                        tracing::debug!(user_id = f.me, "events stream closed: session ended");
+                        return None;
+                    }
+                    continue;
+                }
+            };
+            match got {
                 Ok(s) => {
                     if deliver(f.me, &mut f.servers, &s) {
                         return Some((s.event, f));

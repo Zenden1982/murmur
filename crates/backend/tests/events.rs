@@ -160,3 +160,19 @@ async fn old_client_events_shape() {
     }
     assert_eq!(v["message"]["author"]["name"], "okabe");
 }
+
+#[tokio::test]
+async fn streams_per_user_are_capped() {
+    let t = setup().await;
+    let a = t.user("okabe").await;
+    let mut open = Vec::new();
+    for _ in 0..8 {
+        open.push(Stream::open(&t, &a.0).await);
+    }
+    let req = Request::builder().uri("/events").header(header::AUTHORIZATION, format!("Bearer {}", a.0)).body(Body::empty()).unwrap();
+    assert_eq!(t.app.clone().oneshot(req).await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+    // закрыли один — можно снова
+    drop(open.pop());
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let _again = Stream::open(&t, &a.0).await;
+}

@@ -27,6 +27,11 @@ pub struct Online {
 }
 
 impl Online {
+    /// Сколько потоков событий открыто сейчас у человека.
+    pub fn streams_of(&self, user: i64) -> usize {
+        self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&user).copied().unwrap_or(0)
+    }
+
     pub fn is_online(&self, user: i64) -> bool {
         self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&user).is_some_and(|n| *n > 0)
     }
