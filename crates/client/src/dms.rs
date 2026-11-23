@@ -269,7 +269,9 @@ pub fn header(ui: &mut Ui, people: &People, dm: &DmChannel, online: Option<bool>
             None => dm.user.name.clone(),
         };
         ui.label(RichText::new(sub).size(13.5).color(p.text_muted));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        // кнопка звонка — рядом с именем, а не у правого края окна (на широком экране она уезжала далеко)
+        ui.add_space(8.0);
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             let call = dm.call.as_ref();
             let others_in = call.is_some_and(|c| c.participants.iter().any(|u| *u != me));
             if in_this_call {

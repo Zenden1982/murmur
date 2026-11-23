@@ -895,7 +895,7 @@ impl App {
             match crate::dms::incoming_window(ui.ctx(), &self.people, &dm) {
                 Some(true) => {
                     self.voice.send(Cmd::Join(crate::dms::call_channel(&dm)));
-                    self.view = View::Voice;
+                    self.view = View::Dm(dm.id);
                 }
                 Some(false) => {
                     self.dms.dismiss_call(dm.id);
@@ -1389,6 +1389,25 @@ impl App {
         } else {
         match text_channel {
             Some(ch) => {
+                if let View::Dm(id) = self.view
+                    && self.dm_call_here(&vs, id)
+                {
+                    // звонок другу — сцена над перепиской, во вкладке самого друга
+                    let h = (ui.available_height() * 0.58).clamp(300.0, 680.0);
+                    egui::Panel::top("dm-call")
+                        .exact_size(h)
+                        .resizable(false)
+                        .show_separator_line(false)
+                        .frame(Frame::new().fill(t::p().bg))
+                        .show(ui, |ui| {
+                            let r = ui.max_rect();
+                            ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, t::p().border));
+                            self.dock_panel(ui, &vs);
+                            egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg).inner_margin(Margin::same(16))).show(ui, |ui| {
+                                self.ui_stage(ui, &vs);
+                            });
+                        });
+                }
                 let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open();
                 egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
                     self.chat.ui(ui, &ch, modal, &self.people);
@@ -1876,7 +1895,7 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(RichText::new(sub).size(12.0).color(t::p().text_muted));
                     // капсулы с «Отключиться» вне экрана канала нет — маленькая красная трубка здесь
-                    if vs.channel.is_some() && self.view != View::Voice && leave_button(ui).clicked() {
+                    if vs.channel.is_some() && !self.on_call_screen(vs) && leave_button(ui).clicked() {
                         self.voice.send(Cmd::Leave);
                     }
                 });
@@ -2188,7 +2207,6 @@ impl App {
                     let in_call = vs.channel.as_ref().is_some_and(|c| crate::dms::is_dm(c) && c.id == id) && vs.conn != Conn::Idle;
                     if let Some(crate::dms::HeaderAct::Call) = crate::dms::header(ui, &self.people, &dm, self.friends.online(dm.user.id), me, in_call) {
                         self.voice.send(Cmd::Join(crate::dms::call_channel(&dm)));
-                        self.view = View::Voice;
                     }
                     return;
                 }
@@ -2239,11 +2257,29 @@ impl App {
 
     /// Нижняя панель управления — плавающая капсула по центру: круглые кнопки-значки (микрофон, звук, экран),
     /// разделитель и «Отключиться» (единственная красная кнопка).
+    /// Экран звонка: голосовой канал сервера либо диалог, где идёт этот звонок (сцена — над перепиской).
+    fn on_call_screen(&self, vs: &VoiceState) -> bool {
+        match self.view {
+            View::Voice => true,
+            View::Dm(id) => self.dm_call_here(vs, id),
+            _ => false,
+        }
+    }
+
+    /// Идёт (или набирается) звонок именно в этом диалоге.
+    fn dm_call_here(&self, vs: &VoiceState, id: i64) -> bool {
+        vs.channel.as_ref().is_some_and(|c| crate::dms::is_dm(c) && c.id == id) && vs.conn != Conn::Idle
+    }
+
     fn ui_dock(&mut self, ui: &mut Ui, vs: &VoiceState) {
         // капсула — только в голосовом канале и на его экране; в чатах управление — в панели пользователя слева
         if vs.channel.is_none() || self.view != View::Voice {
             return;
         }
+        self.dock_panel(ui, vs);
+    }
+
+    fn dock_panel(&mut self, ui: &mut Ui, vs: &VoiceState) {
         egui::Panel::bottom("dock")
             .exact_size(84.0)
             .resizable(false)
@@ -2678,7 +2714,7 @@ impl App {
             self.set_fullscreen(&ctx, false);
         }
         let modal_open =
-            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open() || self.view != View::Voice;
+            self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open() || !self.on_call_screen(vs);
         let (f11, esc) = ui.input(|i| (i.key_pressed(egui::Key::F11), i.key_pressed(egui::Key::Escape)));
         if f11 && !modal_open {
             if self.fullscreen {
@@ -2747,6 +2783,31 @@ impl App {
             }
             ui.ctx().request_repaint_after(Duration::from_millis(250));
             chip(ui.painter(), pos2(r.center().x, r.top() + 20.0), Align2::CENTER_TOP, "Esc или двойной клик — выйти из полного экрана", ON_VIDEO_MUTED);
+            // громкость звука трансляции — слева внизу, та же настройка, что в окошке участника
+            let mut svol = self.settings.stream_volume_of(&id);
+            let pill = Rect::from_min_size(pos2(r.left() + 24.0, r.bottom() - 54.0), vec2(250.0, 36.0));
+            ui.painter().rect_filled(pill, 18.0, t::overlay_dark(190));
+            let icon = if svol <= 0.001 { ph::SPEAKER_SLASH } else if svol < 0.5 { ph::SPEAKER_LOW } else { ph::SPEAKER_HIGH };
+            let mut changed = false;
+            let mute = ui.interact(Rect::from_center_size(pill.left_center() + vec2(20.0, 0.0), vec2(32.0, 32.0)), Id::new("fs-mute"), Sense::click());
+            ui.painter().text(pill.left_center() + vec2(20.0, 0.0), Align2::CENTER_CENTER, icon, t::font(18.0), if mute.hovered() { t::p().accent } else { ON_VIDEO });
+            if mute.on_hover_text(if svol <= 0.001 { "Включить звук трансляции" } else { "Выключить звук трансляции" }).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                svol = if svol <= 0.001 { 1.0 } else { 0.0 };
+                changed = true;
+            }
+            ui.scope_builder(egui::UiBuilder::new().max_rect(Rect::from_min_size(pill.left_top() + vec2(40.0, 7.0), vec2(204.0, 22.0))), |ui| {
+                if kit::slider(ui, &mut svol, 0.0..=2.0, 204.0).changed() {
+                    changed = true;
+                }
+            });
+            if changed {
+                if (svol - 1.0).abs() < 0.04 {
+                    svol = 1.0;
+                }
+                self.settings.stream_volume.insert(id.clone(), svol);
+                self.settings.save();
+                self.voice.send(Cmd::SetStreamVolume(id.clone(), svol));
+            }
             let mut c = pos2(r.right() - 36.0, r.bottom() - 36.0);
             if overlay_button(ui, c, ph::X, "Перестать смотреть", Id::new("fs-stop")).clicked() {
                 self.unwatch(ui.ctx(), &id);
@@ -3905,9 +3966,13 @@ impl App {
             ui.set_max_size(r.size());
             let painter = ui.painter().clone();
             painter.rect_filled(r, CornerRadius::ZERO, p.bg);
-            // меню слева
-            let menu = Rect::from_min_max(r.min, pos2(r.left() + 240.0, r.bottom()));
-            painter.rect_filled(menu, CornerRadius::ZERO, p.surface);
+            // меню слева; на широком окне меню + раздел + крестик стоят группой по центру, а не прижаты к краям
+            const MENU_W: f32 = 240.0;
+            const BODY_W: f32 = 680.0;
+            let group_w = MENU_W + 1.0 + 40.0 + BODY_W + 104.0;
+            let off = ((r.width() - group_w) / 2.0).max(0.0);
+            let menu = Rect::from_min_max(pos2(r.left() + off, r.top()), pos2(r.left() + off + MENU_W, r.bottom()));
+            painter.rect_filled(Rect::from_min_max(r.min, pos2(menu.right(), r.bottom())), CornerRadius::ZERO, p.surface);
             painter.vline(menu.right(), menu.y_range(), Stroke::new(1.0, p.border));
             ui.scope_builder(egui::UiBuilder::new().max_rect(menu.shrink2(vec2(12.0, 16.0))), |ui| {
                 if self.ui_settings_menu(ui) {
@@ -3917,7 +3982,8 @@ impl App {
             });
             // раздел справа
             let content = Rect::from_min_max(pos2(menu.right() + 1.0, r.top()), r.max);
-            let x = Rect::from_center_size(pos2(content.right() - 44.0, content.top() + 44.0), vec2(36.0, 36.0));
+            let body_right = (content.right() - 96.0).min(content.left() + 40.0 + BODY_W);
+            let x = Rect::from_center_size(pos2(body_right + 52.0, content.top() + 44.0), vec2(36.0, 36.0));
             let xr = ui.interact(x, Id::new("settings-close"), Sense::click());
             let lit = ui.ctx().animate_bool_with_time(xr.id, xr.hovered(), kit::HOVER_S);
             painter.circle(x.center(), 18.0, Color32::TRANSPARENT.lerp_to_gamma(p.row_hover, lit), Stroke::new(1.0, p.border_strong), );
@@ -3925,7 +3991,7 @@ impl App {
             if xr.on_hover_text("Закрыть (Esc)").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 close = true;
             }
-            let body = Rect::from_min_max(pos2(content.left() + 40.0, content.top() + 28.0), pos2(content.right() - 96.0, content.bottom()));
+            let body = Rect::from_min_max(pos2(content.left() + 40.0, content.top() + 28.0), pos2(body_right, content.bottom()));
             ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
                 let tab = self.set_tab;
                 let (_, _, title, sub, _) = SET_TABS.iter().find(|t| t.0 == tab).copied().unwrap_or(SET_TABS[0]);
