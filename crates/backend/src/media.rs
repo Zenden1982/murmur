@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn chat_gif_too_heavy() {
         // холст 4000×4000 = 16 Мп, 5 кадров → 80 Мп > 64 Мп
-        let g = gif_frames(4000, 4000, &vec![(4000, 4000, 2); 5]);
+        let g = gif_frames(4000, 4000, &[(4000, 4000, 2); 5]);
         assert!(sanitize_chat(&g).is_err());
     }
 
