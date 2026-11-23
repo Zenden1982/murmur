@@ -131,7 +131,24 @@ async fn new_session(state: &AppState, user: User) -> AppResult<AuthResponse> {
     })
 }
 
+/// Ключ ограничителя: IPv6 — по сети /64 (у одного клиента их миллиарды), IPv4-в-IPv6 — как IPv4.
+pub(crate) fn limiter_key(ip: std::net::IpAddr) -> std::net::IpAddr {
+    use std::net::{IpAddr, Ipv6Addr};
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let mut s = v6.segments();
+                s[4..].fill(0);
+                IpAddr::V6(Ipv6Addr::from(s))
+            }
+        },
+        v4 => v4,
+    }
+}
+
 fn rate_limit(state: &AppState, ip: std::net::IpAddr) -> AppResult<()> {
+    let ip = limiter_key(ip);
     state
         .inner
         .auth_limiter
@@ -205,6 +222,8 @@ async fn login(
     let Some((id, _, _, _)) = row.filter(|_| ok) else {
         return Err(AppError::BadCredentials);
     };
+    // считаются только неудачные попытки: удачный вход (в т.ч. за общим IP) блокировку не приближает
+    state.inner.auth_limiter.refund(limiter_key(ip));
     sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
         .bind(now())
         .execute(&state.inner.db)

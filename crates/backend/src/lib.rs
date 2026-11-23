@@ -50,6 +50,8 @@ pub const UPLOADS: u32 = 30;
 pub const UPLOADS_WINDOW: Duration = Duration::from_secs(60);
 /// Лимит смен аватара/баннера/иконок на пользователя (тяжёлая обработка картинки).
 pub const MEDIA_CHANGES: u32 = 10;
+/// Лимит просмотров приглашения без входа (отдельно от входа: страницу приглашения открывают часто).
+pub const PREVIEW_ATTEMPTS: u32 = 60;
 pub const MEDIA_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
@@ -65,6 +67,7 @@ pub struct Inner {
     pub chat_limiter: RateLimiter<i64>,
     pub upload_limiter: RateLimiter<i64>,
     pub media_limiter: RateLimiter<i64>,
+    pub preview_limiter: RateLimiter,
     /// Где лежат файлы вложений.
     pub uploads_dir: PathBuf,
     /// Выпуски клиента (`latest.json` + файлы), см. `releases.rs`.
@@ -120,6 +123,7 @@ impl AppState {
                 chat_limiter: RateLimiter::new(CHAT_MESSAGES, CHAT_WINDOW),
                 upload_limiter: RateLimiter::new(UPLOADS, UPLOADS_WINDOW),
                 media_limiter: RateLimiter::new(MEDIA_CHANGES, MEDIA_WINDOW),
+                preview_limiter: RateLimiter::new(PREVIEW_ATTEMPTS, AUTH_WINDOW),
                 uploads_dir,
                 releases_dir,
                 events: broadcast::channel(256).0,

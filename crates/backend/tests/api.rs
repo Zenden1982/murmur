@@ -222,8 +222,8 @@ async fn expired_session_rejected() {
 #[tokio::test]
 async fn login_rate_limited_per_ip() {
     let t = setup_with_limit(3).await;
-    t.admin().await; // 1 попытка с 203.0.113.1
-    for _ in 0..2 {
+    t.admin().await; // удачный вход попытку не расходует (возвращается)
+    for _ in 0..3 {
         let (s, _) = t
             .call(
                 Method::POST,

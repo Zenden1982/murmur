@@ -28,6 +28,14 @@ impl<K: Hash + Eq> RateLimiter<K> {
         self.check_at(key, Instant::now())
     }
 
+    /// Вернуть одну попытку (успешный вход не должен приближать блокировку).
+    pub fn refund(&self, key: K) {
+        let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(e) = map.get_mut(&key) {
+            e.1 = e.1.saturating_sub(1);
+        }
+    }
+
     fn check_at(&self, key: K, now: Instant) -> Result<(), u64> {
         let mut map = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() > 10_000 {
@@ -61,5 +69,16 @@ mod tests {
         assert!(rl.check_at(a, t0).is_err());
         assert!(rl.check_at(b, t0).is_ok());
         assert!(rl.check_at(a, t0 + Duration::from_secs(61)).is_ok());
+    }
+
+    #[test]
+    fn refund_gives_attempt_back() {
+        let rl = RateLimiter::new(2, Duration::from_secs(60));
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        rl.check(a).unwrap();
+        rl.check(a).unwrap();
+        rl.refund(a);
+        assert!(rl.check(a).is_ok());
+        assert!(rl.check(a).is_err());
     }
 }

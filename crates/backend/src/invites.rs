@@ -75,7 +75,7 @@ async fn valid_server(state: &AppState, code: &str) -> AppResult<Option<i64>> {
 
 /// `GET /invites/{code}` без входа — куда зовут (лимит попыток как у входа).
 pub async fn preview(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(code): Path<String>) -> AppResult<Json<InvitePreview>> {
-    state.inner.auth_limiter.check(ip).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
+    state.inner.preview_limiter.check(crate::routes::limiter_key(ip)).map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
     let sid = valid_server(&state, &security::normalize_invite_code(&code)).await?.ok_or(AppError::NotFound)?;
     let (server_name, server_icon, description, color): (String, Option<String>, Option<String>, Option<String>) =
         sqlx::query_as("SELECT name, icon_key, description, color FROM servers WHERE id = ?").bind(sid).fetch_one(&state.inner.db).await?;
