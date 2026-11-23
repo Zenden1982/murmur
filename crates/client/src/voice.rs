@@ -1324,6 +1324,9 @@ impl Engine {
     }
 
     async fn on_tick(&mut self) {
+        if let Some(msg) = crate::denoise::take_failure() {
+            self.set(|s| s.audio_error = Some(msg));
+        }
         if let Some(at) = self.ptt_release_at
             && Instant::now() >= at {
                 self.ptt_release_at = None;

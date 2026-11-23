@@ -104,6 +104,20 @@ pub enum Processor {
     Dfn { df: Box<DfTract>, inp: Array2<f32>, out: Array2<f32>, failed: bool },
 }
 
+/// Шумодав не поднялся или сломался в звонке (V14): движок голоса показывает это пользователю.
+static FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn report_failure(msg: String) {
+    if let Ok(mut f) = FAILURE.lock() {
+        *f = Some(msg);
+    }
+}
+
+/// Забрать сообщение об отказе шумодава (один раз).
+pub fn take_failure() -> Option<String> {
+    FAILURE.lock().ok().and_then(|mut f| f.take())
+}
+
 impl Processor {
     /// None — режим без нейросети. DeepFilterNet грузится ~0,1–0,5 с: создавать не на аудиопотоке.
     pub fn new(mode: NoiseMode) -> Option<Self> {
@@ -113,6 +127,7 @@ impl Processor {
                 let df = DfTract::default();
                 if df.hop_size != FRAME || df.sr != RATE as usize {
                     log::error!("DeepFilterNet: неожиданный формат модели {} Гц / {}", df.sr, df.hop_size);
+                    report_failure("Нейросетевое шумоподавление недоступно: неожиданный формат модели.".into());
                     return None;
                 }
                 let ch = df.ch;
@@ -152,6 +167,7 @@ impl Processor {
                         if !*failed {
                             *failed = true;
                             log::error!("DeepFilterNet: {e:#}");
+                            report_failure("Нейросетевое шумоподавление отказало — звук идёт без него.".into());
                         }
                     }
                 }
