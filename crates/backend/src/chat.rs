@@ -447,8 +447,12 @@ pub async fn upload(
     if body.len() > limits::IMAGE_MAX_BYTES {
         return Err(too_big());
     }
+    save_upload(&state, &user, body).await
+}
+
+/// Проверить и сохранить картинку как неотправленное вложение (общая часть `POST /uploads` и GIF из Klipy).
+pub(crate) async fn save_upload(state: &AppState, user: &AuthUser, raw: Bytes) -> AppResult<(StatusCode, Json<Attachment>)> {
     // Проверка и очистка (EXIF/GPS, текстовые чанки, комментарии GIF), лимиты декодирования.
-    let raw = body;
     let (body, mime, w, h) = tokio::task::spawn_blocking(move || crate::media::sanitize_chat(&raw))
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("обработка картинки: {e}")))?

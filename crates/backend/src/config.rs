@@ -24,6 +24,10 @@ pub struct Config {
     #[arg(long, env = "UPDATES_UPSTREAM", default_value = "https://api.murmurchat.ru")]
     pub updates_upstream: String,
 
+    /// Ключ Klipy для поиска GIF в чате. Пусто — GIF выключены. Запросы идут через наш сервер (клиенты Klipy не видят).
+    #[arg(long, env = "KLIPY_KEY", default_value = "", hide_env_values = true)]
+    pub klipy_key: String,
+
     #[command(flatten)]
     pub livekit: LiveKitConfig,
 

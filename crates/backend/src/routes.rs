@@ -10,7 +10,7 @@ use proto::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::{
-    AppState, SESSION_TTL, account, channels, chat, dm, events, friends, images, invites, profile, releases, servers, voice,
+    AppState, SESSION_TTL, account, channels, chat, dm, events, friends, gifs, images, invites, profile, releases, servers, voice,
     db::{self},
     error::{AppError, AppResult},
     extract::{ApiJson, AuthUser, ClientIp},
@@ -33,7 +33,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/sessions", get(account::list_sessions))
         .route("/auth/sessions/{id}", delete(account::revoke_session))
         .route("/auth/password", post(account::change_password))
-        .route("/auth/delete", post(account::delete_account))
+        .route("/gifs/search", get(gifs::search))
+        .route("/gifs/media", get(gifs::media))        .route("/auth/delete", post(account::delete_account))
         .route("/me", get(profile::me).patch(profile::update))
         .route(
             "/me/avatar",

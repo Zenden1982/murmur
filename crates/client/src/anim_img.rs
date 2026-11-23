@@ -63,34 +63,98 @@ pub fn decode_frames(bytes: &[u8], w: u32, h: u32, round: bool) -> Result<(Vec<e
 
 /// Как `decode_frames`, но кадров не больше чем на `max_bytes` (RGBA): лишние прореживаются, задержки складываются.
 pub fn decode_frames_capped(bytes: &[u8], w: u32, h: u32, round: bool, max_bytes: usize) -> Result<(Vec<egui::ColorImage>, Vec<u32>), String> {
-    use image::AnimationDecoder;
     let per = (w as usize * h as usize * 4).max(1);
     let n = frame_count(bytes).clamp(1, proto::limits::GIF_FRAMES_MAX);
     let step = (n * per).div_ceil(max_bytes.max(per)).max(1);
-    let dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let (mut frames, mut delays) = (Vec::new(), Vec::new());
-    for (i, f) in dec.into_frames().take(proto::limits::GIF_FRAMES_MAX).enumerate() {
-        let f = f.map_err(|e| e.to_string())?;
-        let (num, den) = f.delay().numer_denom_ms();
-        let ms = num.checked_div(den).unwrap_or(0);
+    let mut err = None;
+    composite_gif(bytes, |i, canvas, (cw, ch), ms| {
         if i % step != 0 {
             if let Some(last) = delays.last_mut() {
                 *last += ms;
             }
-            continue;
+            return;
         }
+        let Some(buf) = image::RgbaImage::from_raw(cw, ch, canvas.to_vec()) else {
+            err = Some("GIF: странный размер кадра".to_string());
+            return;
+        };
         delays.push(ms);
-        let img = image::DynamicImage::ImageRgba8(f.into_buffer());
-        let mut px = img.resize_to_fill(w, h, image::imageops::FilterType::Triangle).to_rgba8().into_raw();
+        let mut px = image::DynamicImage::ImageRgba8(buf).resize_to_fill(w, h, image::imageops::FilterType::Triangle).to_rgba8().into_raw();
         if round {
             crate::people::mask_round(&mut px, w);
         }
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px));
+    })?;
+    if let Some(e) = err {
+        return Err(e);
     }
     if frames.is_empty() {
         return Err("GIF пустой".into());
     }
     Ok((frames, delays))
+}
+
+/// Кадры GIF, собранные на холсте (прозрачность, способы очистки кадров): `f(номер, RGBA холста, (ширина, высота), задержка мс)`.
+/// Не больше `GIF_FRAMES_MAX` кадров. Свой разбор вместо `image::GifDecoder`: тот на кадрах с прозрачностью оставлял «мусор».
+fn composite_gif(bytes: &[u8], mut f: impl FnMut(usize, &[u8], (u32, u32), u32)) -> Result<(), String> {
+    use gif::DisposalMethod as D;
+    let mut o = gif::DecodeOptions::new();
+    o.set_color_output(gif::ColorOutput::RGBA);
+    o.set_memory_limit(gif::MemoryLimit::Bytes(std::num::NonZeroU64::new(256 * 1024 * 1024).unwrap()));
+    let mut d = o.read_info(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let (cw, ch) = (d.width() as usize, d.height() as usize);
+    let mut canvas = vec![0u8; cw * ch * 4];
+    // что сделать с холстом перед следующим кадром: очистить прямоугольник или вернуть сохранённое
+    let mut after: Option<(D, [usize; 4], Option<Vec<u8>>)> = None;
+    let mut i = 0;
+    while let Some(fr) = d.read_next_frame().map_err(|e| e.to_string())? {
+        if i >= proto::limits::GIF_FRAMES_MAX {
+            break;
+        }
+        if let Some((dispose, [l, t, w, h], saved)) = after.take() {
+            match dispose {
+                D::Background => {
+                    for y in t..(t + h).min(ch) {
+                        let row = (y * cw + l) * 4;
+                        canvas[row..row + (w.min(cw - l)) * 4].fill(0);
+                    }
+                }
+                D::Previous => {
+                    if let Some(s) = saved {
+                        canvas = s;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let rect = [fr.left as usize, fr.top as usize, fr.width as usize, fr.height as usize];
+        let saved = (fr.dispose == D::Previous).then(|| canvas.clone());
+        for y in 0..rect[3] {
+            let cy = rect[1] + y;
+            if cy >= ch {
+                break;
+            }
+            for x in 0..rect[2] {
+                let cx = rect[0] + x;
+                if cx >= cw {
+                    break;
+                }
+                let s = (y * rect[2] + x) * 4;
+                if fr.buffer[s + 3] != 0 {
+                    let dst = (cy * cw + cx) * 4;
+                    canvas[dst..dst + 4].copy_from_slice(&fr.buffer[s..s + 4]);
+                }
+            }
+        }
+        f(i, &canvas, (cw as u32, ch as u32), fr.delay as u32 * 10);
+        after = Some((fr.dispose, rect, saved));
+        i += 1;
+    }
+    if i == 0 {
+        return Err("GIF пустой".into());
+    }
+    Ok(())
 }
 
 /// Последние показанные — в конце; вытесняются самые давние, пока сумма больше бюджета.
@@ -165,6 +229,26 @@ mod tests {
         let (frames, _) = decode_frames(&gif3(), 320, 128, false).unwrap();
         assert_eq!(frames[2].size, [320, 128]);
         assert_eq!(frames[2].pixels[0].a(), 255);
+    }
+
+    #[test]
+    fn transparent_pixels_keep_previous_frame() {
+        // кадр 1 — красный 4×4; кадр 2 — 2×2 в углу: зелёный и один прозрачный пиксель (должен остаться красным)
+        let mut out = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut out, 4, 4, &[255, 0, 0, 0, 255, 0]).unwrap();
+            let f1 = gif::Frame::from_indexed_pixels(4, 4, vec![0u8; 16], None);
+            enc.write_frame(&f1).unwrap();
+            let mut f2 = gif::Frame::from_indexed_pixels(2, 2, vec![1u8, 1, 1, 0], Some(0));
+            f2.dispose = gif::DisposalMethod::Keep;
+            enc.write_frame(&f2).unwrap();
+        }
+        let (frames, _) = decode_frames(&out, 4, 4, false).unwrap();
+        assert_eq!(frames.len(), 2);
+        let px = |f: &egui::ColorImage, x: usize, y: usize| f.pixels[y * 4 + x];
+        assert_eq!(px(&frames[1], 0, 0), egui::Color32::from_rgb(0, 255, 0));
+        assert_eq!(px(&frames[1], 1, 1), egui::Color32::from_rgb(255, 0, 0), "прозрачный пиксель кадра 2 — красный из кадра 1");
+        assert_eq!(px(&frames[1], 3, 3), egui::Color32::from_rgb(255, 0, 0));
     }
 
     #[test]

@@ -217,6 +217,28 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+/// Одна гифка в панели GIF. Все адреса — на static.klipy.com; клиент ходит за ними только через наш сервер.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GifItem {
+    pub id: String,
+    pub title: String,
+    /// Размер превью.
+    pub width: u32,
+    pub height: u32,
+    /// Неподвижное превью (jpg).
+    pub thumb: String,
+    /// Анимированное превью (маленький gif) — для наведения.
+    pub preview: String,
+    /// Что отправляется в чат (gif среднего размера).
+    pub gif: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GifPage {
+    pub items: Vec<GifItem>,
+    pub has_next: bool,
+}
+
 /// Сеанс входа (Настройки → Аккаунт).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {

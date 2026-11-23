@@ -51,7 +51,10 @@ enum Ev {
     Sent { channel: i64, local: u64, res: ApiResult<Message> },
     Server(ServerEvent),
     Disconnected { reason: String, fatal: bool },
-    Image { id: i64, res: Result<ColorImage, String> },
+    /// Картинка вложения; для анимированного GIF — ещё и его байты (кадры декодируются по требованию).
+    Image { id: i64, res: Result<(ColorImage, Option<Arc<Vec<u8>>>), String> },
+    /// Кадры анимированного GIF в размере показа.
+    Anim { key: String, res: Result<(Vec<ColorImage>, Vec<u32>), String> },
     Attach { channel: i64, res: Vec<Result<Prepared, String>> },
     Notice(String),
 }
@@ -125,6 +128,16 @@ struct Draft {
 /// Сколько байт текстур вложений держим в памяти (RGBA).
 const IMAGE_TEXTURE_BUDGET: usize = 128 * 1024 * 1024;
 
+/// Кадры анимации вложения в одном размере показа.
+enum ChatAnim {
+    Loading,
+    Ready { frames: Vec<TextureHandle>, delays: Vec<u32>, bytes: usize },
+    Failed,
+}
+
+/// Сколько GIF в ленте играют одновременно, остальные — первый кадр.
+const GIF_SLOTS: u8 = 4;
+
 enum Img {
     Loading,
     Ready(TextureHandle),
@@ -169,6 +182,16 @@ pub struct Chat {
     /// Открыта панель эмодзи у поля ввода.
     emoji_menu: bool,
     emoji_picker: crate::emoji::picker::Picker,
+    gif_menu: bool,
+    gif_picker: crate::gif_picker::GifPicker,
+    /// Байты анимированных GIF вложений (id вложения → файл).
+    gifs: HashMap<i64, Arc<Vec<u8>>>,
+    anims: HashMap<String, ChatAnim>,
+    anim_lru: crate::anim_img::Lru,
+    /// Играть GIF в ленте (настройка «Анимировать GIF»).
+    play_gifs: bool,
+    /// (кадр, сколько GIF уже играют в этом кадре).
+    gif_slots: (u64, u8),
     /// Панель эмодзи для реакции: (сообщение, кнопка-якорь).
     react_picker: Option<(i64, Rect)>,
     /// Недавние эмодзи (сохраняет приложение в настройках).
@@ -186,6 +209,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(rt: tokio::runtime::Handle, ctx: egui::Context, api: Api) -> Self {
+        let gif_picker = crate::gif_picker::GifPicker::new(rt.clone(), ctx.clone(), api.clone());
         let (tx, rx) = std_mpsc::channel();
         Self {
             rt,
@@ -213,6 +237,13 @@ impl Chat {
             sticker_menu: false,
             emoji_menu: false,
             emoji_picker: Default::default(),
+            gif_menu: false,
+            gif_picker,
+            gifs: HashMap::new(),
+            anims: HashMap::new(),
+            anim_lru: crate::anim_img::Lru::new(crate::anim_img::BUDGET_BYTES / 2),
+            play_gifs: true,
+            gif_slots: (0, 0),
             react_picker: None,
             recent_emoji: Vec::new(),
             recent_changed: false,
@@ -286,6 +317,7 @@ impl Chat {
     }
 
     pub fn set_api(&mut self, api: Api) {
+        self.gif_picker.set_api(api.clone());
         self.api = api;
         self.reset();
     }
@@ -301,6 +333,10 @@ impl Chat {
         self.drafts.clear();
         self.images.clear();
         self.image_lru.clear();
+        self.gifs.clear();
+        self.anims.clear();
+        self.anim_lru.clear();
+        self.gif_menu = false;
         self.online = false;
         self.stream_error = None;
         self.unauthorized = false;
@@ -406,10 +442,26 @@ impl Chat {
                 }
                 Ev::Image { id, res } => {
                     let img = match res {
-                        Ok(ci) => Img::Ready(self.ctx.load_texture(format!("att-{id}"), ci, TextureOptions::LINEAR)),
+                        Ok((ci, gif)) => {
+                            if let Some(g) = gif {
+                                self.gifs.insert(id, g);
+                            }
+                            Img::Ready(self.ctx.load_texture(format!("att-{id}"), ci, TextureOptions::LINEAR))
+                        }
                         Err(e) => Img::Failed(e),
                     };
                     self.images.insert(id, img);
+                }
+                Ev::Anim { key, res } => {
+                    let a = match res {
+                        Ok((frames, delays)) => {
+                            let bytes = frames.iter().map(|f| f.pixels.len() * 4).sum();
+                            let frames = frames.into_iter().enumerate().map(|(i, f)| self.ctx.load_texture(format!("gifa-{key}-{i}"), f, TextureOptions::LINEAR)).collect();
+                            ChatAnim::Ready { frames, delays, bytes }
+                        }
+                        Err(_) => ChatAnim::Failed,
+                    };
+                    self.anims.insert(key, a);
                 }
                 Ev::Attach { channel, res } => {
                     let mut errors = Vec::new();
@@ -674,8 +726,77 @@ impl Chat {
         for gone in self.image_lru.touch_at(&id.to_string(), bytes, frame) {
             if let Ok(g) = gone.parse::<i64>() {
                 self.images.remove(&g);
+                self.gifs.remove(&g);
             }
         }
+    }
+
+    /// Включить/выключить анимацию GIF в ленте.
+    pub fn set_gif_animate(&mut self, on: bool) {
+        self.play_gifs = on;
+    }
+
+    /// Текущий кадр анимированного GIF вложения в размере показа `size`; None — не GIF, играть нельзя
+    /// или нет свободного места (одновременно играют не больше `GIF_SLOTS`); тогда рисуется первый кадр.
+    fn gif_tex(&mut self, id: i64, base: &TextureHandle, size: egui::Vec2, use_slot: bool) -> Option<TextureHandle> {
+        if !self.play_gifs || !crate::people::People::can_play(&self.ctx) {
+            return None;
+        }
+        let bytes = self.gifs.get(&id)?.clone();
+        if use_slot {
+            let pass = self.ctx.cumulative_pass_nr();
+            if self.gif_slots.0 != pass {
+                self.gif_slots = (pass, 0);
+            }
+            if self.gif_slots.1 >= GIF_SLOTS {
+                return None;
+            }
+            self.gif_slots.1 += 1;
+        }
+        let ppp = self.ctx.pixels_per_point();
+        let bs = base.size_vec2();
+        let w = (((size.x * ppp) / 32.0).ceil() * 32.0).clamp(64.0, 512.0) as u32;
+        let h = ((w as f32 * bs.y / bs.x.max(1.0)).round() as u32).max(1);
+        let key = format!("{id}@{w}x{h}");
+        match self.anims.get(&key) {
+            Some(ChatAnim::Ready { frames, delays, bytes }) => {
+                let t_ms = (self.ctx.input(|i| i.time) * 1000.0) as u64;
+                let (i, next) = crate::anim_img::frame_at(delays, t_ms);
+                let tex = frames.get(i).cloned();
+                let nbytes = *bytes;
+                self.ctx.request_repaint_after(Duration::from_millis(next.max(16) as u64));
+                let frame = self.ctx.cumulative_frame_nr();
+                for gone in self.anim_lru.touch_at(&key, nbytes, frame) {
+                    self.anims.remove(&gone);
+                }
+                tex
+            }
+            Some(_) => None,
+            None => {
+                self.anims.insert(key.clone(), ChatAnim::Loading);
+                let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+                self.rt.spawn_blocking(move || {
+                    // одна анимация — не больше четверти бюджета (длинные GIF прореживаются)
+                    let res = crate::anim_img::decode_frames_capped(&bytes, w, h, false, crate::anim_img::BUDGET_BYTES / 4);
+                    let _ = tx.send(Ev::Anim { key, res });
+                    ctx.request_repaint();
+                });
+                None
+            }
+        }
+    }
+
+    /// Выбранную гифку скачивает наш сервер (с Klipy); дальше — обычное вложение, уйдёт с сообщением.
+    fn attach_gif(&self, channel: i64, url: String) {
+        let (api, tx, ctx) = (self.api.clone(), self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let res = match api.gif_media(&url).await {
+                Ok(bytes) => tokio::task::spawn_blocking(move || prepare(bytes)).await.unwrap_or_else(|e| Err(e.to_string())),
+                Err(e) => Err(e.message),
+            };
+            let _ = tx.send(Ev::Attach { channel, res: vec![res] });
+            ctx.request_repaint();
+        });
     }
 
     fn request_image(&mut self, id: i64) {
@@ -687,9 +808,12 @@ impl Chat {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let res = match api.attachment(id).await {
-                Ok(bytes) => tokio::task::spawn_blocking(move || decode_for_display(&bytes))
-                    .await
-                    .unwrap_or_else(|e| Err(format!("{e}"))),
+                Ok(bytes) => tokio::task::spawn_blocking(move || {
+                    let gif = crate::anim_img::is_animated(&bytes).then(|| Arc::new(bytes.clone()));
+                    decode_for_display(&bytes).map(|ci| (ci, gif))
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("{e}"))),
                 Err(e) => Err(e.message),
             };
             let _ = tx.send(Ev::Image { id, res });
@@ -1122,8 +1246,14 @@ impl Chat {
         let p = ui.painter();
         let mut act = None;
         self.touch_image(a.id);
+        let base = match self.images.get(&a.id) {
+            Some(Img::Ready(tex)) => Some(tex.clone()),
+            _ => None,
+        };
+        let anim = base.as_ref().and_then(|b| self.gif_tex(a.id, b, size, true));
         match self.images.get(&a.id) {
             Some(Img::Ready(tex)) => {
+                let tex = anim.as_ref().unwrap_or(tex);
                 egui::Image::new(tex).corner_radius(CornerRadius::same(kit::R_ROW)).paint_at(ui, rect);
                 if resp.hovered() {
                     p.rect_stroke(rect, CornerRadius::same(kit::R_ROW), Stroke::new(2.0, t::p().accent), StrokeKind::Inside);
@@ -1172,6 +1302,8 @@ impl Chat {
         let mut sticker_anchor: Option<Rect> = None;
         let mut sticker_pick: Option<&'static str> = None;
         let mut toggle_emoji = false;
+        let mut toggle_gif = false;
+        let mut gif_anchor: Option<Rect> = None;
         // подсказка :кодов: — (начало, курсор, список)
         let mut suggest: Option<(usize, usize, Vec<&'static crate::emoji::Entry>)> = None;
         let mut suggest_used: Option<String> = None;
@@ -1229,6 +1361,11 @@ impl Chat {
                         toggle_emoji = true;
                     }
                     emoji_anchor = Some(em.rect);
+                    let gf = kit::icon_button(ui, ph::GIF, if self.gif_menu { kit::IconState::Active } else { kit::IconState::Normal }, "GIF");
+                    if gf.clicked() {
+                        toggle_gif = true;
+                    }
+                    gif_anchor = Some(gf.rect);
                     // :код — подсказка; стрелки/Tab/Enter/Esc забираем до поля ввода
                     let cursor = egui::text_edit::TextEditState::load(ui.ctx(), id).and_then(|s| s.cursor.char_range()).map(|r| usize::from(r.primary.index));
                     let q = cursor.filter(|_| ui.memory(|m| m.has_focus(id))).and_then(|c| crate::emoji::query_at_cursor(&d.text, c).map(|(s, q)| (s, c, q)));
@@ -1354,11 +1491,39 @@ impl Chat {
         if toggle_stickers {
             self.sticker_menu = !self.sticker_menu;
             self.emoji_menu = false;
+            self.gif_menu = false;
         }
         if toggle_emoji {
             self.emoji_menu = !self.emoji_menu;
             self.sticker_menu = false;
+            self.gif_menu = false;
             self.emoji_picker.reset();
+        }
+        // отладка (скриншоты): MURMUR_OPEN_GIF=1 — открыть панель GIF один раз
+        #[cfg(debug_assertions)]
+        if std::env::var_os("MURMUR_OPEN_GIF").is_some() {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                self.gif_menu = true;
+                self.gif_picker.reset();
+            });
+        }
+        if toggle_gif {
+            self.gif_menu = !self.gif_menu;
+            self.emoji_menu = false;
+            self.sticker_menu = false;
+            self.gif_picker.reset();
+        }
+        if self.gif_menu && let Some(a) = gif_anchor {
+            match self.gif_picker.show(ui.ctx(), Id::new("gif-menu"), pos2(a.left(), a.top() - 8.0), Align2::LEFT_BOTTOM, a) {
+                crate::gif_picker::GifOut::Picked(item) => {
+                    self.attach_gif(ch.id, item.gif);
+                    self.gif_menu = false;
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+                crate::gif_picker::GifOut::Close => self.gif_menu = false,
+                crate::gif_picker::GifOut::None => {}
+            }
         }
         if self.emoji_menu && let Some(a) = emoji_anchor {
             let recent = self.recent_emoji.clone();
@@ -1459,10 +1624,21 @@ impl Chat {
             let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
             ui.painter().rect_filled(r, CornerRadius::ZERO, Color32::from_black_alpha(215));
             self.touch_image(id);
+            let base = match self.images.get(&id) {
+                Some(Img::Ready(tex)) => Some(tex.clone()),
+                _ => None,
+            };
+            let area = r.shrink2(vec2(48.0, 56.0));
+            let anim = base.as_ref().and_then(|b| {
+                let ts = b.size_vec2();
+                let s = (area.width() / ts.x).min(area.height() / ts.y).min(1.0);
+                self.gif_tex(id, b, ts * s, false)
+            });
             match self.images.get(&id) {
                 Some(Img::Ready(tex)) => {
-                    let area = r.shrink2(vec2(48.0, 56.0));
+                    let tex = anim.as_ref().unwrap_or(tex);
                     let ts = tex.size_vec2();
+                    let ts = base.as_ref().map_or(ts, |b| b.size_vec2());
                     let s = (area.width() / ts.x).min(area.height() / ts.y).min(1.0);
                     let ir = Rect::from_center_size(area.center(), ts * s);
                     egui::Image::new(tex).corner_radius(CornerRadius::same(6)).paint_at(ui, ir);

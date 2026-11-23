@@ -122,6 +122,8 @@ pub struct Settings {
     pub hotkeys: crate::hotkeys::Bindings,
     /// Звук при переключении горячими клавишами.
     pub hotkey_sounds: bool,
+    /// Играть GIF в ленте чата (иначе — первый кадр).
+    pub gif_animate: bool,
     /// Уведомлять: о личных сообщениях, об @упоминаниях, о входящих звонках.
     pub notify_dm: bool,
     pub notify_mention: bool,
@@ -212,6 +214,7 @@ impl Default for Settings {
             sounds: true,
             hotkeys: Default::default(),
             hotkey_sounds: true,
+            gif_animate: true,
             notify_dm: true,
             notify_mention: true,
             notify_call: true,
@@ -273,7 +276,7 @@ impl Settings {
         let Some(p) = path() else { return Self::default() };
         match std::fs::read(&p) {
             Ok(bytes) => {
-                let mut s: Self = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                let s: Self = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                     // Одно плохое поле не должно стирать токен, громкости и всё остальное: сохраняем копию и разбираем по полям.
                     let bad = p.with_extension("json.bad");
                     match std::fs::write(&bad, &bytes) {

@@ -47,6 +47,7 @@ mod sounds;
 mod stream;
 mod theme;
 mod tray;
+mod gif_picker;
 mod notify;
 mod unread;
 mod update;

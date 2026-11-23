@@ -167,6 +167,10 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         tracing::info!(upstream = %up.base(), "обновления клиента — с официального сервера, если своих нет");
         state = state.with_upstream(up);
     }
+    if !cfg.klipy_key.trim().is_empty() {
+        tracing::info!("GIF в чате включены (Klipy)");
+        state = state.with_klipy(backend::gifs::Klipy::new(&cfg.klipy_key));
+    }
     backend::chat::spawn_janitor(state.clone());
     backend::voice::spawn_reconciler(state.clone());
     let app = backend::router(state.clone());

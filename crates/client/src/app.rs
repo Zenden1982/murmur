@@ -3984,6 +3984,7 @@ impl App {
         for (text, tip, val) in [
             ("Останавливать анимации в фоне", "Окно свёрнуто или не в фокусе (например, вы в игре) — украшения не рисуются", &mut self.settings.pause_anim_in_background),
             ("Компактные плитки участников", "Небольшие плитки 200×68 вместо крупных", &mut self.settings.compact_tiles),
+            ("Анимировать GIF в чате", "Играют не больше четырёх гифок на экране, остальные — первым кадром", &mut self.settings.gif_animate),
             ("Живой кот в заголовке окна", "Моргает и шевелит ушами, когда кто-то заходит в канал", &mut self.settings.live_cat),
         ] {
             toggle_row(ui, w, |ui| {
@@ -5145,6 +5146,7 @@ impl eframe::App for App {
             self.sync_read(ui.input(|i| i.focused));
         }
         self.sync_notifications();
+        self.chat.set_gif_animate(self.settings.gif_animate);
         crate::frame::set_cat_asleep(self.friends.all_offline());
         self.channel_list.poll(&mut self.model);
         self.server_settings.poll();

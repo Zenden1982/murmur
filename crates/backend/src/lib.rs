@@ -7,6 +7,7 @@ pub mod ratelimit;
 pub mod security;
 
 mod account;
+pub mod gifs;
 mod channels;
 pub mod chat;
 mod db;
@@ -79,6 +80,8 @@ pub struct Inner {
     pub events: broadcast::Sender<events::Scoped>,
     /// Официальный сервер, с которого берутся обновления клиента, если своих выпусков нет.
     pub upstream: Option<releases::Upstream>,
+    /// GIF через Klipy (None — выключено, нет ключа).
+    pub klipy: Option<gifs::Klipy>,
     /// Комнаты LiveKit (RoomService); по умолчанию — заглушка.
     pub rooms: Arc<dyn voice::Rooms>,
     /// Кто сейчас в голосовых каналах.
@@ -132,6 +135,7 @@ impl AppState {
                 releases_dir,
                 events: broadcast::channel(256).0,
                 upstream: None,
+                klipy: None,
                 rooms: Arc::new(voice::NoRooms),
                 presence: voice::Presence::default(),
                 online: friends::Online::default(),
@@ -144,6 +148,12 @@ impl AppState {
     /// Подключить upstream обновлений (сразу после создания состояния).
     pub fn with_upstream(mut self, up: releases::Upstream) -> Self {
         Arc::get_mut(&mut self.inner).expect("with_upstream до клонирования состояния").upstream = Some(up);
+        self
+    }
+
+    /// Включить GIF (ключ Klipy), сразу после создания состояния.
+    pub fn with_klipy(mut self, klipy: gifs::Klipy) -> Self {
+        Arc::get_mut(&mut self.inner).expect("with_klipy до клонирования состояния").klipy = Some(klipy);
         self
     }
 

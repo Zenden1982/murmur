@@ -88,6 +88,19 @@ impl std::fmt::Debug for Api {
     }
 }
 
+/// Значение для строки запроса: всё, кроме букв, цифр и -._~, — в %XX.
+fn urlenc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 impl Api {
     pub fn new(base: &str, token: Option<String>) -> Self {
         // имя компьютера — подпись сеанса в Настройки → Аккаунт
@@ -188,6 +201,22 @@ impl Api {
     /// «Выйти везде»: закрывает все сеансы этого человека, включая текущий.
     pub async fn logout_all(&self) -> ApiResult<()> {
         self.call::<(), _>(Method::POST, "/auth/logout-all", None).await
+    }
+
+    /// GIF: поиск (пустой запрос — популярное) через наш сервер.
+    pub async fn gifs(&self, q: &str, page: u32) -> ApiResult<proto::GifPage> {
+        let req = self.request(Method::GET, &format!("/gifs/search?q={}&page={page}", urlenc(q)));
+        Self::decode(req.send().await.map_err(ApiError::network)?).await
+    }
+
+    /// Файл GIF-сервиса (превью, выбранная гифка) — только через наш сервер.
+    pub async fn gif_media(&self, url: &str) -> ApiResult<Vec<u8>> {
+        let resp = self.request(Method::GET, &format!("/gifs/media?u={}", urlenc(url))).send().await.map_err(ApiError::network)?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(humanize(status, resp.json::<ErrorBody>().await.ok()));
+        }
+        resp.bytes().await.map(|b| b.to_vec()).map_err(ApiError::network)
     }
 
     /// Мои сеансы входа.
