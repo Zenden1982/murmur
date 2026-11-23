@@ -1,4 +1,4 @@
-<h1 align="center">Murmur</h1>
+<h1 align="center"><img src="docs/logo.png" alt="" width="56" align="absmiddle">&nbsp;Murmur</h1>
 <p align="center"><b>Голос, чат и показ экрана со звуком — на вашем собственном сервере.<br>Можно даже дать другу порулить вашим компьютером. Сервер ставится одной командой.</b></p>
 <p align="center"><a href="README.en.md">English</a> · <b>Русский</b> · <a href="#установка-своего-сервера">Установка сервера</a> · <a href="https://github.com/Zenden1982/murmur/releases">Скачать клиент</a></p>
 

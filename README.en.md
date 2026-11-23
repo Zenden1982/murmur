@@ -1,4 +1,4 @@
-<h1 align="center">Murmur</h1>
+<h1 align="center"><img src="docs/logo.png" alt="" width="56" align="absmiddle">&nbsp;Murmur</h1>
 <p align="center"><b>Voice, chat and screen sharing with sound — on your own server.<br>You can even let a friend take the controls of your computer. The server installs with one command.</b></p>
 <p align="center"><b>English</b> · <a href="README.md">Русский</a> · <a href="#self-hosting">Self-hosting</a> · <a href="https://github.com/Zenden1982/murmur/releases">Download</a></p>
 
