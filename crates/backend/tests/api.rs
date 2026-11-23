@@ -433,7 +433,7 @@ async fn join_issues_valid_livekit_token() {
     assert!(claims.video.can_publish() && claims.video.can_subscribe());
     assert_eq!(
         claims.video.can_publish_sources,
-        ["microphone", "screen_share", "screen_share_audio"]
+        ["microphone", "camera", "screen_share", "screen_share_audio"]
     );
     assert!(!claims.video.can_update_own_metadata());
     assert!(!claims.video.room_admin && !claims.video.room_create);

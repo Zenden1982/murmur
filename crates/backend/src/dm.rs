@@ -376,7 +376,7 @@ pub async fn call(State(state): State<AppState>, user: AuthUser, Path(id): Path<
         can_publish: Some(true),
         can_subscribe: Some(true),
         can_publish_data: Some(true),
-        can_publish_sources: ["microphone", "screen_share", "screen_share_audio"].map(String::from).to_vec(),
+        can_publish_sources: ["microphone", "camera", "screen_share", "screen_share_audio"].map(String::from).to_vec(),
         can_update_own_metadata: Some(false),
         ..Default::default()
     };
