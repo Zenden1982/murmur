@@ -234,13 +234,35 @@ pub async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: St
     let uid = participant.and_then(|p| p.identity.parse::<i64>().ok());
     let sid = participant.map(|p| p.sid.as_str()).unwrap_or("");
     match (ev.event.as_str(), uid) {
-        ("participant_joined", Some(uid)) => joined(&state, room, uid, sid),
+        ("participant_joined", Some(uid)) => {
+            // Токен мог быть выдан до кика/бана или подобран: пускаем только тех, у кого сейчас есть доступ.
+            if may_be_in_room(&state, room, uid).await {
+                joined(&state, room, uid, sid)
+            } else {
+                tracing::warn!(%room, user_id = uid, "участник без доступа в комнате — выкидываю");
+                remove_from_room(&state, room, uid).await;
+            }
+        }
         ("participant_left" | "participant_connection_aborted", Some(uid)) => left(&state, room, uid, Some(sid)),
         ("room_finished", _) => room_finished(&state, room),
         _ => {}
     }
     tracing::debug!(event = %ev.event, %room, ?uid, "livekit webhook");
     Ok(StatusCode::OK)
+}
+
+/// Есть ли у пользователя сейчас доступ в эту комнату (голосовой канал сервера или звонок в ЛС).
+async fn may_be_in_room(state: &AppState, room: &str, user_id: i64) -> bool {
+    if let Some((server_id, channel_id)) = parse_room(room) {
+        return match crate::perm::channel_member(&state.inner.db, channel_id, user_id).await {
+            Ok((m, row)) => m.server_id == server_id && row.kind == "voice",
+            Err(_) => false,
+        };
+    }
+    if let Some(dm) = crate::dm::parse_dm_room(room) {
+        return matches!(crate::dm::dm_member(&state.inner.db, dm, user_id).await, Ok(Some(_)));
+    }
+    false
 }
 
 /// `GET /servers/{id}/voice` — кто в каких голосовых каналах сервера.

@@ -438,7 +438,7 @@ async fn join_issues_valid_livekit_token() {
     assert!(!claims.video.can_update_own_metadata());
     assert!(!claims.video.room_admin && !claims.video.room_create);
     let ttl = claims.exp as i64 - claims.nbf as i64;
-    assert!((6 * 3600 - 5..=6 * 3600 + 5).contains(&ttl), "ttl {ttl}");
+    assert!((15 * 60 - 5..=15 * 60 + 5).contains(&ttl), "ttl {ttl}");
 
     // чужим секретом не проверяется
     assert!(

@@ -38,7 +38,7 @@ use ratelimit::RateLimiter;
 /// Срок жизни сессии клиента.
 pub const SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
 /// Срок жизни LiveKit-токена (PLAN.md §3, фаза 2).
-pub const LIVEKIT_TOKEN_TTL: Duration = Duration::from_secs(6 * 3600);
+pub const LIVEKIT_TOKEN_TTL: Duration = Duration::from_secs(15 * 60);
 /// Лимит попыток входа/регистрации с одного IP.
 pub const AUTH_ATTEMPTS: u32 = 10;
 pub const AUTH_WINDOW: Duration = Duration::from_secs(5 * 60);
