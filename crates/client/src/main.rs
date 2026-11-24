@@ -66,6 +66,13 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{SurfaceErrorAction, WgpuConfiguration};
     use eframe::wgpu::CurrentSurfaceTexture as S;
     let mut o = WgpuConfiguration::default().with_surface_config(eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY);
+    // Vulkan на NVIDIA (драйвер 610.88) теряет устройство каждые 1–20 мин («driver implementation is at fault»,
+    // падения 2026-11-24). Берём DX12, GL — запасной. WGPU_BACKEND из окружения по-прежнему главнее.
+    if std::env::var_os("WGPU_BACKEND").is_none()
+        && let eframe::egui_wgpu::WgpuSetup::CreateNew(c) = &mut o.wgpu_setup
+    {
+        c.instance_descriptor.backends = eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL;
+    }
     o.on_surface_status = std::sync::Arc::new(|status| match status {
         S::Outdated => SurfaceErrorAction::Reconfigure,
         S::Lost => SurfaceErrorAction::RecreateSurface,
@@ -88,8 +95,8 @@ pub fn watch_gpu(device: &eframe::wgpu::Device) {
     let started = std::time::Instant::now();
     device.set_device_lost_callback(move |reason, msg| {
         log::error!("wgpu: устройство потеряно ({reason:?}): {msg}");
-        // Destroyed — штатное закрытие. Перезапуск не чаще, чем раз в минуту работы (иначе петля при битом драйвере).
-        if matches!(reason, eframe::wgpu::DeviceLostReason::Destroyed) || started.elapsed().as_secs() < 60 {
+        // Destroyed — штатное закрытие. Не перезапускаем, если проработали меньше 15 с (иначе петля при битом драйвере).
+        if matches!(reason, eframe::wgpu::DeviceLostReason::Destroyed) || started.elapsed().as_secs() < 15 {
             return;
         }
         if let Ok(exe) = std::env::current_exe()
