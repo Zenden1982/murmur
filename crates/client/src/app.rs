@@ -385,6 +385,9 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Runtime) -> Self {
         t::install(&cc.egui_ctx);
+        if let Some(rs) = &cc.wgpu_render_state {
+            crate::watch_gpu(&rs.device);
+        }
         crate::frame::style_native_window(cc);
         let ctx = cc.egui_ctx.clone();
         start_watchdog(ctx.clone());
