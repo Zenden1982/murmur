@@ -669,6 +669,10 @@ impl App {
             msg(3, (1, "tester"), "Го в катку через 5 минут? 😎🎮 Кто не придёт — тот 🐢. Флаг 🇷🇺, семья 👨‍👩‍👧, 1️⃣ и ❤ — всё цветное.", 2),
             msg(5, (3, "kurisu"), "🔥🔥", 1),
             proto::Message { sticker: Some("cat-hello".into()), ..msg(4, (2, "mayuri"), "[стикер: Кот машет]", 1) },
+            proto::Message {
+                attachments: vec![proto::Attachment { id: 900, name: "лаба-по-физике-отчёт.pdf".into(), mime: "application/octet-stream".into(), size: 2_516_582, width: 0, height: 0 }],
+                ..msg(6, (1, "tester"), "Скинул отчёт", 0)
+            },
         ]); }
         // Отладка (скриншоты): MURMUR_OPEN_STICKERS=1 — открыть выбор стикеров.
         if std::env::var_os("MURMUR_OPEN_STICKERS").is_some() {
@@ -1868,6 +1872,8 @@ impl App {
                 }
                 let modal = self.settings_open || self.picker.is_some() || self.popup.is_some() || self.update_open || self.servers.modal_open() || self.channel_list.modal_open() || self.server_settings.is_open();
                 egui::CentralPanel::no_frame().frame(Frame::new().fill(t::p().bg)).show(ui, |ui| {
+                    let manage = !crate::dms::is_dm(&ch) && (self.model.is_owner(ch.server_id) || self.model.has_perm(ch.server_id, proto::perm::MANAGE_MESSAGES));
+                    self.chat.set_manage_messages(manage);
                     self.chat.ui(ui, &ch, modal, &self.people);
                 });
             }

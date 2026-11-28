@@ -92,10 +92,10 @@ pub const STANDARD_ROLES: [(&str, i32, u32, bool); 4] = [
     (
         "Админ",
         2,
-        perm::INVITE | perm::KICK | perm::BAN | perm::DISCONNECT | perm::MANAGE_CHANNELS | perm::MANAGE_ROLES | perm::MANAGE_SERVER,
+        perm::INVITE | perm::KICK | perm::BAN | perm::DISCONNECT | perm::MANAGE_CHANNELS | perm::MANAGE_ROLES | perm::MANAGE_SERVER | perm::MANAGE_MESSAGES,
         false,
     ),
-    ("Модератор", 1, perm::INVITE | perm::KICK | perm::BAN | perm::DISCONNECT, false),
+    ("Модератор", 1, perm::INVITE | perm::KICK | perm::BAN | perm::DISCONNECT | perm::MANAGE_MESSAGES, false),
     ("Участник", 0, perm::INVITE, true),
 ];
 

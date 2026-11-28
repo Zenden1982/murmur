@@ -13,9 +13,20 @@ use crate::theme as t;
 const W: f32 = 372.0;
 const COLS: usize = 3;
 
+/// Сколько байт кадров анимированных превью держим (RGBA); одно превью — не больше четверти.
+const ANIM_BUDGET: usize = 48 * 1024 * 1024;
+
 enum Ev {
     Page { epoch: u64, page: u32, res: Result<GifPage, String> },
     Thumb { url: String, res: Result<ColorImage, String> },
+    Anim { key: String, res: Result<(Vec<ColorImage>, Vec<u32>), String> },
+}
+
+/// Кадры анимированного превью в размере ячейки.
+enum Anim {
+    Loading,
+    Ready { frames: Vec<TextureHandle>, delays: Vec<u32>, bytes: usize },
+    Failed,
 }
 
 enum Thumb {
@@ -45,6 +56,11 @@ pub struct GifPicker {
     loading: bool,
     error: Option<String>,
     thumbs: HashMap<String, Thumb>,
+    /// Анимированные превью видимых ячеек (ключ — адрес@размер).
+    anims: HashMap<String, Anim>,
+    anim_lru: crate::anim_img::Lru,
+    /// Настройка «Анимировать GIF в чате».
+    animate: bool,
     /// Номер поиска: ответы на устаревшие запросы отбрасываются.
     epoch: u64,
     started: bool,
@@ -68,6 +84,9 @@ impl GifPicker {
             loading: false,
             error: None,
             thumbs: HashMap::new(),
+            anims: HashMap::new(),
+            anim_lru: crate::anim_img::Lru::new(ANIM_BUDGET),
+            animate: true,
             epoch: 0,
             started: false,
             focused: false,
@@ -92,6 +111,8 @@ impl GifPicker {
         self.loading = false;
         self.error = None;
         self.thumbs.clear();
+        self.anims.clear();
+        self.anim_lru.clear();
         self.epoch += 1;
         self.started = false;
         self.focused = false;
@@ -129,6 +150,48 @@ impl GifPicker {
         });
     }
 
+    pub fn set_animate(&mut self, on: bool) {
+        self.animate = on;
+    }
+
+    /// Текущий кадр анимированного превью `url` размером `px` (в пикселях); None — пока нет (рисуется неподвижное).
+    fn anim_frame(&mut self, url: &str, px: [u32; 2]) -> Option<TextureHandle> {
+        if !self.animate || !crate::anim::window_active(&self.ctx) {
+            return None;
+        }
+        let key = format!("{url}@{}x{}", px[0], px[1]);
+        match self.anims.get(&key) {
+            Some(Anim::Ready { frames, delays, bytes }) => {
+                let t_ms = (self.ctx.input(|i| i.time) * 1000.0) as u64;
+                let (i, next) = crate::anim_img::frame_at(delays, t_ms);
+                let tex = frames.get(i).cloned();
+                let nbytes = *bytes;
+                self.ctx.request_repaint_after(std::time::Duration::from_millis(next.max(16) as u64));
+                let frame = self.ctx.cumulative_frame_nr();
+                for gone in self.anim_lru.touch_at(&key, nbytes, frame) {
+                    self.anims.remove(&gone);
+                }
+                tex
+            }
+            Some(_) => None,
+            None => {
+                self.anims.insert(key.clone(), Anim::Loading);
+                let (api, url, tx, ctx) = (self.api.clone(), url.to_string(), self.tx.clone(), self.ctx.clone());
+                self.rt.spawn(async move {
+                    let res = match api.gif_media(&url).await {
+                        Ok(bytes) => tokio::task::spawn_blocking(move || crate::anim_img::decode_frames_capped(&bytes, px[0], px[1], false, ANIM_BUDGET / 4))
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string())),
+                        Err(e) => Err(e.message),
+                    };
+                    let _ = tx.send(Ev::Anim { key, res });
+                    ctx.request_repaint();
+                });
+                None
+            }
+        }
+    }
+
     fn poll(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
@@ -157,6 +220,17 @@ impl GifPicker {
                         Err(_) => Thumb::Failed,
                     };
                     self.thumbs.insert(url, th);
+                }
+                Ev::Anim { key, res } => {
+                    let a = match res {
+                        Ok((frames, delays)) => {
+                            let bytes = frames.iter().map(|f| f.pixels.len() * 4).sum();
+                            let frames = frames.into_iter().enumerate().map(|(i, f)| self.ctx.load_texture(format!("gifp-{key}-{i}"), f, TextureOptions::LINEAR)).collect();
+                            Anim::Ready { frames, delays, bytes }
+                        }
+                        Err(_) => Anim::Failed,
+                    };
+                    self.anims.insert(key, a);
                 }
             }
         }
@@ -258,12 +332,23 @@ impl GifPicker {
                             let ratio = if it.width > 0 { it.height as f32 / it.width as f32 } else { 1.0 };
                             let size = vec2(col_w, (col_w * ratio).clamp(40.0, 220.0));
                             let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-                            if ui.is_rect_visible(rect) {
+                            let visible = ui.is_rect_visible(rect);
+                            if visible {
                                 self.request_thumb(&it.thumb);
                             }
                             let r = CornerRadius::same(8);
-                            match self.thumbs.get(&it.thumb) {
-                                Some(Thumb::Ready(tex)) => {
+                            // превью играет, когда видно и уже есть неподвижная картинка (она — пока грузятся кадры)
+                            let anim = if visible && it.preview != it.thumb && matches!(self.thumbs.get(&it.thumb), Some(Thumb::Ready(_))) {
+                                let ppp = ui.ctx().pixels_per_point();
+                                self.anim_frame(&it.preview, [(size.x * ppp).round().max(1.0) as u32, (size.y * ppp).round().max(1.0) as u32])
+                            } else {
+                                None
+                            };
+                            match (anim, self.thumbs.get(&it.thumb)) {
+                                (Some(tex), _) => {
+                                    egui::Image::new(&tex).corner_radius(r).fit_to_exact_size(size).paint_at(ui, rect);
+                                }
+                                (None, Some(Thumb::Ready(tex))) => {
                                     egui::Image::new(tex).corner_radius(r).fit_to_exact_size(size).paint_at(ui, rect);
                                 }
                                 _ => {

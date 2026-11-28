@@ -21,6 +21,10 @@ pub mod limits {
     pub const ATTACHMENTS_MAX: usize = 4;
     /// Размер одной картинки, байт.
     pub const IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+    /// Размер одного файла любого формата (не картинки), байт.
+    pub const FILE_MAX_BYTES: usize = 50 * 1024 * 1024;
+    /// Имя файла вложения, символов.
+    pub const FILE_NAME_MAX: usize = 120;
     /// Сторона картинки, пикселей.
     pub const IMAGE_MAX_SIDE: u32 = 16_384;
     /// Сообщений в одной странице истории (по умолчанию / максимум).
@@ -83,7 +87,9 @@ pub mod perm {
     pub const MANAGE_ROLES: u32 = 32;
     /// Название, иконка, все приглашения сервера.
     pub const MANAGE_SERVER: u32 = 64;
-    pub const ALL: u32 = 127;
+    /// Удалять чужие сообщения.
+    pub const MANAGE_MESSAGES: u32 = 128;
+    pub const ALL: u32 = 255;
 
     pub fn has(perms: u32, p: u32) -> bool {
         perms & p == p
@@ -659,15 +665,26 @@ pub struct Author {
     pub avatar: Option<String>,
 }
 
-/// Вложение (пока только картинки). Файл — `GET /attachments/{id}` с авторизацией.
+/// Вложение: картинка (с размерами) или файл любого формата. Файл — `GET /attachments/{id}` с авторизацией.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: i64,
-    /// `image/png`, `image/jpeg`, `image/gif`, `image/webp`.
+    /// Имя файла, как его прислали (у картинок может быть пустым).
+    #[serde(default)]
+    pub name: String,
+    /// Картинка: `image/png`, `image/jpeg`, `image/gif`, `image/webp`; любой другой файл — `application/octet-stream`.
     pub mime: String,
     pub size: u64,
+    /// У файлов (не картинок) — 0.
     pub width: u32,
     pub height: u32,
+}
+
+impl Attachment {
+    /// Картинка с превью в ленте (а не файл для скачивания).
+    pub fn is_image(&self) -> bool {
+        self.mime.starts_with("image/") && self.width > 0 && self.height > 0
+    }
 }
 
 /// Сообщение текстового канала. Время — unix-секунды.
@@ -781,6 +798,8 @@ pub enum ServerEvent {
     /// Сервер не успел доставить часть событий — перечитать открытые каналы.
     Resync,
     MessageCreated { message: Message },
+    /// Сообщение удалено (автором или модератором) — убрать из ленты.
+    MessageDeleted { channel_id: i64, message_id: i64 },
     /// Изменились реакции на сообщение — весь список заново.
     ReactionsChanged { channel_id: i64, message_id: i64, reactions: Vec<Reaction> },
     /// Сервер появился у меня (создал, вступил) или изменился.

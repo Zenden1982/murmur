@@ -81,6 +81,8 @@ pub struct Api {
 const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(40);
 /// Загрузка картинки (до 8 МБ на медленном канале).
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+/// Файл до 50 МБ на медленном канале.
+const FILE_UPLOAD_TIMEOUT: Duration = Duration::from_secs(900);
 
 impl std::fmt::Debug for Api {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -265,10 +267,18 @@ impl Api {
     }
 
     /// Загрузить картинку (тело — файл как есть). Id вложения указывается при отправке сообщения.
-    pub async fn upload(&self, bytes: Vec<u8>) -> ApiResult<Attachment> {
+    /// Вложение: картинка (`file` = false — сервер проверит и пережмёт) или файл любого формата.
+    pub async fn upload(&self, bytes: Vec<u8>, name: &str, file: bool) -> ApiResult<Attachment> {
+        let path = if file {
+            format!("/uploads?file=1&name={}", path_segment(name))
+        } else if !name.is_empty() {
+            format!("/uploads?name={}", path_segment(name))
+        } else {
+            "/uploads".to_string()
+        };
         let req = self
-            .request(Method::POST, "/uploads")
-            .timeout(UPLOAD_TIMEOUT)
+            .request(Method::POST, &path)
+            .timeout(if file { FILE_UPLOAD_TIMEOUT } else { UPLOAD_TIMEOUT })
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
             .body(bytes);
         Self::decode(req.send().await.map_err(ApiError::network)?).await
@@ -276,7 +286,8 @@ impl Api {
 
     /// Файл вложения.
     pub async fn attachment(&self, id: i64) -> ApiResult<Vec<u8>> {
-        let resp = self.request(Method::GET, &format!("/attachments/{id}")).send().await.map_err(ApiError::network)?;
+        // файл может быть до 50 МБ — общего таймаута 20 с не хватит
+        let resp = self.request(Method::GET, &format!("/attachments/{id}")).timeout(FILE_UPLOAD_TIMEOUT).send().await.map_err(ApiError::network)?;
         let status = resp.status();
         if !status.is_success() {
             return Err(humanize(status, resp.json::<ErrorBody>().await.ok()));
@@ -403,6 +414,11 @@ impl Api {
     }
 
     /// Поставить/убрать свою реакцию на сообщение.
+    /// Удалить сообщение (своё или, с правом, чужое).
+    pub async fn delete_message(&self, message_id: i64) -> ApiResult<()> {
+        self.call::<(), _>(Method::DELETE, &format!("/messages/{message_id}"), None).await
+    }
+
     pub async fn react(&self, message_id: i64, name: &str, on: bool) -> ApiResult<()> {
         let m = if on { Method::PUT } else { Method::DELETE };
         self.call::<(), _>(m, &format!("/messages/{message_id}/reactions/{}", path_segment(name)), None).await

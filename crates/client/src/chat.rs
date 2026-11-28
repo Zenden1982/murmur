@@ -39,11 +39,12 @@ enum Mode {
     After,
 }
 
-/// Картинка, подготовленная к отправке (байты файла + миниатюра).
+/// Вложение, подготовленное к отправке: картинка (байты + миниатюра) или файл любого формата (`thumb` = None).
 struct Prepared {
     bytes: Vec<u8>,
-    thumb: ColorImage,
+    thumb: Option<ColorImage>,
     size: [usize; 2],
+    name: String,
 }
 
 enum Ev {
@@ -57,13 +58,17 @@ enum Ev {
     Anim { key: String, res: Result<(Vec<ColorImage>, Vec<u32>), String> },
     Attach { channel: i64, res: Vec<Result<Prepared, String>> },
     Notice(String),
+    /// Ответ на удаление сообщения.
+    Deleted { channel: i64, mid: i64, res: ApiResult<()> },
 }
 
 pub struct PendingImage {
     local: u64,
     bytes: Arc<Vec<u8>>,
     size: [usize; 2],
-    thumb: TextureHandle,
+    /// None — файл (не картинка): показывается карточкой, уходит как есть.
+    thumb: Option<TextureHandle>,
+    name: String,
 }
 
 enum OutState {
@@ -136,7 +141,14 @@ enum ChatAnim {
 }
 
 /// Сколько GIF в ленте играют одновременно, остальные — первый кадр.
-const GIF_SLOTS: u8 = 4;
+const GIF_SLOTS: usize = 4;
+
+/// Играть ли GIF `id`: из видимых в прошлом кадре (и его самого) места получают самые новые (бо́льший id),
+/// иначе свежая гифка внизу ленты оставалась на первом кадре, пока выше были видны старые.
+fn gif_slot_ok(prev_visible: &[i64], id: i64, slots: usize) -> bool {
+    let newer = prev_visible.iter().filter(|&&v| v > id).count();
+    newer < slots
+}
 
 enum Img {
     Loading,
@@ -177,6 +189,14 @@ pub struct Chat {
     me_id: i64,
     /// Открыт выбор реакции для сообщения.
     react_menu: Option<i64>,
+    /// Можно удалять чужие сообщения в открытом канале (право MANAGE_MESSAGES; в ЛС — нет).
+    manage_messages: bool,
+    /// Меню по ПКМ на сообщении: (сообщение, где открыть).
+    msg_menu: Option<(i64, egui::Pos2)>,
+    /// Окно «Удалить сообщение?»: (канал, сообщение, начало текста).
+    delete_confirm: Option<(i64, i64, String)>,
+    /// В этом кадре ПКМ пришёлся на вложение (у него своё меню).
+    att_secondary: bool,
     /// Открыт выбор стикера.
     sticker_menu: bool,
     /// Открыта панель эмодзи у поля ввода.
@@ -190,8 +210,9 @@ pub struct Chat {
     anim_lru: crate::anim_img::Lru,
     /// Играть GIF в ленте (настройка «Анимировать GIF»).
     play_gifs: bool,
-    /// (кадр, сколько GIF уже играют в этом кадре).
-    gif_slots: (u64, u8),
+    /// Видимые GIF ленты: (кадр, id вложений в этом кадре) и список прошлого кадра — места отдаются самым новым.
+    gif_seen: (u64, Vec<i64>),
+    gif_prev: Vec<i64>,
     /// Панель эмодзи для реакции: (сообщение, кнопка-якорь).
     react_picker: Option<(i64, Rect)>,
     /// Недавние эмодзи (сохраняет приложение в настройках).
@@ -234,6 +255,10 @@ impl Chat {
             composer_h: 64.0,
             me_id: 0,
             react_menu: None,
+            manage_messages: false,
+            msg_menu: None,
+            delete_confirm: None,
+            att_secondary: false,
             sticker_menu: false,
             emoji_menu: false,
             emoji_picker: Default::default(),
@@ -243,7 +268,8 @@ impl Chat {
             anims: HashMap::new(),
             anim_lru: crate::anim_img::Lru::new(crate::anim_img::BUDGET_BYTES / 2),
             play_gifs: true,
-            gif_slots: (0, 0),
+            gif_seen: (0, Vec::new()),
+            gif_prev: Vec::new(),
             react_picker: None,
             recent_emoji: Vec::new(),
             recent_changed: false,
@@ -301,6 +327,15 @@ impl Chat {
                 self.lightbox = self.logs.get(&channel).and_then(|l| l.msgs.iter().rev().find_map(|m| m.attachments.last().map(|a| a.id)))
             }
             ("close", _) => self.lightbox = None,
+            // меню по ПКМ и окно удаления для последнего сообщения
+            ("msgmenu", _) => {
+                let last = self.logs.get(&channel).and_then(|l| l.msgs.iter().map(|m| m.id).max());
+                self.msg_menu = last.map(|id| (id, ui.max_rect().center()));
+            }
+            ("confirm", _) => {
+                let last = self.logs.get(&channel).and_then(|l| l.msgs.iter().max_by_key(|m| m.id));
+                self.delete_confirm = last.map(|m| (channel, m.id, delete_preview(m)));
+            }
             _ => {}
         }
     }
@@ -471,8 +506,8 @@ impl Chat {
                             Ok(p) => {
                                 let local = self.next_local;
                                 self.next_local += 1;
-                                let thumb = self.ctx.load_texture(format!("thumb-{local}"), p.thumb, TextureOptions::LINEAR);
-                                added.push(PendingImage { local, bytes: Arc::new(p.bytes), size: p.size, thumb });
+                                let thumb = p.thumb.map(|t| self.ctx.load_texture(format!("thumb-{local}"), t, TextureOptions::LINEAR));
+                                added.push(PendingImage { local, bytes: Arc::new(p.bytes), size: p.size, thumb, name: p.name });
                             }
                             Err(e) => errors.push(e),
                         }
@@ -481,7 +516,7 @@ impl Chat {
                     d.error = None;
                     for img in added {
                         if d.images.len() >= limits::ATTACHMENTS_MAX {
-                            errors.push(format!("Не больше {} картинок в одном сообщении.", limits::ATTACHMENTS_MAX));
+                            errors.push(format!("Не больше {} вложений в одном сообщении.", limits::ATTACHMENTS_MAX));
                             break;
                         }
                         d.images.push(img);
@@ -492,6 +527,10 @@ impl Chat {
                     }
                 }
                 Ev::Notice(text) => self.notice = Some((text, self.ctx.input(|i| i.time))),
+                Ev::Deleted { channel, mid, res } => match res {
+                    Ok(()) => self.remove_message(channel, mid),
+                    Err(e) => self.notice = Some((format!("Не удалось удалить: {}", err_text(&e)), self.ctx.input(|i| i.time))),
+                },
             }
         }
     }
@@ -557,6 +596,7 @@ impl Chat {
                     merge(&mut log.msgs, vec![message]);
                 }
             }
+            ServerEvent::MessageDeleted { channel_id, message_id } => self.remove_message(channel_id, message_id),
             ServerEvent::ReactionsChanged { channel_id, message_id, reactions } => {
                 if let Some(m) = self.logs.get_mut(&channel_id).and_then(|l| l.msgs.iter_mut().find(|m| m.id == message_id)) {
                     m.reactions = reactions;
@@ -601,13 +641,13 @@ impl Chat {
         let api = self.api.clone();
         let content = out.content.clone();
         let sticker = out.sticker.clone();
-        let files: Vec<Arc<Vec<u8>>> = out.images.iter().map(|i| i.bytes.clone()).collect();
+        let files: Vec<(Arc<Vec<u8>>, String, bool)> = out.images.iter().map(|i| (i.bytes.clone(), i.name.clone(), i.thumb.is_none())).collect();
         let local = out.local;
         self.spawn(
             async move {
                 let mut attachments = Vec::with_capacity(files.len());
-                for f in files {
-                    attachments.push(api.upload((*f).clone()).await?.id);
+                for (bytes, name, file) in files {
+                    attachments.push(api.upload((*bytes).clone(), &name, file).await?.id);
                 }
                 api.send_message(channel, &SendMessageRequest { content, attachments, sticker }).await
             },
@@ -648,6 +688,60 @@ impl Chat {
         self.emoji_menu = true;
     }
 
+    /// Можно ли удалять чужие сообщения в канале, который сейчас рисуется (приложение ставит перед `ui`).
+    pub fn set_manage_messages(&mut self, on: bool) {
+        self.manage_messages = on;
+    }
+
+    fn delete_message(&self, channel: i64, mid: i64) {
+        let api = self.api.clone();
+        self.spawn(async move { api.delete_message(mid).await }, move |res| Ev::Deleted { channel, mid, res });
+    }
+
+    /// Убрать сообщение из ленты (удалено мной или пришло событие).
+    fn remove_message(&mut self, channel: i64, mid: i64) {
+        if let Some(log) = self.logs.get_mut(&channel) {
+            log.msgs.retain(|m| m.id != mid);
+            log.heights.remove(&mid);
+        }
+        if self.msg_menu.is_some_and(|(id, _)| id == mid) {
+            self.msg_menu = None;
+        }
+        if self.delete_confirm.as_ref().is_some_and(|(_, id, _)| *id == mid) {
+            self.delete_confirm = None;
+        }
+    }
+
+    fn ui_delete_confirm(&mut self, ui: &Ui) {
+        let Some((channel, mid, preview)) = self.delete_confirm.clone() else { return };
+        let (mut go, mut cancel) = (false, false);
+        let r = kit::modal(ui.ctx(), "delete-message", "Удалить сообщение?", 420.0, |ui| {
+            ui.label(RichText::new("Сообщение пропадёт у всех, вернуть его будет нельзя.").size(14.0).color(t::p().text_muted));
+            if !preview.is_empty() {
+                ui.add_space(10.0);
+                Frame::new().fill(t::p().surface).stroke(Stroke::new(1.0, t::p().border)).corner_radius(CornerRadius::same(kit::R_ROW)).inner_margin(Margin::same(10)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(&preview).size(14.0).color(t::p().text));
+                });
+            }
+            ui.add_space(16.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if kit::button(ui, kit::ButtonKind::Danger, "Удалить", Some(egui_phosphor::fill::TRASH)).clicked() {
+                    go = true;
+                }
+                if kit::button(ui, kit::ButtonKind::Secondary, "Отмена", None).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if go {
+            self.delete_confirm = None;
+            self.delete_message(channel, mid);
+        } else if cancel || r == kit::ModalResult::Closed {
+            self.delete_confirm = None;
+        }
+    }
+
     pub fn set_me(&mut self, id: i64) {
         self.me_id = id;
     }
@@ -681,7 +775,7 @@ impl Chat {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         self.rt.spawn_blocking(move || {
-            let res: Vec<Result<Prepared, String>> = sources.into_iter().filter_map(|s| s.load().transpose()).map(|r| r.and_then(prepare)).collect();
+            let res: Vec<Result<Prepared, String>> = sources.into_iter().filter_map(|s| s.load().transpose()).map(|r| r.and_then(|(b, name)| prepare_any(b, name))).collect();
             if !res.is_empty() {
                 let _ = tx.send(Ev::Attach { channel, res });
                 ctx.request_repaint();
@@ -705,15 +799,16 @@ impl Chat {
         let ctx = self.ctx.clone();
         self.rt.spawn_blocking(move || {
             let Some(paths) = rfd::FileDialog::new()
-                .set_title("Прикрепить картинки")
+                .set_title("Прикрепить файлы")
                 .set_parent(&crate::desktop::main_window())
+                .add_filter("Все файлы", &["*"])
                 .add_filter("Картинки", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
                 .pick_files()
             else {
                 return;
             };
             let res: Vec<Result<Prepared, String>> =
-                paths.into_iter().filter_map(|p| Source::File(p).load().transpose()).map(|r| r.and_then(prepare)).collect();
+                paths.into_iter().filter_map(|p| Source::File(p).load().transpose()).map(|r| r.and_then(|(b, name)| prepare_any(b, name))).collect();
             let _ = tx.send(Ev::Attach { channel, res });
             ctx.request_repaint();
         });
@@ -734,6 +829,7 @@ impl Chat {
     /// Включить/выключить анимацию GIF в ленте.
     pub fn set_gif_animate(&mut self, on: bool) {
         self.play_gifs = on;
+        self.gif_picker.set_animate(on);
     }
 
     /// Текущий кадр анимированного GIF вложения в размере показа `size`; None — не GIF, играть нельзя
@@ -746,13 +842,16 @@ impl Chat {
         let bytes = self.gifs.get(&id)?.clone();
         if use_slot {
             let pass = self.ctx.cumulative_pass_nr();
-            if self.gif_slots.0 != pass {
-                self.gif_slots = (pass, 0);
+            if self.gif_seen.0 != pass {
+                self.gif_prev = std::mem::take(&mut self.gif_seen.1);
+                self.gif_seen.0 = pass;
             }
-            if self.gif_slots.1 >= GIF_SLOTS {
+            if !self.gif_seen.1.contains(&id) {
+                self.gif_seen.1.push(id);
+            }
+            if !gif_slot_ok(&self.gif_prev, id, GIF_SLOTS) {
                 return None;
             }
-            self.gif_slots.1 += 1;
         }
         let ppp = self.ctx.pixels_per_point();
         let bs = base.size_vec2();
@@ -853,27 +952,35 @@ impl Chat {
         );
     }
 
+    /// Сохранить вложение: сначала выбор места, потом скачивание (файл может быть большим).
     fn save_image(&self, att: &Attachment) {
         let api = self.api.clone();
-        let (id, ext) = (att.id, ext_of(&att.mime));
+        let (id, ext, image) = (att.id, ext_of(&att.mime), att.is_image());
+        let fname = if att.name.is_empty() { format!("murmur-{id}.{ext}") } else { att.name.clone() };
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.spawn(
             async move {
-                let bytes = api.attachment(id).await.map_err(|e| e.message)?;
-                tokio::task::spawn_blocking(move || {
-                    let Some(path) = rfd::FileDialog::new()
-                        .set_title("Сохранить картинку")
+                let path = tokio::task::spawn_blocking(move || {
+                    let mut dlg = rfd::FileDialog::new()
+                        .set_title(if image { "Сохранить картинку" } else { "Сохранить файл" })
                         .set_parent(&crate::desktop::main_window())
-                        .set_file_name(format!("murmur-{id}.{ext}"))
-                        .add_filter("Картинка", &[ext])
-                        .save_file()
-                    else {
-                        return Ok(None);
-                    };
-                    std::fs::write(&path, bytes).map_err(|e| format!("{e}"))?;
-                    Ok(Some(path))
+                        .set_file_name(fname);
+                    if image {
+                        dlg = dlg.add_filter("Картинка", &[ext]);
+                    }
+                    dlg.save_file()
                 })
                 .await
-                .map_err(|e| format!("{e}"))?
+                .map_err(|e| format!("{e}"))?;
+                let Some(path) = path else { return Ok(None) };
+                if !image {
+                    let _ = tx.send(Ev::Notice("Скачиваю…".into()));
+                    ctx.request_repaint();
+                }
+                let bytes = api.attachment(id).await.map_err(|e| e.message)?;
+                let p2 = path.clone();
+                tokio::task::spawn_blocking(move || std::fs::write(&p2, bytes)).await.map_err(|e| format!("{e}"))?.map_err(|e| format!("{e}"))?;
+                Ok(Some(path))
             },
             |r: Result<Option<PathBuf>, String>| match r {
                 Ok(Some(p)) => Ev::Notice(format!("Сохранено: {}", p.display())),
@@ -911,6 +1018,7 @@ impl Chat {
         egui::CentralPanel::no_frame().show(ui, |ui| self.ui_feed(ui, ch, people));
 
         self.ui_drop_overlay(ui);
+        self.ui_delete_confirm(ui);
         self.ui_lightbox(ui);
         self.ui_notice(ui);
     }
@@ -1093,6 +1201,14 @@ impl Chat {
             FeedAct::Open(id) => self.lightbox = Some(id),
             FeedAct::Copy(id) => self.copy_image(id),
             FeedAct::Save(att) => self.save_image(&att),
+            FeedAct::Delete { mid, confirm } => {
+                if confirm {
+                    let preview = self.logs.get(&ch.id).and_then(|l| l.msgs.iter().find(|m| m.id == mid)).map(delete_preview).unwrap_or_default();
+                    self.delete_confirm = Some((ch.id, mid, preview));
+                } else {
+                    self.delete_message(ch.id, mid);
+                }
+            }
             FeedAct::ReloadImage(id) => {
                 self.images.remove(&id);
             }
@@ -1105,6 +1221,7 @@ impl Chat {
 
     /// Одна строка ленты: шапка группы (аватар, имя, время) или продолжение, текст и картинки.
     fn message_row(&mut self, ui: &mut Ui, m: &Message, grouped: bool, people: &People) -> Option<FeedAct> {
+        self.att_secondary = false;
         let author = people.resolve(crate::people::from_author(&m.author));
         let mut act = None;
         let gutter = 56.0;
@@ -1164,6 +1281,45 @@ impl Chat {
         let hovered = ui.rect_contains_pointer(row);
         if hovered {
             ui.painter().set(bg_idx, egui::Shape::rect_filled(row, CornerRadius::same(kit::R_ROW), t::p().row_hover));
+        }
+        // удалить — при наведении (корзина левее реакции) и по ПКМ на строке
+        let can_delete = m.author.id == self.me_id || self.manage_messages;
+        let menu_here = self.msg_menu.is_some_and(|(id, _)| id == m.id);
+        if can_delete && (hovered || menu_here) {
+            let dr = Rect::from_center_size(pos2(row.right() - 56.0, row.top() + 14.0), vec2(30.0, 24.0));
+            let resp = ui.interact(dr, Id::new(("del-btn", m.id)), Sense::click());
+            ui.painter().rect_filled(dr, CornerRadius::same(8), if resp.hovered() { t::p().danger_soft } else { t::p().surface });
+            ui.painter().rect_stroke(dr, CornerRadius::same(8), Stroke::new(1.0, t::p().border), StrokeKind::Inside);
+            ui.painter().text(dr.center(), Align2::CENTER_CENTER, ph::TRASH, t::font(16.0), if resp.hovered() { t::p().danger_text } else { t::p().text_muted });
+            if resp.on_hover_text("Удалить (Shift — без подтверждения)").clicked() {
+                act = Some(FeedAct::Delete { mid: m.id, confirm: !ui.input(|i| i.modifiers.shift) });
+            }
+        }
+        let mut opened_now = false;
+        if can_delete && hovered && !self.att_secondary && ui.input(|i| i.pointer.secondary_clicked())
+            && let Some(p) = ui.ctx().pointer_interact_pos()
+        {
+            self.msg_menu = Some((m.id, p));
+            opened_now = true;
+        }
+        if let Some((id, pos)) = self.msg_menu
+            && id == m.id
+        {
+            let mut picked = None;
+            let area = egui::Area::new(Id::new(("msg-menu", m.id))).order(egui::Order::Foreground).fixed_pos(pos).constrain(true).show(ui.ctx(), |ui| {
+                Frame::new().fill(t::p().surface).stroke(Stroke::new(1.0, t::p().border)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                    ui.set_width(220.0);
+                    if kit::menu_item(ui, egui_phosphor::fill::TRASH, "Удалить сообщение", true).clicked() {
+                        picked = Some(FeedAct::Delete { mid: m.id, confirm: !ui.input(|i| i.modifiers.shift) });
+                    }
+                });
+            });
+            if picked.is_some() {
+                act = picked;
+                self.msg_menu = None;
+            } else if !opened_now && (ui.input(|i| i.pointer.any_click() || i.key_pressed(Key::Escape)) && !area.response.hovered()) {
+                self.msg_menu = None;
+            }
         }
         // «добавить реакцию» — при наведении, справа сверху строки
         let menu_open = self.react_menu == Some(m.id) || self.react_picker.is_some_and(|(id, _)| id == m.id);
@@ -1241,6 +1397,25 @@ impl Chat {
     }
 
     fn attachment_view(&mut self, ui: &mut Ui, a: &Attachment) -> Option<FeedAct> {
+        if !a.is_image() {
+            let mut act = None;
+            let (rect, resp) = ui.allocate_exact_size(vec2(FILE_CARD.x.min(ui.available_width()), FILE_CARD.y), Sense::click());
+            paint_file_card(ui.painter(), rect, &a.name, a.size, resp.hovered(), false, true);
+            if resp.secondary_clicked() {
+                self.att_secondary = true;
+            }
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{}\nНажмите, чтобы скачать", a.name));
+            if resp.clicked() {
+                act = Some(FeedAct::Save(a.clone()));
+            }
+            resp.context_menu(|ui| {
+                if kit::menu_item(ui, egui_phosphor::fill::DOWNLOAD_SIMPLE, "Сохранить как…", false).clicked() {
+                    act = Some(FeedAct::Save(a.clone()));
+                    ui.close();
+                }
+            });
+            return act;
+        }
         self.request_image(a.id);
         let src = vec2(a.width.max(1) as f32, a.height.max(1) as f32);
         let max = vec2(IMG_MAX.x.min(ui.available_width()), IMG_MAX.y);
@@ -1254,7 +1429,8 @@ impl Chat {
             Some(Img::Ready(tex)) => Some(tex.clone()),
             _ => None,
         };
-        let anim = base.as_ref().and_then(|b| self.gif_tex(a.id, b, size, true));
+        // место среди играющих — только видимым на экране (строки в запасе за краем ленты тоже рисуются)
+        let anim = if ui.is_rect_visible(rect) { base.as_ref().and_then(|b| self.gif_tex(a.id, b, size, true)) } else { None };
         match self.images.get(&a.id) {
             Some(Img::Ready(tex)) => {
                 let tex = anim.as_ref().unwrap_or(tex);
@@ -1279,6 +1455,9 @@ impl Chat {
                 p.rect(rect, CornerRadius::same(kit::R_ROW), t::p().surface_2, Stroke::new(1.0, t::p().border), StrokeKind::Inside);
                 egui::Spinner::new().size(20.0).color(t::p().text_muted).paint_at(ui, Rect::from_center_size(rect.center(), vec2(20.0, 20.0)));
             }
+        }
+        if resp.secondary_clicked() {
+            self.att_secondary = true;
         }
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         resp.context_menu(|ui| {
@@ -1331,11 +1510,17 @@ impl Chat {
                         ui.add_space(6.0);
                         ui.spacing_mut().item_spacing.x = 10.0;
                         for img in &d.images {
-                            let (r, _) = ui.allocate_exact_size(vec2(THUMB, THUMB), Sense::hover());
-                            let tsz = img.thumb.size_vec2();
-                            let fit = Rect::from_center_size(r.center(), tsz * (THUMB / tsz.x).min(THUMB / tsz.y));
-                            ui.painter().rect_filled(r, CornerRadius::same(8), t::p().bg);
-                            egui::Image::new(&img.thumb).corner_radius(CornerRadius::same(6)).paint_at(ui, fit);
+                            let w = if img.thumb.is_some() { THUMB } else { 230.0 };
+                            let (r, _) = ui.allocate_exact_size(vec2(w, THUMB), Sense::hover());
+                            match &img.thumb {
+                                Some(th) => {
+                                    let tsz = th.size_vec2();
+                                    let fit = Rect::from_center_size(r.center(), tsz * (THUMB / tsz.x).min(THUMB / tsz.y));
+                                    ui.painter().rect_filled(r, CornerRadius::same(8), t::p().bg);
+                                    egui::Image::new(th).corner_radius(CornerRadius::same(6)).paint_at(ui, fit);
+                                }
+                                None => paint_file_card(ui.painter(), r, &img.name, img.bytes.len() as u64, false, false, false),
+                            }
                             let x = Rect::from_center_size(r.right_top() + vec2(-11.0, 11.0), vec2(20.0, 20.0));
                             let xr = ui.interact(x, Id::new(("thumb-x", img.local)), Sense::click());
                             ui.painter().circle_filled(x.center(), 10.0, if xr.hovered() { t::p().danger } else { Color32::from_black_alpha(190) });
@@ -1344,7 +1529,7 @@ impl Chat {
                                 remove = Some(img.local);
                             }
                             let r2 = ui.interact(r, Id::new(("thumb", img.local)), Sense::hover());
-                            r2.on_hover_text(format!("{}×{} · {}", img.size[0], img.size[1], human_size(img.bytes.len())));
+                            r2.on_hover_text(if img.thumb.is_some() { format!("{}×{} · {}", img.size[0], img.size[1], human_size(img.bytes.len())) } else { format!("{} · {}", img.name, human_size(img.bytes.len())) });
                         }
                     });
                     ui.add_space(4.0);
@@ -1352,7 +1537,7 @@ impl Chat {
                 // horizontal, а не with_layout: тот занимает всю высоту панели, и поле не сжималось обратно (после картинок)
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if kit::icon_button(ui, ph::PLUS_CIRCLE, kit::IconState::Normal, "Прикрепить картинку (или Ctrl+V, перетаскивание)").clicked() {
+                    if kit::icon_button(ui, ph::PLUS_CIRCLE, kit::IconState::Normal, "Прикрепить файл (или Ctrl+V, перетаскивание)").clicked() {
                         pick = true;
                     }
                     let st = kit::icon_button(ui, ph::STICKER, if sticker_open { kit::IconState::Active } else { kit::IconState::Normal }, "Стикеры");
@@ -1687,10 +1872,60 @@ enum FeedAct {
     Save(Attachment),
     ReloadImage(i64),
     React { mid: i64, name: String, on: bool },
+    /// Удалить сообщение: `confirm` — сначала спросить (Shift+клик — сразу).
+    Delete { mid: i64, confirm: bool },
 }
 
 /// Размер стикера в ленте.
 const STICKER: f32 = 120.0;
+/// Карточка файла (не картинки) в ленте.
+const FILE_CARD: egui::Vec2 = vec2(300.0, 60.0);
+
+/// Что показать в окне «Удалить сообщение?».
+fn delete_preview(m: &Message) -> String {
+    if !m.content.is_empty() && m.sticker.is_none() {
+        ellipsize(&m.content, 160)
+    } else if m.sticker.is_some() {
+        "Стикер".into()
+    } else if !m.attachments.is_empty() {
+        format!("Вложений: {}", m.attachments.len())
+    } else {
+        String::new()
+    }
+}
+
+/// Значок файла по расширению.
+fn file_icon(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "zip" | "rar" | "7z" | "tar" | "gz" | "xz" | "bz2" => ph::FILE_ZIP,
+        "pdf" => ph::FILE_PDF,
+        "mp3" | "wav" | "ogg" | "flac" | "m4a" | "opus" | "aac" => ph::FILE_AUDIO,
+        "mp4" | "mkv" | "webm" | "avi" | "mov" | "wmv" => ph::FILE_VIDEO,
+        "txt" | "md" | "log" | "doc" | "docx" | "rtf" | "odt" => ph::FILE_TEXT,
+        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "json" | "toml" | "yaml" | "yml" | "html" | "css" | "sh" => ph::FILE_CODE,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "tif" | "tiff" | "psd" => ph::FILE_IMAGE,
+        _ => ph::FILE,
+    }
+}
+
+/// Карточка файла: значок, имя, размер; `hovered` — подсветка, `dim` — ещё отправляется, `download` — значок скачивания.
+fn paint_file_card(p: &egui::Painter, r: Rect, name: &str, size: u64, hovered: bool, dim: bool, download: bool) {
+    let pal = t::p();
+    let a = if dim { 0.6 } else { 1.0 };
+    p.rect(r, CornerRadius::same(kit::R_ROW), if hovered { pal.row_hover } else { pal.surface_2 }, Stroke::new(1.0, if hovered { pal.accent } else { pal.border }), StrokeKind::Inside);
+    let ic = Rect::from_center_size(pos2(r.left() + 28.0, r.center().y), vec2(36.0, 36.0));
+    p.rect_filled(ic, CornerRadius::same(8), pal.accent_soft.gamma_multiply(a));
+    p.text(ic.center(), Align2::CENTER_CENTER, file_icon(name), t::font(22.0), pal.accent.gamma_multiply(a));
+    let x = ic.right() + 12.0;
+    let right = r.right() - if download { 40.0 } else { 30.0 };
+    let max_chars = (((right - x) / 7.6).floor() as usize).max(8);
+    p.text(pos2(x, r.center().y - 9.0), Align2::LEFT_CENTER, ellipsize(name, max_chars), t::semibold(14.5), pal.text.gamma_multiply(a));
+    p.text(pos2(x, r.center().y + 11.0), Align2::LEFT_CENTER, human_size(size as usize), t::font(12.5), pal.text_muted.gamma_multiply(a));
+    if download {
+        p.text(pos2(r.right() - 22.0, r.center().y), Align2::CENTER_CENTER, ph::DOWNLOAD_SIMPLE, t::font(18.0), if hovered { pal.accent } else { pal.text_muted });
+    }
+}
 
 /// Значок реакции под сообщением: эмодзи и сколько; своя — подсвечена.
 fn reaction_chip(ui: &mut Ui, emoji: &str, n: usize, mine: bool) -> egui::Response {
@@ -1720,9 +1955,17 @@ fn outgoing_row(ui: &mut Ui, o: &Outgoing) -> Option<FeedAct> {
             if !o.images.is_empty() {
                 ui.horizontal(|ui| {
                     for img in &o.images {
-                        let tsz = img.thumb.size_vec2();
-                        let s = (THUMB / tsz.x).min(THUMB / tsz.y);
-                        ui.add(egui::Image::new(&img.thumb).fit_to_exact_size(tsz * s).corner_radius(CornerRadius::same(6)).tint(Color32::from_white_alpha(150)));
+                        match &img.thumb {
+                            Some(th) => {
+                                let tsz = th.size_vec2();
+                                let s = (THUMB / tsz.x).min(THUMB / tsz.y);
+                                ui.add(egui::Image::new(th).fit_to_exact_size(tsz * s).corner_radius(CornerRadius::same(6)).tint(Color32::from_white_alpha(150)));
+                            }
+                            None => {
+                                let (r, _) = ui.allocate_exact_size(vec2(FILE_CARD.x, THUMB.min(FILE_CARD.y)), Sense::hover());
+                                paint_file_card(ui.painter(), r, &img.name, img.bytes.len() as u64, false, true, false);
+                            }
+                        }
                     }
                 });
             }
@@ -1731,7 +1974,7 @@ fn outgoing_row(ui: &mut Ui, o: &Outgoing) -> Option<FeedAct> {
                 match &o.state {
                     OutState::Sending => {
                         ui.add(egui::Spinner::new().size(12.0).color(t::p().text_muted));
-                        ui.label(RichText::new(if o.images.is_empty() { "отправка…" } else { "загрузка картинок…" }).size(12.0).color(t::p().text_muted));
+                        ui.label(RichText::new(if o.images.is_empty() { "отправка…" } else { "загрузка вложений…" }).size(12.0).color(t::p().text_muted));
                     }
                     OutState::Failed(e) => {
                         ui.label(RichText::new(format!("{}  Не отправлено: {e}", ph::WARNING_CIRCLE)).size(12.5).color(t::p().danger_text));
@@ -1882,7 +2125,7 @@ enum Source {
 
 impl Source {
     /// Байты картинки. `Ok(None)` — в буфере обмена нет картинки (молча ничего не делаем).
-    fn load(self) -> Result<Option<Vec<u8>>, String> {
+    fn load(self) -> Result<Option<(Vec<u8>, String)>, String> {
         match self {
             Source::File(p) => {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1890,18 +2133,18 @@ impl Source {
                 if meta.is_dir() {
                     return Err(format!("{name}: это папка."));
                 }
-                // заведомо огромное не читаем целиком (картинку до ~64 МБ ещё можно пережать)
+                // заведомо огромное не читаем целиком (картинку до ~64 МБ ещё можно пережать, файл — до 50 МБ)
                 if meta.len() > 64 * 1024 * 1024 {
-                    return Err(format!("{name}: файл слишком большой."));
+                    return Err(format!("{name}: файл больше {} МБ.", limits::FILE_MAX_BYTES / (1024 * 1024)));
                 }
-                std::fs::read(&p).map(Some).map_err(|e| format!("{name}: {e}"))
+                std::fs::read(&p).map(|b| Some((b, name.clone()))).map_err(|e| format!("{name}: {e}"))
             }
             Source::Clipboard => {
                 let mut cb = arboard::Clipboard::new().map_err(|e| format!("Буфер обмена: {e}"))?;
                 if let Ok(img) = cb.get_image() {
                     let rgba = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())
                         .ok_or("Буфер обмена: странная картинка")?;
-                    return encode(&image::DynamicImage::ImageRgba8(rgba), image::ImageFormat::Png).map(Some);
+                    return encode(&image::DynamicImage::ImageRgba8(rgba), image::ImageFormat::Png).map(|b| Some((b, String::new())));
                 }
                 // скопированный в проводнике файл
                 if let Ok(files) = cb.get().file_list()
@@ -1971,7 +2214,26 @@ fn prepare(bytes: Vec<u8>) -> Result<Prepared, String> {
     let size = [work.width() as usize, work.height() as usize];
     let th = work.thumbnail(160, 160).to_rgba8();
     let thumb = ColorImage::from_rgba_unmultiplied([th.width() as usize, th.height() as usize], th.as_raw());
-    Ok(Prepared { bytes, thumb, size })
+    Ok(Prepared { bytes, thumb: Some(thumb), size, name: String::new() })
+}
+
+/// Картинка — как картинка (превью, пережатие); всё остальное (и картинка, которую не подготовить) — файлом как есть.
+fn prepare_any(bytes: Vec<u8>, name: String) -> Result<Prepared, String> {
+    if image::guess_format(&bytes).is_ok()
+        && let Ok(mut p) = prepare(bytes.clone())
+    {
+        p.name = name;
+        return Ok(p);
+    }
+    let shown = if name.is_empty() { "Файл".to_string() } else { name.clone() };
+    if bytes.is_empty() {
+        return Err(format!("{shown}: файл пустой."));
+    }
+    if bytes.len() > limits::FILE_MAX_BYTES {
+        return Err(format!("{shown}: файл больше {} МБ.", limits::FILE_MAX_BYTES / (1024 * 1024)));
+    }
+    let name = if name.is_empty() { "file".to_string() } else { name };
+    Ok(Prepared { bytes, thumb: None, size: [0, 0], name })
 }
 
 /// Для ленты: декодировать (у GIF — первый кадр) и уменьшить до DECODE_MAX_SIDE.
@@ -2081,6 +2343,18 @@ fn ellipsize(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn gif_slots_go_to_newest_visible() {
+        // видны 5 гифок: играют 4 самые новые, самая старая — первый кадр
+        let prev = [10, 11, 12, 13, 14];
+        assert!(!gif_slot_ok(&prev, 10, 4));
+        assert!(gif_slot_ok(&prev, 11, 4));
+        assert!(gif_slot_ok(&prev, 14, 4));
+        // только что появилась новая (ещё не в прошлом кадре) — играет
+        assert!(gif_slot_ok(&prev, 15, 4));
+        assert!(gif_slot_ok(&[], 1, 4));
+    }
+
     fn msg(id: i64) -> Message {
         Message {
             id,
@@ -2129,7 +2403,8 @@ mod tests {
         let p = prepare(png.clone()).unwrap();
         assert_eq!(p.size, [300, 200]);
         assert_eq!(p.bytes, png, "маленький PNG уходит как есть");
-        assert!(p.thumb.size[0] <= 160 && p.thumb.size[1] <= 160);
+        let th = p.thumb.as_ref().unwrap();
+        assert!(th.size[0] <= 160 && th.size[1] <= 160);
         assert!(prepare(b"not an image".to_vec()).is_err());
         // BMP → PNG
         let bmp = encode(&img, image::ImageFormat::Bmp);

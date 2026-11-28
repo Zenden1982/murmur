@@ -29,7 +29,9 @@ async fn migration_moves_existing_data() {
         sqlx::query_as("SELECT name, position, permissions FROM server_roles WHERE server_id = 1 ORDER BY position DESC")
             .fetch_all(&pool).await.unwrap();
     assert_eq!(roles.iter().map(|r| r.1).collect::<Vec<_>>(), vec![3, 2, 1, 0]);
-    assert_eq!((roles[2].2, roles[3].2), (15, 1));
+    // 0010: модератору (и выше) — MANAGE_MESSAGES (128)
+    assert_eq!((roles[2].2, roles[3].2), (15 | 128, 1));
+    assert_eq!(roles[0].2 & 128, 128);
     let members: Vec<(i64, i64)> = sqlx::query_as(
         "SELECT m.user_id, r.position FROM server_members m JOIN server_roles r ON r.id = m.role_id WHERE m.server_id = 1 ORDER BY m.user_id",
     )

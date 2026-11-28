@@ -58,6 +58,7 @@ struct MessageRow {
 struct AttachmentRow {
     id: i64,
     message_id: Option<i64>,
+    file_name: String,
     mime: String,
     size: i64,
     width: Option<i64>,
@@ -68,6 +69,7 @@ impl From<&AttachmentRow> for Attachment {
     fn from(r: &AttachmentRow) -> Self {
         Attachment {
             id: r.id,
+            name: r.file_name.clone(),
             mime: r.mime.clone(),
             size: r.size.max(0) as u64,
             width: r.width.unwrap_or(0).max(0) as u32,
@@ -131,7 +133,7 @@ async fn with_attachments(state: &AppState, rows: Vec<MessageRow>) -> AppResult<
     let mut by_msg: HashMap<i64, Vec<Attachment>> = HashMap::new();
     if !rows.is_empty() {
         let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT id, message_id, mime, size, width, height FROM attachments WHERE message_id IN (",
+            "SELECT id, message_id, file_name, mime, size, width, height FROM attachments WHERE message_id IN (",
         );
         let mut sep = qb.separated(", ");
         for r in &rows {
@@ -420,16 +422,32 @@ pub(crate) async fn write_atomic(path: &FsPath, bytes: &[u8]) -> std::io::Result
     tokio::fs::rename(&tmp, path).await
 }
 
-/// `POST /uploads` — тело запроса = файл картинки. Ответ — `Attachment` (id указать при отправке сообщения).
+#[derive(Deserialize)]
+pub struct UploadQuery {
+    /// Имя файла (для показа и сохранения).
+    #[serde(default)]
+    name: String,
+    /// 1 — файл любого формата (без проверки и перекодирования), иначе картинка.
+    #[serde(default)]
+    file: u8,
+}
+
+/// `POST /uploads?name=&file=1` — тело запроса = файл. Без `file=1` — картинка (проверка, очистка, до 8 МБ),
+/// с ним — файл любого формата до 50 МБ. Ответ — `Attachment` (id указать при отправке сообщения).
 pub async fn upload(
     State(state): State<AppState>,
     user: AuthUser,
+    q: Result<Query<UploadQuery>, QueryRejection>,
     body: Result<Bytes, BytesRejection>,
 ) -> AppResult<(StatusCode, Json<Attachment>)> {
+    let Query(q) = q.map_err(|e| AppError::BadRequest(e.body_text()))?;
+    let as_file = q.file == 1;
+    let max = if as_file { limits::FILE_MAX_BYTES } else { limits::IMAGE_MAX_BYTES };
     let too_big = || {
         AppError::Validation(format!(
-            "картинка больше {} МБ",
-            limits::IMAGE_MAX_BYTES / (1024 * 1024)
+            "{} больше {} МБ",
+            if as_file { "файл" } else { "картинка" },
+            max / (1024 * 1024)
         ))
     };
     let body = body.map_err(|e| {
@@ -444,20 +462,28 @@ pub async fn upload(
         .upload_limiter
         .check(user.id)
         .map_err(|retry_after_secs| AppError::RateLimited { retry_after_secs })?;
-    if body.len() > limits::IMAGE_MAX_BYTES {
+    if body.len() > max {
         return Err(too_big());
     }
-    save_upload(&state, &user, body).await
+    let name = file_name(&q.name);
+    if as_file {
+        if body.is_empty() {
+            return Err(AppError::Validation("файл пустой".into()));
+        }
+        return save_file(&state, &user, body, &name).await;
+    }
+    save_upload(&state, &user, body, &name).await
 }
 
-/// Проверить и сохранить картинку как неотправленное вложение (общая часть `POST /uploads` и GIF из Klipy).
-pub(crate) async fn save_upload(state: &AppState, user: &AuthUser, raw: Bytes) -> AppResult<(StatusCode, Json<Attachment>)> {
-    // Проверка и очистка (EXIF/GPS, текстовые чанки, комментарии GIF), лимиты декодирования.
-    let (body, mime, w, h) = tokio::task::spawn_blocking(move || crate::media::sanitize_chat(&raw))
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("обработка картинки: {e}")))?
-        .map_err(AppError::Validation)?;
-    let (w, h) = (w as u64, h as u64);
+/// Имя файла для показа: без пути и управляющих символов, не длиннее `FILE_NAME_MAX`; пустое — «file».
+pub(crate) fn file_name(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let clean: String = base.chars().filter(|c| !c.is_control() && *c != '"').take(limits::FILE_NAME_MAX).collect();
+    let clean = clean.trim().trim_start_matches('.').trim().to_string();
+    if clean.is_empty() { "file".into() } else { clean }
+}
+
+async fn pending_check(state: &AppState, user: &AuthUser) -> AppResult<()> {
     let pending: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM attachments WHERE uploader_id = ? AND message_id IS NULL",
     )
@@ -466,23 +492,64 @@ pub(crate) async fn save_upload(state: &AppState, user: &AuthUser, raw: Bytes) -
     .await?;
     if pending >= PENDING_MAX {
         return Err(AppError::Validation(
-            "слишком много неотправленных картинок".into(),
+            "слишком много неотправленных файлов".into(),
         ));
     }
+    Ok(())
+}
+
+/// Файл любого формата: хранится как есть, отдаётся только на скачивание (`Content-Disposition: attachment`).
+async fn save_file(state: &AppState, user: &AuthUser, body: Bytes, name: &str) -> AppResult<(StatusCode, Json<Attachment>)> {
+    pending_check(state, user).await?;
+    let key = security::new_session_token();
+    write_atomic(&storage_path(state, &key), &body)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("запись файла: {e}")))?;
+    const MIME: &str = "application/octet-stream";
+    let id = sqlx::query(
+        "INSERT INTO attachments (uploader_id, kind, mime, size, file_name, storage_key, created_at)
+         VALUES (?, 'file', ?, ?, ?, ?, ?)",
+    )
+    .bind(user.id)
+    .bind(MIME)
+    .bind(body.len() as i64)
+    .bind(name)
+    .bind(&key)
+    .bind(now())
+    .execute(&state.inner.db)
+    .await?
+    .last_insert_rowid();
+    tracing::info!(user_id = user.id, id, size = body.len(), "file uploaded");
+    Ok((
+        StatusCode::CREATED,
+        Json(Attachment { id, name: name.into(), mime: MIME.into(), size: body.len() as u64, width: 0, height: 0 }),
+    ))
+}
+
+/// Проверить и сохранить картинку как неотправленное вложение (общая часть `POST /uploads` и GIF из Klipy).
+pub(crate) async fn save_upload(state: &AppState, user: &AuthUser, raw: Bytes, name: &str) -> AppResult<(StatusCode, Json<Attachment>)> {
+    // Проверка и очистка (EXIF/GPS, текстовые чанки, комментарии GIF), лимиты декодирования.
+    let (body, mime, w, h) = tokio::task::spawn_blocking(move || crate::media::sanitize_chat(&raw))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("обработка картинки: {e}")))?
+        .map_err(AppError::Validation)?;
+    let (w, h) = (w as u64, h as u64);
+    pending_check(state, user).await?;
 
     let key = security::new_session_token();
-    write_atomic(&storage_path(&state, &key), &body)
+    write_atomic(&storage_path(state, &key), &body)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("запись файла: {e}")))?;
     let id = sqlx::query(
-        "INSERT INTO attachments (uploader_id, kind, mime, size, width, height, storage_key, created_at)
-         VALUES (?, 'image', ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO attachments (uploader_id, kind, mime, size, width, height, file_name, storage_key, created_at)
+         VALUES (?, 'image', ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(user.id)
     .bind(mime)
     .bind(body.len() as i64)
     .bind(w as i64)
     .bind(h as i64)
+    .bind(name)
     .bind(&key)
     .bind(now())
     .execute(&state.inner.db)
@@ -493,6 +560,7 @@ pub(crate) async fn save_upload(state: &AppState, user: &AuthUser, raw: Bytes) -
         StatusCode::CREATED,
         Json(Attachment {
             id,
+            name: name.into(),
             mime: mime.into(),
             size: body.len() as u64,
             width: w as u32,
@@ -507,13 +575,13 @@ pub async fn get_attachment(
     user: AuthUser,
     Path(id): Path<i64>,
 ) -> AppResult<Response> {
-    let row: Option<(String, String, Option<i64>, i64)> = sqlx::query_as(
-        "SELECT mime, storage_key, message_id, uploader_id FROM attachments WHERE id = ?",
+    let row: Option<(String, String, Option<i64>, i64, String, String)> = sqlx::query_as(
+        "SELECT mime, storage_key, message_id, uploader_id, kind, file_name FROM attachments WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&state.inner.db)
     .await?;
-    let (mime, key, message_id, uploader) = row.ok_or(AppError::NotFound)?;
+    let (mime, key, message_id, uploader, kind, name) = row.ok_or(AppError::NotFound)?;
     match message_id {
         // не отправлено — видит только загрузивший
         None if uploader != user.id => return Err(AppError::NotFound),
@@ -546,7 +614,67 @@ pub async fn get_attachment(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
+    if kind == "file" {
+        // произвольный файл — только скачать, браузер не должен его открывать
+        if let Ok(v) = HeaderValue::from_str(&content_disposition(&name)) {
+            h.insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
     Ok(resp)
+}
+
+/// `attachment; filename="ascii"; filename*=UTF-8''процент-кодирование` (RFC 6266).
+fn content_disposition(name: &str) -> String {
+    let ascii: String = name.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' }).collect();
+    let mut enc = String::new();
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            enc.push(b as char);
+        } else {
+            enc.push_str(&format!("%{b:02X}"));
+        }
+    }
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{enc}")
+}
+
+/// `DELETE /messages/{id}` — удалить сообщение: своё — всегда, чужое на сервере — с правом MANAGE_MESSAGES
+/// (в ЛС — только своё). Сообщение пропадает у всех (`message_deleted`), его файлы удаляются с диска.
+pub async fn delete_message(State(state): State<AppState>, user: AuthUser, Path(mid): Path<i64>) -> AppResult<StatusCode> {
+    let db = &state.inner.db;
+    let (channel_id, author_id): (i64, i64) =
+        sqlx::query_as("SELECT channel_id, author_id FROM messages WHERE id = ? AND deleted_at IS NULL")
+            .bind(mid)
+            .fetch_optional(db)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    // чужой канал — NotFound, как и для истории
+    let target = chat_target(&state, channel_id, user.id).await?;
+    if author_id != user.id {
+        if target.dm.is_some() {
+            return Err(AppError::Forbidden);
+        }
+        perm::channel_member(db, channel_id, user.id).await?.0.require(proto::perm::MANAGE_MESSAGES)?;
+    }
+    let mut tx = db.begin().await?;
+    let n = sqlx::query("UPDATE messages SET deleted_at = ?, content = '', sticker = NULL WHERE id = ? AND deleted_at IS NULL")
+        .bind(now())
+        .bind(mid)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if n == 0 {
+        return Err(AppError::NotFound);
+    }
+    let keys: Vec<String> = sqlx::query_scalar("DELETE FROM attachments WHERE message_id = ? RETURNING storage_key")
+        .bind(mid)
+        .fetch_all(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM message_reactions WHERE message_id = ?").bind(mid).execute(&mut *tx).await?;
+    tx.commit().await?;
+    remove_files(&state, &keys).await;
+    tracing::info!(user_id = user.id, message_id = mid, by_author = author_id == user.id, "message deleted");
+    publish(&state, target.audience, ServerEvent::MessageDeleted { channel_id, message_id: mid });
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Удалить с диска файлы по ключам (после удаления строк из БД).
@@ -589,7 +717,23 @@ pub fn spawn_janitor(state: AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::sniff_image;
+    use super::{content_disposition, file_name, sniff_image};
+
+    #[test]
+    fn file_names() {
+        assert_eq!(file_name("C:\\Users\\x\\отчёт.pdf"), "отчёт.pdf");
+        assert_eq!(file_name("../../etc/passwd"), "passwd");
+        assert_eq!(file_name("a\nb\"c.txt"), "abc.txt");
+        assert_eq!(file_name(""), "file");
+        assert_eq!(file_name(".."), "file");
+        assert_eq!(file_name(&"я".repeat(500)).chars().count(), proto::limits::FILE_NAME_MAX);
+    }
+
+    #[test]
+    fn disposition() {
+        assert_eq!(content_disposition("a b.zip"), "attachment; filename=\"a b.zip\"; filename*=UTF-8''a%20b.zip");
+        assert_eq!(content_disposition("я.txt"), "attachment; filename=\"_.txt\"; filename*=UTF-8''%D1%8F.txt");
+    }
 
     #[test]
     fn sniff() {
