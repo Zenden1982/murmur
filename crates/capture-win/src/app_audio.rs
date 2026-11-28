@@ -49,7 +49,7 @@ const FRAME_DUR: Duration = Duration::from_millis(10);
 const GAP_FRAMES: u64 = 5;
 
 /// Что захватываем.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AudioTarget {
     /// Дерево процессов приложения (корневой PID).
     App(u32),
@@ -231,7 +231,8 @@ pub fn app_root(pid: u32, procs: &[ProcInfo]) -> u32 {
     cur
 }
 
-fn process_list() -> Vec<ProcInfo> {
+/// Снимок всех процессов (PID, родитель, имя exe).
+pub fn process_list() -> Vec<ProcInfo> {
     let mut out = Vec::new();
     unsafe {
         let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };

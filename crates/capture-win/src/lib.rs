@@ -12,14 +12,19 @@
 use msvc_shim as _;
 
 pub mod app_audio;
+pub mod audio_mix;
+pub mod audio_plan;
+pub mod audio_sessions;
 pub mod camera;
 pub mod capture;
 pub mod diag;
 pub mod h264qp;
 pub mod hw;
+pub mod screen_audio;
 pub mod sources;
 
 pub use app_audio::{AppAudio, AudioSink, AudioTarget};
+pub use screen_audio::ScreenAudio;
 pub use capture::{Capture, CaptureConfig, Event, Sink};
 pub use libwebrtc::video_frame::I420Buffer;
 pub use sources::{Image, Source, SourceId, list_sources};

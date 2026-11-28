@@ -31,6 +31,10 @@ pub enum Action {
     None,
     Cancel,
     Start { source: SourceId, title: String, width: u32, height: u32, preset: Preset, audio: bool },
+    /// Изменился список «Не включать в звук трансляции» (применить сразу и сохранить).
+    Exclude(Vec<String>),
+    /// «Все настройки звука стрима».
+    OpenStreamSettings,
 }
 
 pub struct Picker {
@@ -44,10 +48,16 @@ pub struct Picker {
     pub audio: bool,
     /// Уже транслируем — кнопка «Переключить».
     switching: bool,
+    /// Программы, чей звук не идёт в трансляцию экрана.
+    exclude: Vec<String>,
+    apps: crate::audio_exclude_ui::AudioApps,
+    /// Открыто всплывающее окно списка (и где ссылка).
+    exclude_open: bool,
+    exclude_link: Option<Rect>,
 }
 
 impl Picker {
-    pub fn open(ctx: &egui::Context, preset: Preset, audio: bool, current: Option<SourceId>) -> Self {
+    pub fn open(ctx: &egui::Context, preset: Preset, audio: bool, current: Option<SourceId>, exclude: Vec<String>) -> Self {
         let mut p = Picker {
             tab: if matches!(current, Some(SourceId::Monitor(_))) { Tab::Screens } else { Tab::Windows },
             rx: None,
@@ -57,6 +67,10 @@ impl Picker {
             preset,
             audio,
             switching: current.is_some(),
+            exclude,
+            apps: Default::default(),
+            exclude_open: false,
+            exclude_link: None,
         };
         p.reload(ctx);
         p
@@ -146,10 +160,67 @@ impl Picker {
                     action = a;
                 }
             });
+        if self.exclude_open
+            && let Some(a) = self.ui_exclude_popup(ctx)
+            && matches!(action, Action::None)
+        {
+            action = a;
+        }
         if modal.should_close() && matches!(action, Action::None) {
-            action = Action::Cancel;
+            if self.exclude_open {
+                self.exclude_open = false;
+            } else {
+                action = Action::Cancel;
+            }
         }
         action
+    }
+
+    /// Отладка (скриншоты): сразу открыть список исключений.
+    pub fn debug_open_exclude(&mut self, open: bool) {
+        self.tab = Tab::Screens;
+        self.audio = true;
+        self.exclude_open = open;
+    }
+
+    /// Всплывающее окно над ссылкой «Исключить программы…».
+    fn ui_exclude_popup(&mut self, ctx: &egui::Context) -> Option<Action> {
+        let link = self.exclude_link?;
+        let mut out = None;
+        let resp = egui::Area::new(Id::new("stream-exclude-pop"))
+            .order(egui::Order::Tooltip)
+            .pivot(Align2::LEFT_BOTTOM)
+            .fixed_pos(link.left_top() - vec2(12.0, 6.0))
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(t::p().surface)
+                    .stroke(Stroke::new(1.0, t::p().border))
+                    .corner_radius(CornerRadius::same(12))
+                    .inner_margin(Margin::symmetric(14, 12))
+                    .shadow(ctx.global_style().visuals.window_shadow)
+                    .show(ui, |ui| {
+                        ui.set_width(300.0);
+                        ui.label(RichText::new("Не включать в звук трансляции").font(t::semibold(14.0)));
+                        ui.add_space(6.0);
+                        if crate::audio_exclude_ui::exclude_list(ui, &mut self.apps, &mut self.exclude, 300.0) {
+                            out = Some(Action::Exclude(self.exclude.clone()));
+                        }
+                        ui.add_space(4.0);
+                        if ui
+                            .add(egui::Label::new(RichText::new("Все настройки звука стрима").size(12.0).underline().color(t::p().text_muted)).sense(Sense::click()))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            out = Some(Action::OpenStreamSettings);
+                        }
+                    });
+            });
+        // клик мимо окна и мимо ссылки — закрыть
+        let outside = ctx.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !resp.response.rect.contains(p) && !link.contains(p)));
+        if outside {
+            self.exclude_open = false;
+        }
+        out
     }
 
     fn ui_tabs(&mut self, ui: &mut Ui) {
@@ -280,22 +351,34 @@ impl Picker {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Качество").size(13.0).color(t::p().text_muted));
-            egui::ComboBox::from_id_salt("preset").selected_text(self.preset.label()).width(170.0).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("preset").selected_text(self.preset.label()).width(150.0).show_ui(ui, |ui| {
                 for p in Preset::ALL {
                     ui.selectable_value(&mut self.preset, p, p.label());
                 }
             });
-            ui.add_space(14.0);
+            ui.add_space(10.0);
             let hint = if self.tab == Tab::Screens {
                 "Весь звук компьютера, кроме голосов из Murmur"
             } else {
                 "Только звук выбранного приложения (музыка и Discord в других окнах не попадут)"
             };
             ui.checkbox(&mut self.audio, RichText::new("Передавать звук").size(13.0)).on_hover_text(hint);
+            if self.tab == Tab::Screens && self.audio {
+                let r = ui
+                    .add(egui::Label::new(RichText::new(crate::audio_exclude_ui::link_text(self.exclude.len())).size(12.5).color(t::p().text_muted)).sense(Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Звук каких программ не передавать (например, обработки микрофона)");
+                self.exclude_link = Some(r.rect);
+                if r.clicked() {
+                    self.exclude_open = !self.exclude_open;
+                }
+            } else {
+                self.exclude_open = false;
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if self.switching { "Переключить" } else { "Начать трансляцию" };
                 let chosen = self.selected.and_then(|id| self.sources.as_ref()?.iter().find(|s| s.id == id));
-                if kit::button_wide(ui, kit::ButtonKind::Primary, label, 210.0, chosen.is_some()).clicked()
+                if kit::button_wide(ui, kit::ButtonKind::Primary, label, 190.0, chosen.is_some()).clicked()
                     && let Some(s) = chosen {
                         out = Some(Action::Start { source: s.id, title: s.title.clone(), width: s.width, height: s.height, preset: self.preset, audio: self.audio });
                     }

@@ -6,6 +6,7 @@ mod anim;
 mod anim_img;
 mod banner;
 mod api;
+mod audio_exclude_ui;
 mod app;
 mod autosave;
 mod camera;

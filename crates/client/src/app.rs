@@ -168,7 +168,7 @@ const SET_TABS: [(SetTab, &str, &str, &str, &str); 7] = [
     (SetTab::Profile, "ПОЛЬЗОВАТЕЛЬ", "Профиль", "Как вас видят другие", "аватар имя отображаемое о себе активность игра личные сообщения"),
     (SetTab::Account, "ПОЛЬЗОВАТЕЛЬ", "Аккаунт", "Логин, пароль, сеансы и удаление", "логин сервер пароль сеансы выйти"),
     (SetTab::Voice, "ПРИЛОЖЕНИЕ", "Голос и видео", "Устройства, микрофон и шумоподавление", "микрофон вывод звука наушники проверка рация голосом порог чувствительность шумоподавление эхоподавление громкость"),
-    (SetTab::Stream, "ПРИЛОЖЕНИЕ", "Стрим экрана", "Качество, кодировщик, звук и окно в окне", "трансляция качество разрешение кадры звук"),
+    (SetTab::Stream, "ПРИЛОЖЕНИЕ", "Стрим экрана", "Качество, кодировщик, звук и окно в окне", "трансляция качество разрешение кадры звук исключить программы не включать"),
     (SetTab::Hotkeys, "ПРИЛОЖЕНИЕ", "Горячие клавиши", "Работают, даже когда окно свёрнуто", "клавиша рация сочетание"),
     (SetTab::Look, "ПРИЛОЖЕНИЕ", "Внешний вид", "Тема, анимации и звуки интерфейса", "тема тёмная светлая анимации индикатор речи пинг плитки кот звуки"),
     (SetTab::Notify, "ПРИЛОЖЕНИЕ", "Уведомления", "Сообщения, звонки, трей и обновления", "уведомления toast мигание значок не беспокоить упоминания звонок трей автозапуск windows обновления версия"),
@@ -267,6 +267,8 @@ pub struct App {
     mic_playback: bool,
     /// Пикер источника трансляции.
     picker: Option<Picker>,
+    /// Программы со звуком для списка «Не включать в звук трансляции» (настройки).
+    audio_apps: crate::audio_exclude_ui::AudioApps,
     /// Кадры просматриваемых трансляций.
     video: VideoHub,
     /// Трансляция в «большом виде» (identity); `None` — сетка.
@@ -395,6 +397,7 @@ impl App {
         let mut settings = Settings::load();
         let (pip_panel, pip_window) = (settings.pip_panel, settings.pip_window);
         crate::stream::set_prefs(settings.stream_encoder, settings.stream_bitrate_mbps);
+        crate::stream::set_audio_exclude(settings.stream_audio_exclude.clone());
         // Отладка: MURMUR_THEME=dark|light — тема для скриншотов (не сохраняется).
         #[cfg(debug_assertions)]
         match std::env::var("MURMUR_THEME").as_deref() {
@@ -517,6 +520,7 @@ impl App {
             mic_level: Arc::new(AtomicU32::new(0)),
             mic_playback: false,
             picker: None,
+            audio_apps: Default::default(),
             video,
             focus: None,
             fullscreen: false,
@@ -2130,7 +2134,15 @@ impl App {
         let current = vs.stream.as_ref().map(|s| s.source);
         let preset = vs.stream.as_ref().map(|s| s.preset).unwrap_or(self.settings.stream_preset);
         let audio = vs.stream.as_ref().map(|s| s.audio != voice::AudioStatus::Off).unwrap_or(self.settings.stream_audio);
-        self.picker = Some(Picker::open(&self.ctx, preset, audio, current));
+        self.picker = Some(Picker::open(&self.ctx, preset, audio, current, self.settings.stream_audio_exclude.clone()));
+        // отладка (скриншоты): MURMUR_OPEN_EXCLUDE=1 — сразу открыть список «Не включать в звук трансляции»
+        #[cfg(debug_assertions)]
+        if let Ok(v) = std::env::var("MURMUR_OPEN_EXCLUDE")
+            && let Some(p) = &mut self.picker
+        {
+            // =link — только вкладка «Экраны» со ссылкой, без всплывающего окна
+            p.debug_open_exclude(v != "link");
+        }
     }
 
     fn ui_picker(&mut self, ui: &mut Ui, vs: &VoiceState) {
@@ -2142,6 +2154,12 @@ impl App {
         match p.ui(ui.ctx()) {
             picker::Action::None => {}
             picker::Action::Cancel => self.picker = None,
+            picker::Action::Exclude(list) => self.set_stream_exclude(list),
+            picker::Action::OpenStreamSettings => {
+                self.picker = None;
+                self.set_tab = SetTab::Stream;
+                self.open_settings();
+            }
             picker::Action::Start { source, title, width, height, preset, audio } => {
                 self.settings.stream_preset = preset;
                 self.settings.stream_audio = audio;
@@ -4275,6 +4293,12 @@ impl App {
         }
     }
 
+    fn set_stream_exclude(&mut self, list: Vec<String>) {
+        self.settings.stream_audio_exclude = crate::stream::normalize_exclude(list);
+        self.settings.save();
+        crate::stream::set_audio_exclude(self.settings.stream_audio_exclude.clone());
+    }
+
     fn open_settings(&mut self) {
         self.settings_open = true;
         self.voice.send(Cmd::RefreshDevices);
@@ -4764,6 +4788,21 @@ impl App {
                 self.settings.save();
             }
         });
+        if audio {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Не включать в звук трансляции").font(t::semibold(14.0)));
+            ui.label(
+                RichText::new("Только для трансляции экрана: звук этих программ не услышат зрители — например, программы, которая обрабатывает ваш микрофон. Меняется сразу, даже во время стрима.")
+                    .size(12.5)
+                    .color(t::p().text_muted),
+            );
+            ui.add_space(4.0);
+            let mut list = self.settings.stream_audio_exclude.clone();
+            if crate::audio_exclude_ui::exclude_list(ui, &mut self.audio_apps, &mut list, w) {
+                self.set_stream_exclude(list);
+            }
+            ui.add_space(6.0);
+        }
         // Кодировщик и битрейт — на следующий запуск трансляции
         let mut enc = self.settings.stream_encoder;
         let live = vs.stream.as_ref().map(|s| s.backend.clone());

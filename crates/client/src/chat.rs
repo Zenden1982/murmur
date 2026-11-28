@@ -82,6 +82,8 @@ struct Outgoing {
     content: String,
     sticker: Option<String>,
     images: Vec<PendingImage>,
+    /// Гифка из поиска: скачивается нашим сервером (с Klipy) уже при отправке.
+    gif: Option<String>,
     state: OutState,
 }
 
@@ -626,6 +628,7 @@ impl Chat {
             content,
             sticker: None,
             images: std::mem::take(&mut d.images),
+            gif: None,
             state: OutState::Sending,
         };
         self.next_local += 1;
@@ -642,10 +645,17 @@ impl Chat {
         let content = out.content.clone();
         let sticker = out.sticker.clone();
         let files: Vec<(Arc<Vec<u8>>, String, bool)> = out.images.iter().map(|i| (i.bytes.clone(), i.name.clone(), i.thumb.is_none())).collect();
+        let gif = out.gif.clone();
         let local = out.local;
         self.spawn(
             async move {
-                let mut attachments = Vec::with_capacity(files.len());
+                let mut attachments = Vec::with_capacity(files.len() + 1);
+                if let Some(url) = gif {
+                    let bytes = api.gif_media(&url).await?;
+                    let bad = |message: String| ApiError { code: "gif".into(), message, detail: String::new() };
+                    let p = tokio::task::spawn_blocking(move || prepare(bytes)).await.map_err(|e| bad(e.to_string()))?.map_err(bad)?;
+                    attachments.push(api.upload(p.bytes, &p.name, false).await?.id);
+                }
                 for (bytes, name, file) in files {
                     attachments.push(api.upload((*bytes).clone(), &name, file).await?.id);
                 }
@@ -657,7 +667,7 @@ impl Chat {
 
     /// Отправить стикер (подпись — для старых клиентов).
     fn send_sticker(&mut self, channel: i64, id: &str) {
-        let out = Outgoing { local: self.next_local, content: crate::reactions::fallback(id), sticker: Some(id.to_string()), images: Vec::new(), state: OutState::Sending };
+        let out = Outgoing { local: self.next_local, content: crate::reactions::fallback(id), sticker: Some(id.to_string()), images: Vec::new(), gif: None, state: OutState::Sending };
         self.next_local += 1;
         self.spawn_send(channel, &out);
         let log = self.logs.entry(channel).or_default();
@@ -886,17 +896,14 @@ impl Chat {
         }
     }
 
-    /// Выбранную гифку скачивает наш сервер (с Klipy); дальше — обычное вложение, уйдёт с сообщением.
-    fn attach_gif(&self, channel: i64, url: String) {
-        let (api, tx, ctx) = (self.api.clone(), self.tx.clone(), self.ctx.clone());
-        self.rt.spawn(async move {
-            let res = match api.gif_media(&url).await {
-                Ok(bytes) => tokio::task::spawn_blocking(move || prepare(bytes)).await.unwrap_or_else(|e| Err(e.to_string())),
-                Err(e) => Err(e.message),
-            };
-            let _ = tx.send(Ev::Attach { channel, res: vec![res] });
-            ctx.request_repaint();
-        });
+    /// Гифка из поиска уходит сразу отдельным сообщением; черновик (текст, вложения) не трогается.
+    fn send_gif(&mut self, channel: i64, url: String) {
+        let out = Outgoing { local: self.next_local, content: String::new(), sticker: None, images: Vec::new(), gif: Some(url), state: OutState::Sending };
+        self.next_local += 1;
+        self.spawn_send(channel, &out);
+        let log = self.logs.entry(channel).or_default();
+        log.outbox.push(out);
+        log.scroll_to_bottom = true;
     }
 
     fn request_image(&mut self, id: i64) {
@@ -1706,9 +1713,12 @@ impl Chat {
         if self.gif_menu && let Some(a) = gif_anchor {
             match self.gif_picker.show(ui.ctx(), Id::new("gif-menu"), pos2(a.left(), a.top() - 8.0), Align2::LEFT_BOTTOM, a) {
                 crate::gif_picker::GifOut::Picked(item) => {
-                    self.attach_gif(ch.id, item.gif);
-                    self.gif_menu = false;
-                    ui.memory_mut(|m| m.request_focus(id));
+                    self.send_gif(ch.id, item.gif);
+                    // Shift+клик — панель остаётся открытой (несколько гифок подряд)
+                    if !ui.input(|i| i.modifiers.shift) {
+                        self.gif_menu = false;
+                        ui.memory_mut(|m| m.request_focus(id));
+                    }
                 }
                 crate::gif_picker::GifOut::Close => self.gif_menu = false,
                 crate::gif_picker::GifOut::None => {}
@@ -1974,7 +1984,7 @@ fn outgoing_row(ui: &mut Ui, o: &Outgoing) -> Option<FeedAct> {
                 match &o.state {
                     OutState::Sending => {
                         ui.add(egui::Spinner::new().size(12.0).color(t::p().text_muted));
-                        ui.label(RichText::new(if o.images.is_empty() { "отправка…" } else { "загрузка вложений…" }).size(12.0).color(t::p().text_muted));
+                        ui.label(RichText::new(if o.gif.is_some() { "отправка GIF…" } else if o.images.is_empty() { "отправка…" } else { "загрузка вложений…" }).size(12.0).color(t::p().text_muted));
                     }
                     OutState::Failed(e) => {
                         ui.label(RichText::new(format!("{}  Не отправлено: {e}", ph::WARNING_CIRCLE)).size(12.5).color(t::p().danger_text));

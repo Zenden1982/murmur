@@ -516,7 +516,7 @@ struct Streaming {
 
 /// Звук трансляции: источник живёт дольше публикации (переподключение), захват меняется со сменой окна.
 struct StreamSound {
-    capture: Option<capture_win::AppAudio>,
+    capture: Option<stream::StreamAudioCapture>,
     source: NativeAudioSource,
     publication: Option<LocalTrackPublication>,
 }
@@ -1711,7 +1711,13 @@ impl Engine {
                         Err(e) => log::error!("публикация звука трансляции: {e}"),
                     }
                 }
-                AudioStatus::On(if source.is_window() { "звук приложения" } else { "весь звук, кроме Murmur" })
+                AudioStatus::On(if source.is_window() {
+                    "звук приложения"
+                } else if stream::audio_exclude().is_empty() {
+                    "весь звук, кроме Murmur"
+                } else {
+                    "весь звук, кроме Murmur и выбранных программ"
+                })
             }
             Err(e) => {
                 log::error!("звук трансляции: {e}");

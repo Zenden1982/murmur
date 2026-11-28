@@ -146,6 +146,8 @@ pub struct Settings {
     pub stream_preset: Preset,
     /// Передавать звук окна/системы в трансляции.
     pub stream_audio: bool,
+    /// Программы (имя exe в нижнем регистре), чей звук не идёт в трансляцию экрана.
+    pub stream_audio_exclude: Vec<String>,
     /// Чем кодировать трансляцию (применяется при следующем запуске трансляции).
     pub stream_encoder: crate::stream::EncoderPref,
     /// Ручной потолок битрейта трансляции, Мбит/с; None — «Авто» (по пресету).
@@ -230,6 +232,7 @@ impl Default for Settings {
             user_muted: HashMap::new(),
             stream_preset: Preset::default(),
             stream_audio: true,
+            stream_audio_exclude: Vec::new(),
             stream_encoder: crate::stream::EncoderPref::Auto,
             stream_bitrate_mbps: None,
             pip_auto: true,
@@ -373,6 +376,12 @@ mod tests {
         // не объект / мусор — по умолчанию
         assert_eq!(Settings::lenient(b"[1,2]").session_token, None);
         assert_eq!(Settings::lenient(b"not json").session_token, None);
+    }
+
+    #[test]
+    fn settings_old_file_has_empty_exclude() {
+        let s: Settings = serde_json::from_str(r#"{"stream_audio":true}"#).unwrap();
+        assert!(s.stream_audio_exclude.is_empty());
     }
 
     #[test]

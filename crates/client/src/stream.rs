@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use capture_win::hw::{EncodedSink, HwCapture};
-use capture_win::{AppAudio, AudioSink, AudioTarget, Capture, CaptureConfig, Event, I420Buffer, Sink, SourceId, app_audio};
+use capture_win::{AppAudio, AudioSink, AudioTarget, ScreenAudio, Capture, CaptureConfig, Event, I420Buffer, Sink, SourceId, app_audio};
 use livekit::options::{AudioEncoding, TrackPublishOptions, VideoCodec, VideoEncoderBackend, VideoEncoding};
 use livekit::webrtc::audio_frame::AudioFrame;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
@@ -433,16 +433,64 @@ impl AudioSink for LkAudioSink {
     }
 }
 
-/// Запуск захвата звука для источника трансляции (окно → его приложение, экран → всё, кроме Amadeus).
-pub fn start_audio(id: SourceId, source: &NativeAudioSource) -> Result<AppAudio, String> {
-    let target = AudioTarget::for_source(id).ok_or("не удалось определить процесс окна")?;
+/// Программы, чей звук не идёт в трансляцию экрана (меняется на лету: захват перечитывает раз в секунду).
+static AUDIO_EXCLUDE: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Имя exe без пути, в нижнем регистре, без пустых и повторов.
+pub fn normalize_exclude(list: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in list {
+        let s = s.trim();
+        let name = s.rsplit(['\\', '/']).next().unwrap_or(s).trim().to_lowercase();
+        if !name.is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+pub fn set_audio_exclude(list: Vec<String>) {
+    *AUDIO_EXCLUDE.write().unwrap_or_else(|e| e.into_inner()) = normalize_exclude(list);
+}
+
+pub fn audio_exclude() -> Vec<String> {
+    AUDIO_EXCLUDE.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Идущий захват звука трансляции: окно — одно приложение, экран — всё, кроме Murmur и исключённых.
+pub enum StreamAudioCapture {
+    App(AppAudio),
+    Screen(ScreenAudio),
+}
+
+impl StreamAudioCapture {
+    pub fn stop(self) {
+        match self {
+            StreamAudioCapture::App(c) => c.stop(),
+            StreamAudioCapture::Screen(c) => c.stop(),
+        }
+    }
+}
+
+/// Запуск захвата звука для источника трансляции (окно → его приложение, экран → всё, кроме Murmur и исключённых).
+pub fn start_audio(id: SourceId, source: &NativeAudioSource) -> Result<StreamAudioCapture, String> {
     let sink = Arc::new(LkAudioSink { source: source.clone(), errors: Default::default() });
-    AppAudio::start(target, sink)
+    if id.is_window() {
+        let target = AudioTarget::for_source(id).ok_or("не удалось определить процесс окна")?;
+        AppAudio::start(target, sink).map(StreamAudioCapture::App)
+    } else {
+        ScreenAudio::start(Arc::new(audio_exclude), sink).map(StreamAudioCapture::Screen)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclude_list_normalized() {
+        assert_eq!(normalize_exclude(vec!["Sonar.EXE".into(), "sonar.exe".into(), " ".into(), "C:\\x\\Voice.exe".into()]), vec!["sonar.exe", "voice.exe"]);
+    }
 
     #[test]
     fn manual_bitrate_replaces_preset_cap() {

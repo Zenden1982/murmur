@@ -24,7 +24,17 @@ impl AudioSink for Rec {
 fn main() {
     env_logger_init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // apps — программы со звуковыми сессиями; screen <exe,exe|-> — звук экрана без этих программ (ScreenAudio)
+    if args.first().map(String::as_str) == Some("apps") {
+        for a in capture_win::audio_sessions::audio_apps() {
+            println!("{:<40} pid {:>6}  {}", a.exe, a.pid, if a.active { "играет" } else { "" });
+        }
+        return;
+    }
+    let screen: Option<Vec<String>> = (args.first().map(String::as_str) == Some("screen"))
+        .then(|| args.get(1).filter(|s| *s != "-").map(|s| s.split(',').map(|x| x.trim().to_lowercase()).collect()).unwrap_or_default());
     let target = match args.first().map(String::as_str) {
+        Some("screen") => AudioTarget::AllExcept(0),
         Some("pid") => AudioTarget::App(args[1].parse().expect("PID")),
         Some("all") => AudioTarget::for_source(SourceId::Monitor(0)).unwrap(),
         Some("except") => AudioTarget::AllExcept(args[1].parse().expect("PID")),
@@ -44,7 +54,17 @@ fn main() {
     let out = rest.get(1).cloned();
     println!("цель: {target:?}, {secs} с");
     let rec = Arc::new(Rec::default());
-    let cap = AppAudio::start(target, rec.clone()).expect("старт захвата");
+    let cap: Box<dyn FnOnce()> = match screen {
+        Some(ex) => {
+            println!("исключено: {ex:?}");
+            let c = capture_win::ScreenAudio::start(std::sync::Arc::new(move || ex.clone()), rec.clone()).expect("старт захвата");
+            Box::new(move || c.stop())
+        }
+        None => {
+            let c = AppAudio::start(target, rec.clone()).expect("старт захвата");
+            Box::new(move || c.stop())
+        }
+    };
     let mut last = 0;
     for s in 1..=secs {
         std::thread::sleep(Duration::from_secs(1));
@@ -55,7 +75,7 @@ fn main() {
         println!("{s:>3} с: кадров {:>4}, rms {rms:>8.1}, пик {peak}", chunk.len() / (app_audio::FRAME * 2));
         last = v.len();
     }
-    cap.stop();
+    cap();
     let v = rec.samples.lock().unwrap();
     println!("всего: {:.2} с звука за {secs} с", v.len() as f64 / 2.0 / 48000.0);
     if let Some(p) = out {
